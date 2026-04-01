@@ -5,6 +5,14 @@ description = "Efficient Interior Point Method solvers for convex optimization"
 authors = [{ name = "Bob Wilson", email = "bob.wilson@convexanalytics.com" }]
 requires-python = ">=3.11,<4"
 readme = "README.md"
+license = { file = "LICENSE.txt" }
+keywords = ["optimization", "interior-point", "convex", "newton"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Intended Audience :: Science/Research",
+]
 dependencies = [
     "numpy>=2.2.5,<3",
     "scipy>=1.15.2,<2",
