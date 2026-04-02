@@ -134,6 +134,7 @@ from .linear_programs import (
 )
 from .numerical_helpers import (
     solve_arrow_sparsity_pattern,
+    solve_banded,
     solve_block_plus_one,
     solve_diagonal,
     solve_diagonal_eta_inverse,
@@ -189,6 +190,7 @@ __all__ = [
     "SevereCurvatureError",
     "UnconstrainedNewtonSolver",
     "solve_arrow_sparsity_pattern",
+    "solve_banded",
     "solve_block_plus_one",
     "solve_diagonal",
     "solve_diagonal_eta_inverse",

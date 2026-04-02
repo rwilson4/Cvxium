@@ -546,6 +546,73 @@ def solve_arrow_sparsity_pattern(
     return x
 
 
+def solve_banded(
+    b: npt.NDArray[np.float64],
+    ab: npt.NDArray[np.float64],
+    lower: bool = False,
+) -> npt.NDArray[np.float64]:
+    """Solve H * x = b.
+
+    Solves a linear system of equations where H is a symmetric positive-definite banded
+    matrix stored in the compact banded form used by ``scipy.linalg.cholesky_banded``.
+
+    Parameters
+    ----------
+     b : npt.NDArray[np.float64]
+        Right hand side. Can be either a vector or a matrix, in which case we solve the
+        system for each column of b.
+     ab : npt.NDArray[np.float64]
+        Banded storage of the symmetric positive-definite matrix H, shape ``(p+1, n)``
+        where ``n`` is the matrix order and ``p`` is the number of super-diagonals
+        (when ``lower=False``) or sub-diagonals (when ``lower=True``).
+        If ``lower=False`` (default): ``ab[i, j] = H[j - p + i, j]`` for valid indices.
+        If ``lower=True``: ``ab[i, j] = H[j + i, j]`` for valid indices.
+        To convert a dense symmetric matrix H with bandwidth p to upper banded form::
+
+            ab = np.zeros((p + 1, n))
+            for d in range(p + 1):
+                ab[p - d, d:] = np.diag(H, d)
+
+        To convert to lower banded form::
+
+            ab = np.zeros((p + 1, n))
+            for d in range(p + 1):
+                ab[d, : n - d] = np.diag(H, -d)
+
+     lower : bool, optional
+        Whether ``ab`` stores the lower (``True``) or upper (``False``, default)
+        triangular band.
+
+    Returns
+    -------
+     x : npt.NDArray[np.float64]
+        The solution.
+
+    Notes
+    -----
+    Uses ``scipy.linalg.cholesky_banded`` to compute the Cholesky factorization of H,
+    then ``scipy.linalg.cho_solve_banded`` to solve each right-hand side.  For a matrix
+    of order ``n`` with bandwidth ``p``, factorization costs O(n * p^2) and each solve
+    costs O(n * p), compared with O(n^3) and O(n^2) for the dense case.
+
+    """
+    if b.ndim not in (1, 2):
+        raise ValueError("b must be either a 1D or 2D NumPy array.")
+
+    n = ab.shape[1]
+    if b.shape[0] != n:
+        raise ValueError(
+            f"Dimension mismatch: b has {b.shape[0]} rows but ab implies n={n}."
+        )
+
+    try:
+        cb = linalg.cholesky_banded(ab, lower=lower)
+    except np.linalg.LinAlgError:
+        raise NewtonStepError("Hessian is not strictly positive definite.") from None
+
+    return linalg.cho_solve_banded((cb, lower), b)
+
+
 def solve_kkt_system(
     A: npt.NDArray[np.float64],
     g: npt.NDArray[np.float64],
