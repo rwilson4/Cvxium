@@ -1,6 +1,6 @@
 [project]
 name = "cvxium"
-version = "0.1.0"
+version = "0.2.0"
 description = "Efficient Interior Point Method solvers for convex optimization"
 authors = [{ name = "Bob Wilson", email = "bob.wilson@convexanalytics.com" }]
 requires-python = ">=3.11,<4"
