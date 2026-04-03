@@ -3,11 +3,13 @@
 import time
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 from scipy import linalg
 
 from cvxium.numerical_helpers import (
     solve_arrow_sparsity_pattern,
+    solve_banded,
     solve_block_plus_one,
     solve_diagonal,
     solve_kkt_system,
@@ -745,3 +747,102 @@ def test_solve_kkt_system_hessian_diagonal_plus_rank_one_rank_deficient(
 
     # Verify A * delta_w = 0
     np.testing.assert_allclose(lhs_bot, rhs_bot, rtol=1e-8, atol=1e-8)
+
+
+def _make_spd_banded(
+    n: int, p: int, rng: np.random.RandomState
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Return (H, ab_upper, ab_lower) for a random SPD banded matrix.
+
+    H is the dense n-by-n matrix.  ab_upper and ab_lower are the upper and lower
+    banded storage forms accepted by scipy.linalg.cholesky_banded.
+    """
+    # Build a banded lower-triangular factor L, then H = L @ L^T
+    L = np.zeros((n, n))
+    for i in range(n):
+        L[i, i] = rng.rand() + 1.0
+        for k in range(1, min(p + 1, i + 1)):
+            L[i, i - k] = rng.randn() * 0.3
+    H = L @ L.T
+
+    # Upper banded form: ab_upper[p - d, d:] = diag(H, d)
+    ab_upper = np.zeros((p + 1, n))
+    for d in range(p + 1):
+        ab_upper[p - d, d:] = np.diag(H, d)
+
+    # Lower banded form: ab_lower[d, :n - d] = diag(H, -d)
+    ab_lower = np.zeros((p + 1, n))
+    for d in range(p + 1):
+        ab_lower[d, : n - d] = np.diag(H, -d)
+
+    return H, ab_upper, ab_lower
+
+
+@pytest.mark.parametrize(
+    "seed,M,p",
+    [
+        (117, 100, 3),
+        (217, 200, 5),
+        (317, 50, 2),
+        (417, 500, 10),
+        (517, 13, 2),
+    ],
+)
+def test_solve_banded(seed: int, M: int, p: int) -> None:
+    """Test solving H*x = b for a banded SPD matrix (single RHS)."""
+    rng = np.random.RandomState(seed)
+    H, ab_upper, ab_lower = _make_spd_banded(M, p, rng)
+    b = rng.randn(M)
+
+    st = time.time()
+    x_expected = np.linalg.solve(H, b)
+    mt = time.time()
+    x_upper = solve_banded(b, ab_upper, lower=False)
+    et = time.time()
+    x_lower = solve_banded(b, ab_lower, lower=True)
+    ft = time.time()
+
+    print(f"Slow way completed in {1e6 * (mt - st):.03f} us")
+    print(f"Fast way (upper) completed in {1e6 * (et - mt):.03f} us")
+    print(f"Fast way (lower) completed in {1e6 * (ft - et):.03f} us")
+
+    np.testing.assert_allclose(x_upper, x_expected, rtol=1e-8, atol=1e-8)
+    np.testing.assert_allclose(x_lower, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H*x = b
+    np.testing.assert_allclose(H @ x_upper, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M,p,q",
+    [
+        (118, 100, 3, 20),
+        (218, 200, 5, 30),
+        (318, 50, 2, 5),
+        (418, 500, 10, 100),
+        (518, 13, 2, 3),
+    ],
+)
+def test_solve_banded_multiple_rhs(seed: int, M: int, p: int, q: int) -> None:
+    """Test solving H*x = B for a banded SPD matrix (multiple RHS)."""
+    rng = np.random.RandomState(seed)
+    H, ab_upper, ab_lower = _make_spd_banded(M, p, rng)
+    b = rng.randn(M, q)
+
+    st = time.time()
+    x_expected = np.linalg.solve(H, b)
+    mt = time.time()
+    x_upper = solve_banded(b, ab_upper, lower=False)
+    et = time.time()
+    x_lower = solve_banded(b, ab_lower, lower=True)
+    ft = time.time()
+
+    print(f"Slow way completed in {1e3 * (mt - st):.03f} ms")
+    print(f"Fast way (upper) completed in {1e3 * (et - mt):.03f} ms")
+    print(f"Fast way (lower) completed in {1e3 * (ft - et):.03f} ms")
+
+    np.testing.assert_allclose(x_upper, x_expected, rtol=1e-8, atol=1e-8)
+    np.testing.assert_allclose(x_lower, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H*x = b
+    np.testing.assert_allclose(H @ x_upper, b, rtol=1e-8, atol=1e-8)
