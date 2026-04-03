@@ -3,7 +3,13 @@
 This file provides guidance to Claude Code (claude.ai/code) when
 working with code in this repository. It explains how to *modify*
 this code. For guidance on how to *use* this library in
-applications, see USAGE.md.
+applications, see USAGE.md. When Cvxium is installed, agents can
+retrieve USAGE.md at runtime:
+
+```python
+import cvxium
+cvxium.usage()
+```
 
 ## What is Cvxium?
 

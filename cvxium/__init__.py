@@ -116,6 +116,9 @@ References
 
 """
 
+import pathlib
+from importlib.resources import files as _resource_files
+
 from .exceptions import (
     BacktrackingLineSearchError,
     CenteringStepError,
@@ -164,6 +167,20 @@ from .quadratic_programs import (
     QuadraticProgramEqualityBoundsSolver,
 )
 
+
+def usage() -> None:
+    """Print USAGE.md to stdout."""
+    try:
+        text = _resource_files("cvxium").joinpath("USAGE.md").read_text(
+            encoding="utf-8"
+        )
+    except FileNotFoundError:
+        text = (pathlib.Path(__file__).parent.parent / "USAGE.md").read_text(
+            encoding="utf-8"
+        )
+    print(text)
+
+
 __all__ = [
     "BacktrackingLineSearchError",
     "CenteringStepError",
@@ -202,4 +219,5 @@ __all__ = [
     "solve_rank_one_update",
     "solve_rank_p_update",
     "solve_with_schur",
+    "usage",
 ]

@@ -38,6 +38,17 @@ Or with [uv](https://docs.astral.sh/uv/):
 uv add cvxium
 ```
 
+## Usage documentation
+
+Full usage documentation (aimed at agents and developers implementing
+new solvers) is available at [USAGE.md](USAGE.md) and can be retrieved
+at runtime:
+
+```python
+import cvxium
+cvxium.usage()
+```
+
 ## Quick start: ready-made solvers
 
 For the most common problem types, Cvxium ships concrete solvers that
