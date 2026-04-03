@@ -171,8 +171,8 @@ from .quadratic_programs import (
 def usage() -> None:
     """Print USAGE.md to stdout."""
     try:
-        text = _resource_files("cvxium").joinpath("USAGE.md").read_text(
-            encoding="utf-8"
+        text = (
+            _resource_files("cvxium").joinpath("USAGE.md").read_text(encoding="utf-8")
         )
     except FileNotFoundError:
         text = (pathlib.Path(__file__).parent.parent / "USAGE.md").read_text(
