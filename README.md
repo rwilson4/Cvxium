@@ -1,5 +1,7 @@
 # Cvxium
 
+[![CI](https://github.com/rwilson4/Cvxium/actions/workflows/ci.yml/badge.svg)](https://github.com/rwilson4/Cvxium/actions/workflows/ci.yml)
+
 Cvxium (pronounced "Calcium") is a Python framework for building fast
 Interior Point Method (IPM) solvers for convex optimization problems of
 the form:
