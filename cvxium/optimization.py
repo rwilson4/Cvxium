@@ -462,8 +462,8 @@ class BaseInteriorPointMethodSolver(Optimizer):
                 )
 
             x = result.solution
-            equality_multipliers = result.equality_multipliers  # type: ignore[assignment]
-            inequality_multipliers = result.inequality_multipliers  # type: ignore[assignment]
+            equality_multipliers = result.equality_multipliers
+            inequality_multipliers = result.inequality_multipliers
             inner_nits.append(result.nits)
             inner_suboptimalities.append(result.suboptimalities)
             duality_gaps.append(result.objective_value - result.dual_value)
