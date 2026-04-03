@@ -16,6 +16,7 @@ from .numerical_helpers import (
 )
 from .optimization import (
     EqualityConstrainedInteriorPointMethodSolver,
+    EqualityConstrainedNewtonSolver,
     InteriorPointMethodResult,
     InteriorPointMethodSolver,
     OptimizationSettings,
@@ -54,6 +55,79 @@ class QuadraticNewtonSolver(UnconstrainedNewtonSolver):
         self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]
     ) -> npt.NDArray[np.float64]:
         return self.Q @ y
+
+
+class QuadraticEqualityConstrainedNewtonSolver(EqualityConstrainedNewtonSolver):
+    r"""Solve min 0.5 * x^T Q x + c^T x subject to A x = b, where Q is PD.
+
+    Optimal solution satisfies the KKT conditions:
+        Q x* + c + A^T nu* = 0
+        A x* = b.
+    """
+
+    def __init__(
+        self,
+        Q: npt.NDArray[np.float64],
+        c: npt.NDArray[np.float64],
+        A: npt.NDArray[np.float64],
+        b: npt.NDArray[np.float64],
+        settings: OptimizationSettings | None = None,
+    ) -> None:
+        super().__init__(settings=settings)
+        self.Q = Q
+        self.c = c
+        self._A = A
+        self._b = b
+        self._Q_factor = linalg.cho_factor(Q)
+
+    @property
+    def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
+        """Equality constraint matrix."""
+        return self._A
+
+    @property
+    def b(self) -> npt.NDArray[np.float64]:
+        """Equality constraint right-hand side."""
+        return self._b
+
+    def newton_step(
+        self, x: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Solve the KKT system via the Schur complement."""
+        return solve_kkt_system(
+            A=self._A,
+            g=-(self.Q @ x + self.c),
+            hessian_solve=lambda rhs: linalg.cho_solve(self._Q_factor, rhs),
+        )
+
+    def evaluate_objective(self, x: npt.NDArray[np.float64]) -> float:
+        return float(0.5 * x @ self.Q @ x + self.c @ x)
+
+    def gradient(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        return self.Q @ x + self.c
+
+    def hessian_vector_product(
+        self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        return self.Q @ y
+
+    def evaluate_dual(
+        self,
+        lmbda: npt.NDArray[np.float64],
+        nu: npt.NDArray[np.float64],
+        x_star: npt.NDArray[np.float64],
+    ) -> float:
+        r"""Evaluate the Lagrangian dual function g(nu).
+
+        The Lagrangian is L(x, nu) = 0.5 x^T Q x + c^T x + nu^T (A x - b).
+        Minimizing over x gives x*(nu) = -Q^{-1}(c + A^T nu), and:
+
+            g(nu) = -0.5 (c + A^T nu)^T Q^{-1} (c + A^T nu) - nu^T b.
+
+        """
+        v = self.c + self._A.T @ nu
+        Q_inv_v = linalg.cho_solve(self._Q_factor, v)
+        return float(-0.5 * np.dot(v, Q_inv_v) - np.dot(self._b, nu))
 
 
 def _callable_has_structured_params(fn: Callable[..., Any] | None) -> bool:

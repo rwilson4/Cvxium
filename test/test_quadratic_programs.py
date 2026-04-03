@@ -9,6 +9,7 @@ from scipy import linalg, optimize
 
 from cvxium import NewtonResult
 from cvxium.quadratic_programs import (
+    QuadraticEqualityConstrainedNewtonSolver,
     QuadraticNewtonSolver,
     QuadraticProgramEqualityBoundsSolver,
 )
@@ -585,3 +586,72 @@ class TestStructuredQCallables:
         )
         np.testing.assert_allclose(A @ result_fast.solution, b, atol=1e-5)
         assert np.all(result_fast.solution >= xl - 1e-6)
+
+
+@pytest.mark.parametrize(
+    "seed,n,p",
+    [
+        (701, 5, 2),
+        (801, 10, 3),
+        (901, 20, 5),
+        (1101, 50, 10),
+        (1201, 100, 20),
+    ],
+)
+def test_equality_constrained_newton_quadratic(seed: int, n: int, p: int) -> None:
+    """EqualityConstrainedNewtonSolver finds the exact KKT point of a quadratic in one step."""
+    rng = np.random.default_rng(seed)
+
+    # Q = B^T B + I ensures strict positive definiteness.
+    B = rng.standard_normal((n, n))
+    Q = B.T @ B + np.eye(n)
+    c = rng.standard_normal(n)
+
+    # Build a feasible starting point x0 satisfying A x0 = b.
+    A = rng.standard_normal((p, n))
+    x0 = rng.standard_normal(n)
+    b = A @ x0
+
+    # Expected solution via direct KKT solve:
+    #   [ Q    A^T ] [ x*  ]   [ -c ]
+    #   [ A     0  ] [ nu* ] = [  b ]
+    KKT = np.block([[Q, A.T], [A, np.zeros((p, p))]])
+    rhs = np.concatenate([-c, b])
+    sol = linalg.solve(KKT, rhs)
+    x_star_expected = sol[:n]
+
+    solver = QuadraticEqualityConstrainedNewtonSolver(Q=Q, c=c, A=A, b=b)
+    result = solver.solve(x0=x0)
+
+    assert isinstance(result, NewtonResult)
+    np.testing.assert_allclose(result.solution, x_star_expected, rtol=1e-6, atol=1e-8)
+    np.testing.assert_allclose(A @ result.solution, b, atol=1e-8)
+    # Newton's method is exact for quadratics: one step reaches the optimum.
+    assert result.nits == 2
+
+
+@pytest.mark.parametrize(
+    "seed,n,p",
+    [
+        (2101, 10, 3),
+        (2201, 20, 5),
+        (2301, 50, 10),
+    ],
+)
+def test_equality_constrained_newton_quadratic_dual(seed: int, n: int, p: int) -> None:
+    """Dual value equals primal at the KKT point (zero duality gap)."""
+    rng = np.random.default_rng(seed)
+
+    B = rng.standard_normal((n, n))
+    Q = B.T @ B + np.eye(n)
+    c = rng.standard_normal(n)
+
+    A = rng.standard_normal((p, n))
+    x0 = rng.standard_normal(n)
+    b = A @ x0
+
+    solver = QuadraticEqualityConstrainedNewtonSolver(Q=Q, c=c, A=A, b=b)
+    result = solver.solve(x0=x0)
+
+    # At the KKT point, strong duality holds: dual = primal.
+    assert abs(result.objective_value - result.dual_value) < 1e-6

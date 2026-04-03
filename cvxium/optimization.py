@@ -1356,3 +1356,151 @@ class UnconstrainedNewtonSolver(BaseInteriorPointMethodSolver):
     ) -> float:
         """Dual equals primal for unconstrained problems."""
         return self.evaluate_objective(x_star)
+
+
+class EqualityConstrainedNewtonSolver(BaseInteriorPointMethodSolver):
+    """Newton's method for equality-constrained problems (A x = b, no inequality constraints).
+
+    The barrier parameter is irrelevant without inequality constraints, so the outer IPM
+    loop is skipped entirely. Instead, Newton's method is applied directly to the
+    equality-constrained problem, computing each Newton step by solving the KKT system
+    rather than just the Hessian equation.
+
+    Usage
+    -----
+    Subclass this and implement:
+    - A: equality constraint matrix (p x n)
+    - b: equality constraint right-hand side (p,)
+    - newton_step: solve KKT system, return (delta_x, nu)
+    - evaluate_objective: f0(x)
+    - gradient: grad f0(x)
+    - hessian_vector_product: H(x) @ y
+
+    """
+
+    def __init__(
+        self,
+        settings: OptimizationSettings | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize solver."""
+        super().__init__(phase1_solver=None, settings=settings, **kwargs)
+
+    @abstractproperty
+    def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
+        """Equality constraint matrix (p x n)."""
+
+    @abstractproperty
+    def b(self) -> npt.NDArray[np.float64]:
+        """Right-hand side of equality constraints (p,)."""
+
+    @property
+    def num_eq_constraints(self) -> int:
+        """Number of equality constraints."""
+        return len(self.b)
+
+    @property
+    def num_ineq_constraints(self) -> int:
+        """No inequality constraints."""
+        return 0
+
+    def solve(
+        self,
+        x0: npt.NDArray[np.float64] | None = None,
+        fully_optimize: bool = False,
+        **kwargs: Any,
+    ) -> NewtonResult:
+        """Solve equality-constrained problem using Newton's method.
+
+        Skips the outer barrier loop entirely and runs Newton's method once.
+
+        Parameters
+        ----------
+         x0 : vector
+            Initial guess. Should satisfy A x0 = b.
+         fully_optimize : bool
+            Unused; present for API compatibility with base class.
+
+        Returns
+        -------
+         res : NewtonResult
+
+        """
+        if x0 is None:
+            raise ValueError("Initial guess x0 is required.")
+        return self.centering_step(x0, t=1.0, last_step=True, fully_optimize=True)
+
+    def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
+        """All points are feasible (no inequality constraints)."""
+        return True
+
+    def constraints(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """No inequality constraints."""
+        return np.zeros(0)
+
+    def grad_constraints(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """No inequality constraints."""
+        return np.zeros((0, x.size))
+
+    def btls_keep_feasible(
+        self, x: npt.NDArray[np.float64], delta_x: npt.NDArray[np.float64]
+    ) -> float:
+        """No inequality constraints to maintain feasibility for; any step size is valid."""
+        return np.inf
+
+    @abstractmethod
+    def newton_step(
+        self, x: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        r"""Solve the KKT system and return (delta_x, nu).
+
+        Solves:
+
+           | H(x)   A^T | | delta_x |   | -grad_f0(x) |
+           |  A      0  | |   nu    | = |      0      |
+
+        Parameters
+        ----------
+         x : vector
+            Current iterate.
+
+        Returns
+        -------
+         delta_x : vector
+            Newton step for the primal variable.
+         nu : vector
+            Lagrange multipliers for the equality constraints.
+
+        """
+
+    @abstractmethod
+    def hessian_vector_product(
+        self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Compute H(x) @ y."""
+
+    def calculate_newton_step(
+        self,
+        x: npt.NDArray[np.float64],
+        t: float,
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Newton step via KKT system; t is unused (always 1, no barrier)."""
+        return self.newton_step(x)
+
+    def hessian_multiply(
+        self,
+        x: npt.NDArray[np.float64],
+        t: float,
+        y: npt.NDArray[np.float64],
+    ) -> npt.NDArray[np.float64]:
+        """Compute H(x) @ y; t is unused (always 1, no barrier)."""
+        return self.hessian_vector_product(x, y)
+
+    def evaluate_dual(
+        self,
+        lmbda: npt.NDArray[np.float64],
+        nu: npt.NDArray[np.float64],
+        x_star: npt.NDArray[np.float64],
+    ) -> float:
+        """Dual equals primal at optimality (strong duality, no inequality constraints)."""
+        return self.evaluate_objective(x_star)
