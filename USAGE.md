@@ -152,7 +152,7 @@ the class(es) specified.
 | Constraints           | Optimization                                                             | Feasibility                                                              |
 |-----------------------|--------------------------------------------------------------------------|--------------------------------------------------------------------------|
 | None                  | UnconstrainedNewtonSolver                                                | n/a                                                                      |
-| Equality              | (missing, future work)                                                   | EqualitySolver                                                           |
+| Equality              | EqualityConstrainedNewtonSolver                                          | EqualitySolver                                                           |
 | Inequality            | InteriorPointMethodSolver                                                | PhaseIInteriorPointSolver                                                |
 | Equality + Inequality | InteriorPointMethodSolver + EqualityConstrainedInteriorPointMethodSolver | PhaseIInteriorPointSolver + EqualityConstrainedInteriorPointMethodSolver |
 
