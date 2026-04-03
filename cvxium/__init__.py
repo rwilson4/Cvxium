@@ -145,6 +145,7 @@ from .numerical_helpers import (
 )
 from .optimization import (
     EqualityConstrainedInteriorPointMethodSolver,
+    EqualityConstrainedNewtonSolver,
     InteriorPointMethodResult,
     InteriorPointMethodSolver,
     NewtonResult,
@@ -158,6 +159,7 @@ from .optimization import (
     UnconstrainedNewtonSolver,
 )
 from .quadratic_programs import (
+    QuadraticEqualityConstrainedNewtonSolver,
     QuadraticNewtonSolver,
     QuadraticProgramEqualityBoundsSolver,
 )
@@ -167,6 +169,7 @@ __all__ = [
     "CenteringStepError",
     "ConstraintBoundaryError",
     "EqualityConstrainedInteriorPointMethodSolver",
+    "EqualityConstrainedNewtonSolver",
     "EqualitySolver",
     "EqualityWithBoundsAndImbalanceConstraintSolver",
     "EqualityWithBoundsSolver",
@@ -185,6 +188,7 @@ __all__ = [
     "ProblemCertifiablyInfeasibleError",
     "ProblemInfeasibleError",
     "ProblemMarginallyFeasibleError",
+    "QuadraticEqualityConstrainedNewtonSolver",
     "QuadraticNewtonSolver",
     "QuadraticProgramEqualityBoundsSolver",
     "SevereCurvatureError",
