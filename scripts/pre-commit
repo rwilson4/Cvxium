@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -e
+
+echo "--- black ---"
+uv run python -m black --check cvxium/ test/
+
+echo "--- ruff ---"
+uv run python -m ruff check cvxium/ test/
+
+echo "--- mypy ---"
+uv run python -m mypy
+
+echo "--- pytest ---"
+uv run python -m pytest

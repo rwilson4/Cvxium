@@ -23,6 +23,14 @@ diagonal-plus-low-rank, arrow sparsity) to achieve linear-time Newton
 steps instead of cubic-time, yielding orders-of-magnitude speedups on
 large problems.
 
+## Setup
+
+After cloning, install the pre-commit hook:
+
+```bash
+cp scripts/pre-commit .git/hooks/pre-commit
+```
+
 ## Build and Test
 
 ```bash
