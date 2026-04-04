@@ -36,10 +36,10 @@ essence of the Interior Point Method.
 
 Solving such problems typically requires a strictly feasible point, x0, satisfying
 A * x0 = b and fi(x0) < 0, i=1, ..., n. Finding a strictly feasible point is sometimes
-called a Phase I method, which itself often involves solving a convex optimization
+called finding a feasible point, which itself often involves solving a convex optimization
 problem. The code defines an InteriorPointMethodSolver class and a
-PhaseIInteriorPointMethodSolver class; the main difference is that once a
-PhaseIInteriorPointMethodSolver finds a feasible point, we can stop without "optimizing
+FeasibilityInteriorPointSolver class; the main difference is that once a
+FeasibilityInteriorPointSolver finds a feasible point, we can stop without "optimizing
 fully".
 
 There is also an EqualityConstrainedInteriorPointMethodSolver intended to be used
@@ -94,7 +94,7 @@ of these methods warrant further discussion.
     update to an arrow sparsity pattern. By properly nesting these helpers, we can avoid
     cubic run times.
 - evaluate_dual
-  - This function is especially important for Phase I Solvers, since the dual problem
+  - This function is especially important for FeasibilitySolvers, since the dual problem
     can identify when a problem is infeasible. The Lagrangian is:
       L(x, nu, lambda) = f0(x) + \sum_{j=1}^m nu_j * hj(x)
                                + \sum_{i=1}^n lambda_i * fj(x).
@@ -155,8 +155,8 @@ from .optimization import (
     OptimizationResult,
     OptimizationSettings,
     Optimizer,
-    PhaseIInteriorPointSolver,
-    PhaseISolver,
+    FeasibilityInteriorPointSolver,
+    FeasibilitySolver,
     ProblemCertifiablyInfeasibleError,
     ProblemMarginallyFeasibleError,
     UnconstrainedNewtonSolver,
@@ -200,8 +200,8 @@ __all__ = [
     "OptimizationResult",
     "OptimizationSettings",
     "Optimizer",
-    "PhaseIInteriorPointSolver",
-    "PhaseISolver",
+    "FeasibilityInteriorPointSolver",
+    "FeasibilitySolver",
     "ProblemCertifiablyInfeasibleError",
     "ProblemInfeasibleError",
     "ProblemMarginallyFeasibleError",

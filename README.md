@@ -56,8 +56,8 @@ require no subclassing.
 
 ### Find x satisfying Ax = b, x ≥ lb
 
-`EqualityWithBoundsSolver` finds a feasible point (Phase I) and, if
-requested, minimizes `‖x‖₂²` subject to the constraints (Phase II):
+`EqualityWithBoundsSolver` finds a feasible point and, if
+requested, minimizes `‖x‖₂²` subject to the constraints:
 
 ```python
 import numpy as np
@@ -70,12 +70,12 @@ lb = 0.01
 
 solver = EqualityWithBoundsSolver(A=A, b=b, lb=lb)
 
-# Phase I: find any strictly feasible point
+# Feasibility: find any strictly feasible point
 result = solver.solve()
 assert np.all(result.solution > lb)
 assert np.allclose(A @ result.solution, b)
 
-# Phase II: minimize ‖x‖₂²
+# Optimize: minimize ‖x‖₂²
 result = solver.solve(fully_optimize=True)
 ```
 
@@ -179,10 +179,10 @@ Optimizer (ABC)
 ├── InteriorPointMethodSolver
 │   └── EqualityConstrainedInteriorPointMethodSolver
 │       └── EqualityWithBoundsSolver  (concrete)
-└── PhaseISolver
+└── FeasibilitySolver
     ├── EqualitySolver  (concrete, SVD-based)
-    └── PhaseIInteriorPointSolver
-        └── EqualityWithBoundsSolver  (also concrete Phase I)
+    └── FeasibilityInteriorPointSolver
+        └── EqualityWithBoundsSolver  (also concrete feasibility solver)
 ```
 
 To implement a new solver, subclass
@@ -198,7 +198,7 @@ To implement a new solver, subclass
 | `hessian_multiply(x, t, y)` | Return H(x, t) @ y |
 | `constraints(x)` | Return vector of fi(x) values (must be < 0 strictly inside feasible region) |
 | `grad_constraints(x)` | Return matrix of constraint Jacobians |
-| `evaluate_dual(lmbda, nu, x_star)` | Evaluate the dual function; critical for Phase I infeasibility detection |
+| `evaluate_dual(lmbda, nu, x_star)` | Evaluate the dual function; critical for infeasibility detection |
 
 ### Optional overrides (for performance)
 

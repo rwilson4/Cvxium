@@ -185,7 +185,7 @@ class InteriorPointMethodResult(OptimizationResult):
     inner_suboptimalities: list[list[float]]
     status: Literal[0, 1, 2]
     message: str
-    phase1_res: OptimizationResult | None = None
+    feasibility_res: OptimizationResult | None = None
 
     def plot_convergence(self, ax: Axes | None = None) -> Axes:
         """Plot convergence."""
@@ -251,12 +251,12 @@ class Optimizer(ABC):
 
     def __init__(
         self,
-        phase1_solver: "PhaseISolver | None" = None,
+        feasibility_solver: "FeasibilitySolver | None" = None,
         settings: OptimizationSettings | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize optimizer."""
-        self.phase1_solver = phase1_solver
+        self.feasibility_solver = feasibility_solver
         if settings is None:
             self.settings: OptimizationSettings = OptimizationSettings()
         else:
@@ -291,8 +291,8 @@ class Optimizer(ABC):
         """
 
 
-class PhaseISolver(Optimizer):
-    """Base class for a PhaseISolver."""
+class FeasibilitySolver(Optimizer):
+    """Base class for a FeasibilitySolver."""
 
     @abstractmethod
     def solve(
@@ -324,12 +324,12 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
     def __init__(
         self,
-        phase1_solver: "PhaseISolver | None" = None,
+        feasibility_solver: "FeasibilitySolver | None" = None,
         settings: OptimizationSettings | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize optimizer."""
-        self.phase1_solver = phase1_solver
+        self.feasibility_solver = feasibility_solver
         if settings is None:
             self.settings: OptimizationSettings = OptimizationSettings()
         else:
@@ -353,10 +353,10 @@ class BaseInteriorPointMethodSolver(Optimizer):
         ----------
          x0 : vector
             Initial guess, intended to be feasible for some of the constraints, allowing
-            the Phase I method to focus on a particular set of constraints. See Notes.
+            the feasibility solver to focus on a particular set of constraints. See Notes.
          fully_optimize : bool
             Interpretation differs for InteriorPointMethodSolver and
-            PhaseIInteriorPointSolver instances.
+            FeasibilityInteriorPointSolver instances.
 
         Returns
         -------
@@ -365,21 +365,21 @@ class BaseInteriorPointMethodSolver(Optimizer):
             a feasible point and other helpful info.
 
         """
-        if self.phase1_solver is None:
-            raise ValueError("PhaseISolver not specified.")
+        if self.feasibility_solver is None:
+            raise ValueError("FeasibilitySolver not specified.")
 
-        # The nested Phase I Solver should return x such that A * x = b and fi(x) < 0,
+        # The nested feasibility solver should return x such that A * x = b and fi(x) < 0,
         # i=1, ..., M.
-        phase1_res = self.phase1_solver.solve(x0=x0, **kwargs)
-        x = self.augment_previous_solution(phase1_res)
+        feasibility_res = self.feasibility_solver.solve(x0=x0, **kwargs)
+        x = self.augment_previous_solution(feasibility_res)
 
-        # Applicable only for Phase I methods.
+        # Applicable only for feasibility solvers.
         if not fully_optimize and self.is_feasible(x):
             if self.settings.verbose:
                 print(
-                    f"  Phase I solution was feasible so we're done ({self.__class__.__name__})"
+                    f"  Feasibility solution was feasible so we're done ({self.__class__.__name__})"
                 )
-            return phase1_res
+            return feasibility_res
 
         t = self.initialize_barrier_parameter(x0=x)
         num_steps = (
@@ -468,7 +468,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
             inner_suboptimalities.append(result.suboptimalities)
             duality_gaps.append(result.objective_value - result.dual_value)
 
-            # Applicable only for Phase I methods.
+            # Applicable only for feasibility solvers.
             if not fully_optimize and self.is_feasible(x):
                 status = 2
                 message = "Feasibility method successfully found a feasible point"
@@ -480,7 +480,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
                 break
 
             # Dual can provide certificate of infeasibility, in which case we can quit
-            # faster. Applicably only for Phase I methods.
+            # faster. Applicable only for feasibility solvers.
             if not fully_optimize:
                 self.check_for_infeasibility(result)
 
@@ -494,7 +494,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
                 f" ({self.__class__.__name__})"
             )
 
-        # Applicable only for Phase I methods.
+        # Applicable only for feasibility solvers.
         if not fully_optimize and not self.is_feasible(x):
             raise ProblemMarginallyFeasibleError(
                 message=(
@@ -524,16 +524,16 @@ class BaseInteriorPointMethodSolver(Optimizer):
             inner_suboptimalities=inner_suboptimalities,
             status=status,
             message=message,
-            phase1_res=phase1_res,
+            feasibility_res=feasibility_res,
         )
 
     def augment_previous_solution(
         self,
-        phase1_res: OptimizationResult,
+        feasibility_res: OptimizationResult,
         **kwargs: Any,
     ) -> npt.NDArray[np.float64]:
-        """Initialize variable based on Phase I result."""
-        return phase1_res.solution
+        """Initialize variable based on feasibility result."""
+        return feasibility_res.solution
 
     def finalize_solution(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         """De-augment solution."""
@@ -710,7 +710,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
                     f"expected improvement = {expected_improvement}"
                 )
 
-            # Applicable only for Phase I methods.
+            # Applicable only for feasibility solvers.
             if not fully_optimize and self.is_feasible(x + btls_s * delta_x):
                 nu_star = nu_hat / t
                 lambda_star = self.inequality_multipliers(
@@ -1032,10 +1032,10 @@ class InteriorPointMethodSolver(BaseInteriorPointMethodSolver):
         Parameters
         ----------
          x0 : vector
-            Initial guess. If infeasible, a Phase I method will be used to find a
+            Initial guess. If infeasible, a feasibility solver will be used to find a
             feasible point.
          fully_optimize : bool
-            Placeholder for Phase I methods. Doesn't do anything here.
+            Placeholder for feasibility solvers. Doesn't do anything here.
 
         Returns
         -------
@@ -1052,22 +1052,22 @@ class InteriorPointMethodSolver(BaseInteriorPointMethodSolver):
         return res
 
 
-class PhaseIInteriorPointSolver(BaseInteriorPointMethodSolver, PhaseISolver):
-    """Base class for a Phase I solver that uses an Interior Point Method.
+class FeasibilityInteriorPointSolver(BaseInteriorPointMethodSolver, FeasibilitySolver):
+    """Base class for a feasibility solver that uses an Interior Point Method.
 
-    The main distinction is that a Phase I solver can terminate as soon as a feasible
+    The main distinction is that a feasibility solver can terminate as soon as a feasible
     point is found.
 
     """
 
     def __init__(
         self,
-        phase1_solver: "PhaseISolver | None" = None,
+        feasibility_solver: "FeasibilitySolver | None" = None,
         settings: OptimizationSettings | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize optimizer."""
-        super().__init__(phase1_solver=phase1_solver, settings=settings, **kwargs)
+        super().__init__(feasibility_solver=feasibility_solver, settings=settings, **kwargs)
 
     def solve(
         self,
@@ -1088,7 +1088,7 @@ class PhaseIInteriorPointSolver(BaseInteriorPointMethodSolver, PhaseISolver):
         ----------
          x0 : vector
             Initial guess, intended to be feasible for some of the constraints, allowing
-            the Phase I method to focus on a particular set of constraints. See Notes.
+            the feasibility solver to focus on a particular set of constraints. See Notes.
          fully_optimize : bool
             If True, solve the underlying problem to full precision. Otherwise, return a
             feasible point as soon as we find one. See Notes.
@@ -1265,7 +1265,7 @@ class UnconstrainedNewtonSolver(BaseInteriorPointMethodSolver):
         **kwargs: Any,
     ) -> None:
         """Initialize solver."""
-        super().__init__(phase1_solver=None, settings=settings, **kwargs)
+        super().__init__(feasibility_solver=None, settings=settings, **kwargs)
 
     @property
     def num_eq_constraints(self) -> int:
@@ -1384,7 +1384,7 @@ class EqualityConstrainedNewtonSolver(BaseInteriorPointMethodSolver):
         **kwargs: Any,
     ) -> None:
         """Initialize solver."""
-        super().__init__(phase1_solver=None, settings=settings, **kwargs)
+        super().__init__(feasibility_solver=None, settings=settings, **kwargs)
 
     @abstractproperty
     def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
