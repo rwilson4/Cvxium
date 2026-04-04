@@ -209,12 +209,12 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
 
     Parameters
     ----------
-     feasibility_solver : EqualitySolver, optional
-        This class requires a feasibility solver for the equality constraints, and there are
+     phase1_solver : EqualitySolver, optional
+        This class requires a Phase I solver for the equality constraints, and there are
         two ways of generating this. The user can either pass an EqualitySolver, or pass
         A and b and an EqualitySolver will be initialized.
      A, b : npt.NDArray
-        Equality constraints: A * x = b. Required when feasibility_solver is None.
+        Equality constraints: A * x = b. Required when phase1_solver is None.
      lb : float or list[float], optional
         Lower bound on elements of x. Defaults to 0.
      settings : OptimizationSettings
@@ -224,17 +224,17 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
 
     def __init__(
         self,
-        feasibility_solver: EqualitySolver | None = None,
+        phase1_solver: EqualitySolver | None = None,
         A: npt.NDArray[np.float64] | None = None,
         b: npt.NDArray[np.float64] | None = None,
         lb: float | list[float] | npt.NDArray[np.float64] = 0.0,
         settings: OptimizationSettings | None = None,
     ) -> None:
-        if feasibility_solver is not None:
-            super().__init__(feasibility_solver=feasibility_solver, settings=settings)
+        if phase1_solver is not None:
+            super().__init__(phase1_solver=phase1_solver, settings=settings)
         elif A is not None and b is not None:
             super().__init__(
-                feasibility_solver=EqualitySolver(A, b, settings=settings), settings=settings
+                phase1_solver=EqualitySolver(A, b, settings=settings), settings=settings
             )
         else:
             raise ValueError("Must specify `A` and `b`.")
@@ -260,24 +260,24 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
     @property
     def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
         """Wrap A."""
-        if self.feasibility_solver is None:
+        if self.phase1_solver is None:
             raise ValueError("FeasibilitySolver not specified.")
 
-        if not isinstance(self.feasibility_solver, EqualitySolver):
+        if not isinstance(self.phase1_solver, EqualitySolver):
             raise ValueError("FeasibilitySolver must be an EqualitySolver.")
 
-        return self.feasibility_solver.A
+        return self.phase1_solver.A
 
     @property
     def b(self) -> npt.NDArray[np.float64]:
         """Wrap b."""
-        if self.feasibility_solver is None:
+        if self.phase1_solver is None:
             raise ValueError("FeasibilitySolver not specified.")
 
-        if not isinstance(self.feasibility_solver, EqualitySolver):
+        if not isinstance(self.phase1_solver, EqualitySolver):
             raise ValueError("FeasibilitySolver must be an EqualitySolver.")
 
-        return self.feasibility_solver.b
+        return self.phase1_solver.b
 
     def svd_A(  # noqa: N802
         self,
@@ -287,13 +287,13 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
         npt.NDArray[np.float32 | np.float64],
     ]:
         """Calculate and cache SVD of A."""
-        if self.feasibility_solver is None:
-            raise ValueError("feasibility_solver is required.")
+        if self.phase1_solver is None:
+            raise ValueError("phase1_solver is required.")
 
-        if not isinstance(self.feasibility_solver, EqualitySolver):
-            raise ValueError("feasibility_solver must be an EqualitySolver")
+        if not isinstance(self.phase1_solver, EqualitySolver):
+            raise ValueError("phase1_solver must be an EqualitySolver")
 
-        return self.feasibility_solver.svd_A()
+        return self.phase1_solver.svd_A()
 
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
         """Determine whether a feasible point has been found."""
@@ -312,14 +312,14 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
 
     def augment_previous_solution(
         self,
-        feasibility_res: OptimizationResult,
+        phase1_res: OptimizationResult,
         **kwargs: Any,
     ) -> npt.NDArray[np.float64]:
-        """Initialize variable based on feasibility result."""
-        x = np.zeros((len(feasibility_res.solution) + 1,))
-        x[0 : self.dimension] = feasibility_res.solution
+        """Initialize variable based on Phase I result."""
+        x = np.zeros((len(phase1_res.solution) + 1,))
+        x[0 : self.dimension] = phase1_res.solution
         eps = 1.0
-        x[self.dimension] = np.max(self.lb - feasibility_res.solution) + eps
+        x[self.dimension] = np.max(self.lb - phase1_res.solution) + eps
         self.s0_plus_eps = x[self.dimension] + eps
         return x
 
@@ -770,13 +770,13 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
         Parameters for imbalance constraints.
      psi : float or list[float], optional
         Parameters for imbalance constraints.
-     feasibility_solver : EqualityWithBoundsSolver, optional
-        This class requires a feasibility solver for the equality and bounds constraints,
+     phase1_solver : EqualityWithBoundsSolver, optional
+        This class requires a Phase I solver for the equality and bounds constraints,
         and there are two ways of generating this. The user can either pass an
         EqualityWithBoundsSolver or pass A, b, and lb, and a FeasibilitySolver will be
         initialized.
      A, b : npt.NDArray
-        Equality constraints: A * x = b. Required when feasibility_solver is None.
+        Equality constraints: A * x = b. Required when phase1_solver is None.
      lb : float or list[float], optional
         Lower bound on elements of x. Defaults to 0.
      settings : OptimizationSettings
@@ -789,17 +789,17 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
         B: npt.NDArray[np.float64],
         c: npt.NDArray[np.float64],
         psi: float | list[float] | npt.NDArray[np.float64],
-        feasibility_solver: EqualityWithBoundsSolver | None = None,
+        phase1_solver: EqualityWithBoundsSolver | None = None,
         A: npt.NDArray[np.float64] | None = None,
         b: npt.NDArray[np.float64] | None = None,
         lb: float | list[float] | npt.NDArray[np.float64] = 0.0,
         settings: OptimizationSettings | None = None,
     ) -> None:
-        if feasibility_solver is not None:
-            super().__init__(feasibility_solver=feasibility_solver, settings=settings)
+        if phase1_solver is not None:
+            super().__init__(phase1_solver=phase1_solver, settings=settings)
         elif A is not None and b is not None:
             super().__init__(
-                feasibility_solver=EqualityWithBoundsSolver(
+                phase1_solver=EqualityWithBoundsSolver(
                     A=A,
                     b=b,
                     lb=lb,
@@ -832,24 +832,24 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
     @property
     def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
         """Wrap A."""
-        if self.feasibility_solver is None:
+        if self.phase1_solver is None:
             raise ValueError("FeasibilitySolver not specified.")
 
-        if not isinstance(self.feasibility_solver, EqualityWithBoundsSolver):
+        if not isinstance(self.phase1_solver, EqualityWithBoundsSolver):
             raise ValueError("FeasibilitySolver must be an EqualityWithBoundsSolver.")
 
-        return self.feasibility_solver.A
+        return self.phase1_solver.A
 
     @property
     def b(self) -> npt.NDArray[np.float64]:
         """Wrap b."""
-        if self.feasibility_solver is None:
+        if self.phase1_solver is None:
             raise ValueError("FeasibilitySolver not specified.")
 
-        if not isinstance(self.feasibility_solver, EqualityWithBoundsSolver):
+        if not isinstance(self.phase1_solver, EqualityWithBoundsSolver):
             raise ValueError("FeasibilitySolver must be an EqualityWithBoundsSolver.")
 
-        return self.feasibility_solver.b
+        return self.phase1_solver.b
 
     def svd_A(  # noqa: N802
         self,
@@ -859,24 +859,24 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
         npt.NDArray[np.float32 | np.float64],
     ]:
         """Calculate and cache SVD of A."""
-        if self.feasibility_solver is None:
-            raise ValueError("feasibility_solver is required.")
+        if self.phase1_solver is None:
+            raise ValueError("phase1_solver is required.")
 
-        if not isinstance(self.feasibility_solver, EqualityWithBoundsSolver):
-            raise ValueError("feasibility_solver must be an EqualityWithBoundsSolver")
+        if not isinstance(self.phase1_solver, EqualityWithBoundsSolver):
+            raise ValueError("phase1_solver must be an EqualityWithBoundsSolver")
 
-        return self.feasibility_solver.svd_A()
+        return self.phase1_solver.svd_A()
 
     @property
     def lb(self) -> float | list[float] | npt.NDArray[np.float64]:
         """Wrap lb."""
-        if self.feasibility_solver is None:
+        if self.phase1_solver is None:
             raise ValueError("FeasibilitySolver not specified.")
 
-        if not isinstance(self.feasibility_solver, EqualityWithBoundsSolver):
+        if not isinstance(self.phase1_solver, EqualityWithBoundsSolver):
             raise ValueError("FeasibilitySolver must be an EqualityWithBoundsSolver.")
 
-        return self.feasibility_solver.lb
+        return self.phase1_solver.lb
 
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
         """Determine whether a feasible point has been found."""
@@ -895,17 +895,17 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
 
     def augment_previous_solution(
         self,
-        feasibility_res: OptimizationResult,
+        phase1_res: OptimizationResult,
         **kwargs: Any,
     ) -> npt.NDArray[np.float64]:
-        """Initialize variable based on feasibility result."""
-        x = np.zeros((len(feasibility_res.solution) + 1,))
-        x[0 : self.dimension] = feasibility_res.solution
+        """Initialize variable based on Phase I result."""
+        x = np.zeros((len(phase1_res.solution) + 1,))
+        x[0 : self.dimension] = phase1_res.solution
         eps = 1.0
         x[self.dimension] = (
             max(
-                np.max(self.B @ feasibility_res.solution - self.c - self.psi),
-                np.max(-(self.B @ feasibility_res.solution - self.c) - self.psi),
+                np.max(self.B @ phase1_res.solution - self.c - self.psi),
+                np.max(-(self.B @ phase1_res.solution - self.c) - self.psi),
             )
             + eps
         )

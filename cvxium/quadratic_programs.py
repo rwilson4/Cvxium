@@ -278,8 +278,8 @@ class QuadraticProgramEqualityBoundsSolver(
             Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]] | None
         ) = None,
     ) -> None:
-        feasibility_solver = EqualityWithBoundsSolver(A=A, b=b, lb=xl, settings=settings)
-        super().__init__(feasibility_solver=feasibility_solver, settings=settings)
+        phase1_solver = EqualityWithBoundsSolver(A=A, b=b, lb=xl, settings=settings)
+        super().__init__(phase1_solver=phase1_solver, settings=settings)
         self.Q = Q
         self.c = c
         self._A = A
