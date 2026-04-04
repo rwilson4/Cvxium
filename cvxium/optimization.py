@@ -114,7 +114,7 @@ class NewtonResult(OptimizationResult):
           0 : method completed successfully
           1 : method failed to converge to the desired tolerance, but achieved an
               acceptable tolerance
-          2 : feasibility method successfully found a feasible point
+          2 : Phase I method successfully found a feasible point
      message : str
           Summary of result.
 
@@ -168,7 +168,7 @@ class InteriorPointMethodResult(OptimizationResult):
           0 : method completed successfully
           1 : method failed to converge to the desired tolerance, but achieved an
               acceptable tolerance
-          2 : feasibility method successfully found a feasible point
+          2 : Phase I method successfully found a feasible point
      message : str
           Summary of result.
 
@@ -251,7 +251,7 @@ class Optimizer(ABC):
 
     def __init__(
         self,
-        phase1_solver: "PhaseISolver | None" = None,
+        phase1_solver: "FeasibilitySolver | None" = None,
         settings: OptimizationSettings | None = None,
         **kwargs: Any,
     ) -> None:
@@ -291,8 +291,8 @@ class Optimizer(ABC):
         """
 
 
-class PhaseISolver(Optimizer):
-    """Base class for a PhaseISolver."""
+class FeasibilitySolver(Optimizer):
+    """Base class for a FeasibilitySolver."""
 
     @abstractmethod
     def solve(
@@ -324,7 +324,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
     def __init__(
         self,
-        phase1_solver: "PhaseISolver | None" = None,
+        phase1_solver: "FeasibilitySolver | None" = None,
         settings: OptimizationSettings | None = None,
         **kwargs: Any,
     ) -> None:
@@ -353,10 +353,10 @@ class BaseInteriorPointMethodSolver(Optimizer):
         ----------
          x0 : vector
             Initial guess, intended to be feasible for some of the constraints, allowing
-            the Phase I method to focus on a particular set of constraints. See Notes.
+            the Phase I solver to focus on a particular set of constraints. See Notes.
          fully_optimize : bool
             Interpretation differs for InteriorPointMethodSolver and
-            PhaseIInteriorPointSolver instances.
+            FeasibilityInteriorPointSolver instances.
 
         Returns
         -------
@@ -366,9 +366,9 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
         """
         if self.phase1_solver is None:
-            raise ValueError("PhaseISolver not specified.")
+            raise ValueError("FeasibilitySolver not specified.")
 
-        # The nested Phase I Solver should return x such that A * x = b and fi(x) < 0,
+        # The nested Phase I solver should return x such that A * x = b and fi(x) < 0,
         # i=1, ..., M.
         phase1_res = self.phase1_solver.solve(x0=x0, **kwargs)
         x = self.augment_previous_solution(phase1_res)
@@ -480,7 +480,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
                 break
 
             # Dual can provide certificate of infeasibility, in which case we can quit
-            # faster. Applicably only for Phase I methods.
+            # faster. Applicable only for Phase I methods.
             if not fully_optimize:
                 self.check_for_infeasibility(result)
 
@@ -1032,7 +1032,7 @@ class InteriorPointMethodSolver(BaseInteriorPointMethodSolver):
         Parameters
         ----------
          x0 : vector
-            Initial guess. If infeasible, a Phase I method will be used to find a
+            Initial guess. If infeasible, a Phase I solver will be used to find a
             feasible point.
          fully_optimize : bool
             Placeholder for Phase I methods. Doesn't do anything here.
@@ -1052,17 +1052,17 @@ class InteriorPointMethodSolver(BaseInteriorPointMethodSolver):
         return res
 
 
-class PhaseIInteriorPointSolver(BaseInteriorPointMethodSolver, PhaseISolver):
-    """Base class for a Phase I solver that uses an Interior Point Method.
+class FeasibilityInteriorPointSolver(BaseInteriorPointMethodSolver, FeasibilitySolver):
+    """Base class for a feasibility solver that uses an Interior Point Method.
 
-    The main distinction is that a Phase I solver can terminate as soon as a feasible
+    The main distinction is that a feasibility solver can terminate as soon as a feasible
     point is found.
 
     """
 
     def __init__(
         self,
-        phase1_solver: "PhaseISolver | None" = None,
+        phase1_solver: "FeasibilitySolver | None" = None,
         settings: OptimizationSettings | None = None,
         **kwargs: Any,
     ) -> None:
@@ -1088,7 +1088,7 @@ class PhaseIInteriorPointSolver(BaseInteriorPointMethodSolver, PhaseISolver):
         ----------
          x0 : vector
             Initial guess, intended to be feasible for some of the constraints, allowing
-            the Phase I method to focus on a particular set of constraints. See Notes.
+            the Phase I solver to focus on a particular set of constraints. See Notes.
          fully_optimize : bool
             If True, solve the underlying problem to full precision. Otherwise, return a
             feasible point as soon as we find one. See Notes.

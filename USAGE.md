@@ -153,8 +153,8 @@ the class(es) specified.
 |-----------------------|--------------------------------------------------------------------------|--------------------------------------------------------------------------|
 | None                  | UnconstrainedNewtonSolver                                                | n/a                                                                      |
 | Equality              | EqualityConstrainedNewtonSolver                                          | EqualitySolver                                                           |
-| Inequality            | InteriorPointMethodSolver                                                | PhaseIInteriorPointSolver                                                |
-| Equality + Inequality | InteriorPointMethodSolver + EqualityConstrainedInteriorPointMethodSolver | PhaseIInteriorPointSolver + EqualityConstrainedInteriorPointMethodSolver |
+| Inequality            | InteriorPointMethodSolver                                                | FeasibilityInteriorPointSolver                                                |
+| Equality + Inequality | InteriorPointMethodSolver + EqualityConstrainedInteriorPointMethodSolver | FeasibilityInteriorPointSolver + EqualityConstrainedInteriorPointMethodSolver |
 
 Depending on what kind of solver you're creating, you'll need to
 implement some or all of:
@@ -184,14 +184,14 @@ the Cvxium code: it will probably be slower than scipy, but that's
 before we have incorporated any special structure that makes Cvxium
 shine.
 
-### 2a. Dude, you need a PhaseISolver.
-For optimization problems with constraints, you need a "Phase I
-solver" that can find a feasible point. It's turtles all the way down;
-Cvxium can be used to create fast Phase I solvers. Still, you may want
-to implement the stack in pieces, using scipy.optimize for the Phase I
-method as an initial implementation, get good test cases in place, and
+### 2a. Dude, you need a FeasibilitySolver.
+For optimization problems with constraints, you need a feasibility
+solver that can find a feasible point. It's turtles all the way down;
+Cvxium can be used to create fast feasibility solvers. Still, you may want
+to implement the stack in pieces, using scipy.optimize for the feasibility
+solver as an initial implementation, get good test cases in place, and
 then implement a Cvxium version. It's often helpful to apply
-constraints in layers, to chain Phase I solvers.
+constraints in layers, to chain feasibility solvers.
 
 ## 3. Construction-time precomputation
 
@@ -201,7 +201,7 @@ Expensive work that does not depend on the iterate `x` or barrier parameter
 | Precomputation                    | Where                                       | Cost   |
 |-----------------------------------|---------------------------------------------|--------|
 | Matrix factorizations: `U_r, s_r` | `__init__`                                  | O(p²n) |
-| Phase I feasible point            | `__init__` (via `EqualityWithBoundsSolver`) | O(p²n) |
+| Feasibility point                 | `__init__` (via `EqualityWithBoundsSolver`) | O(p²n) |
 
 ## 4. Exploit special structure in the...
 
@@ -348,7 +348,7 @@ that this path does not trigger computation that is only needed by
 6. **Exploit special structure to speed up key methods.** Use
    functions in numerical_helpers.py. Re-test and re-time.
 7. **Initialize the barrier parameter.** Re-test and re-time.
-8. **Implement Phase I Solver(s) in Cvxium.** Re-test and re-time.
+8. **Implement FeasibilitySolver(s) in Cvxium.** Re-test and re-time.
 9. **Evaluate full Cvxium implementation against ground truth.** Enjoy
    your orders-of-magnitude speed improvements, especially on large
    problem sizes!

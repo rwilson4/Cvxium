@@ -17,16 +17,16 @@ from .numerical_helpers import (
 )
 from .optimization import (
     EqualityConstrainedInteriorPointMethodSolver,
+    FeasibilityInteriorPointSolver,
+    FeasibilitySolver,
     NewtonResult,
     OptimizationResult,
     OptimizationSettings,
-    PhaseIInteriorPointSolver,
-    PhaseISolver,
     ProblemCertifiablyInfeasibleError,
 )
 
 
-class EqualitySolver(PhaseISolver):
+class EqualitySolver(FeasibilitySolver):
     """Find x satisfying A * x = b."""
 
     def __init__(
@@ -187,7 +187,7 @@ class EqualitySolver(PhaseISolver):
         return Vh.T, s, QU.T
 
 
-class EqualityWithBoundsSolver(PhaseIInteriorPointSolver):
+class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
     r"""Find x satisfying A * x = b and x > lb.
 
     We do this by solving:
@@ -261,10 +261,10 @@ class EqualityWithBoundsSolver(PhaseIInteriorPointSolver):
     def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
         """Wrap A."""
         if self.phase1_solver is None:
-            raise ValueError("PhaseISolver not specified.")
+            raise ValueError("FeasibilitySolver not specified.")
 
         if not isinstance(self.phase1_solver, EqualitySolver):
-            raise ValueError("PhaseISolver must be an EqualitySolver.")
+            raise ValueError("FeasibilitySolver must be an EqualitySolver.")
 
         return self.phase1_solver.A
 
@@ -272,10 +272,10 @@ class EqualityWithBoundsSolver(PhaseIInteriorPointSolver):
     def b(self) -> npt.NDArray[np.float64]:
         """Wrap b."""
         if self.phase1_solver is None:
-            raise ValueError("PhaseISolver not specified.")
+            raise ValueError("FeasibilitySolver not specified.")
 
         if not isinstance(self.phase1_solver, EqualitySolver):
-            raise ValueError("PhaseISolver must be an EqualitySolver.")
+            raise ValueError("FeasibilitySolver must be an EqualitySolver.")
 
         return self.phase1_solver.b
 
@@ -752,7 +752,7 @@ class EqualityWithBoundsSolver(PhaseIInteriorPointSolver):
 
 
 class EqualityWithBoundsAndImbalanceConstraintSolver(
-    EqualityConstrainedInteriorPointMethodSolver, PhaseIInteriorPointSolver
+    EqualityConstrainedInteriorPointMethodSolver, FeasibilityInteriorPointSolver
 ):
     r"""Find x satisfying A * x = b, x > lb, and \| B * x - c \|_\infty < psi.
 
@@ -773,7 +773,7 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
      phase1_solver : EqualityWithBoundsSolver, optional
         This class requires a Phase I solver for the equality and bounds constraints,
         and there are two ways of generating this. The user can either pass an
-        EqualityWithBoundsSolver or pass A, b, and lb, and a PhaseISolver will be
+        EqualityWithBoundsSolver or pass A, b, and lb, and a FeasibilitySolver will be
         initialized.
      A, b : npt.NDArray
         Equality constraints: A * x = b. Required when phase1_solver is None.
@@ -833,10 +833,10 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
     def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
         """Wrap A."""
         if self.phase1_solver is None:
-            raise ValueError("PhaseISolver not specified.")
+            raise ValueError("FeasibilitySolver not specified.")
 
         if not isinstance(self.phase1_solver, EqualityWithBoundsSolver):
-            raise ValueError("PhaseISolver must be an EqualityWithBoundsSolver.")
+            raise ValueError("FeasibilitySolver must be an EqualityWithBoundsSolver.")
 
         return self.phase1_solver.A
 
@@ -844,10 +844,10 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
     def b(self) -> npt.NDArray[np.float64]:
         """Wrap b."""
         if self.phase1_solver is None:
-            raise ValueError("PhaseISolver not specified.")
+            raise ValueError("FeasibilitySolver not specified.")
 
         if not isinstance(self.phase1_solver, EqualityWithBoundsSolver):
-            raise ValueError("PhaseISolver must be an EqualityWithBoundsSolver.")
+            raise ValueError("FeasibilitySolver must be an EqualityWithBoundsSolver.")
 
         return self.phase1_solver.b
 
@@ -871,10 +871,10 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
     def lb(self) -> float | list[float] | npt.NDArray[np.float64]:
         """Wrap lb."""
         if self.phase1_solver is None:
-            raise ValueError("PhaseISolver not specified.")
+            raise ValueError("FeasibilitySolver not specified.")
 
         if not isinstance(self.phase1_solver, EqualityWithBoundsSolver):
-            raise ValueError("PhaseISolver must be an EqualityWithBoundsSolver.")
+            raise ValueError("FeasibilitySolver must be an EqualityWithBoundsSolver.")
 
         return self.phase1_solver.lb
 

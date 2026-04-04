@@ -59,11 +59,11 @@ uv run python -m mypy
 
 ```
 Optimizer (ABC)
-├── PhaseISolver (ABC) — find a feasible point, no objective
+├── FeasibilitySolver (ABC) — find a feasible point, no objective
 │
 └── BaseInteriorPointMethodSolver — IPM loop, centering, BTLS
     ├── InteriorPointMethodSolver — inequality-only optimization
-    ├── PhaseIInteriorPointSolver (+ PhaseISolver) — IPM-based feasibility
+    ├── FeasibilityInteriorPointSolver (+ FeasibilitySolver) — IPM-based feasibility
     ├── EqualityConstrainedInteriorPointMethodSolver — equality + inequality
     │     with custom barrier initialization via SVD of A
     └── UnconstrainedNewtonSolver — no constraints, pure Newton's method
@@ -75,8 +75,8 @@ To implement a new solver, pick a base class from this table:
 |-----------------------|--------------------------------------------------------------------------|--------------------------------------------------------------------------|
 | None                  | UnconstrainedNewtonSolver                                                | n/a                                                                      |
 | Equality              | EqualityConstrainedNewtonSolver                                          | EqualitySolver                                                           |
-| Inequality            | InteriorPointMethodSolver                                                | PhaseIInteriorPointSolver                                                |
-| Equality + Inequality | InteriorPointMethodSolver + EqualityConstrainedInteriorPointMethodSolver | PhaseIInteriorPointSolver + EqualityConstrainedInteriorPointMethodSolver |
+| Inequality            | InteriorPointMethodSolver                                                | FeasibilityInteriorPointSolver                                                |
+| Equality + Inequality | InteriorPointMethodSolver + EqualityConstrainedInteriorPointMethodSolver | FeasibilityInteriorPointSolver + EqualityConstrainedInteriorPointMethodSolver |
 
 ### Key abstract methods to implement
 
