@@ -17,11 +17,11 @@ from .numerical_helpers import (
 )
 from .optimization import (
     EqualityConstrainedInteriorPointMethodSolver,
+    FeasibilityInteriorPointSolver,
+    FeasibilitySolver,
     NewtonResult,
     OptimizationResult,
     OptimizationSettings,
-    FeasibilityInteriorPointSolver,
-    FeasibilitySolver,
     ProblemCertifiablyInfeasibleError,
 )
 
