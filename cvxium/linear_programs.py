@@ -190,6 +190,8 @@ class EqualitySolver(FeasibilitySolver):
 class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
     r"""Find x satisfying A * x = b and x > lb.
 
+    phase1_solver is always an EqualitySolver.
+
     We do this by solving:
       minimize   s
       subject to A * x = b
@@ -221,6 +223,8 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
         Optimization settings.
 
     """
+
+    phase1_solver: EqualitySolver
 
     def __init__(
         self,
@@ -259,24 +263,12 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
 
     @property
     def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
-        """Wrap A."""
-        if self.phase1_solver is None:
-            raise ValueError("FeasibilitySolver not specified.")
-
-        if not isinstance(self.phase1_solver, EqualitySolver):
-            raise ValueError("FeasibilitySolver must be an EqualitySolver.")
-
+        """Equality constraint matrix."""
         return self.phase1_solver.A
 
     @property
     def b(self) -> npt.NDArray[np.float64]:
-        """Wrap b."""
-        if self.phase1_solver is None:
-            raise ValueError("FeasibilitySolver not specified.")
-
-        if not isinstance(self.phase1_solver, EqualitySolver):
-            raise ValueError("FeasibilitySolver must be an EqualitySolver.")
-
+        """Equality constraint vector."""
         return self.phase1_solver.b
 
     def svd_A(  # noqa: N802
@@ -287,12 +279,6 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
         npt.NDArray[np.float32 | np.float64],
     ]:
         """Calculate and cache SVD of A."""
-        if self.phase1_solver is None:
-            raise ValueError("phase1_solver is required.")
-
-        if not isinstance(self.phase1_solver, EqualitySolver):
-            raise ValueError("phase1_solver must be an EqualitySolver")
-
         return self.phase1_solver.svd_A()
 
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
@@ -784,6 +770,8 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
 
     """
 
+    phase1_solver: EqualityWithBoundsSolver
+
     def __init__(
         self,
         B: npt.NDArray[np.float64],
@@ -831,24 +819,12 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
 
     @property
     def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
-        """Wrap A."""
-        if self.phase1_solver is None:
-            raise ValueError("FeasibilitySolver not specified.")
-
-        if not isinstance(self.phase1_solver, EqualityWithBoundsSolver):
-            raise ValueError("FeasibilitySolver must be an EqualityWithBoundsSolver.")
-
+        """Equality constraint matrix."""
         return self.phase1_solver.A
 
     @property
     def b(self) -> npt.NDArray[np.float64]:
-        """Wrap b."""
-        if self.phase1_solver is None:
-            raise ValueError("FeasibilitySolver not specified.")
-
-        if not isinstance(self.phase1_solver, EqualityWithBoundsSolver):
-            raise ValueError("FeasibilitySolver must be an EqualityWithBoundsSolver.")
-
+        """Equality constraint vector."""
         return self.phase1_solver.b
 
     def svd_A(  # noqa: N802
@@ -859,23 +835,11 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
         npt.NDArray[np.float32 | np.float64],
     ]:
         """Calculate and cache SVD of A."""
-        if self.phase1_solver is None:
-            raise ValueError("phase1_solver is required.")
-
-        if not isinstance(self.phase1_solver, EqualityWithBoundsSolver):
-            raise ValueError("phase1_solver must be an EqualityWithBoundsSolver")
-
         return self.phase1_solver.svd_A()
 
     @property
     def lb(self) -> float | list[float] | npt.NDArray[np.float64]:
-        """Wrap lb."""
-        if self.phase1_solver is None:
-            raise ValueError("FeasibilitySolver not specified.")
-
-        if not isinstance(self.phase1_solver, EqualityWithBoundsSolver):
-            raise ValueError("FeasibilitySolver must be an EqualityWithBoundsSolver.")
-
+        """Lower bound on x."""
         return self.phase1_solver.lb
 
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
