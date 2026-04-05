@@ -43,14 +43,23 @@ class FrontierResults:
     Parameters
     ----------
     points : list[FrontierPoint]
-        All successfully evaluated points, including the corner points.
+        All successfully evaluated points, including the corner points,
+        deduplicated by objective vector.
     corners : list[FrontierPoint]
         The N corner points, one per objective. ``corners[0]`` minimizes the
         primary objective; ``corners[k]`` minimizes the k-th auxiliary objective
         (in the order they appear in ``evaluate_objectives``, skipping the
-        primary).
+        primary). If a corner solve failed, fewer than N corners are stored and
+        :meth:`knee` will raise.
     primary_objective : int
         Index of the primary objective.
+    n_attempted : int
+        Number of grid points where :meth:`~MultiObjectiveOptimizer.solve_with_bounds`
+        was called.
+    n_skipped : int
+        Number of grid points that were skipped because the solver raised
+        :class:`~cvxium.OptimizationError` or
+        :class:`~cvxium.ProblemInfeasibleError`.
 
     """
 
@@ -59,10 +68,14 @@ class FrontierResults:
         points: list[FrontierPoint],
         corners: list[FrontierPoint],
         primary_objective: int,
+        n_attempted: int,
+        n_skipped: int,
     ) -> None:
         self.points = points
         self.corners = corners
         self.primary_objective = primary_objective
+        self.n_attempted = n_attempted
+        self.n_skipped = n_skipped
 
     def knee(self) -> FrontierPoint:
         """Return the frontier point maximally distant from the corner hyperplane.
@@ -72,6 +85,14 @@ class FrontierResults:
         (where N is the number of objectives). For two objectives this reduces
         to the standard max-chord-distance method.
 
+        The reference hyperplane is constructed by translating the corner points
+        so that ``corners[0]`` is at the origin, then finding the null-space of
+        the matrix whose rows are the remaining translated corners via SVD. This
+        requires the N corner points to be **affinely independent**: if they are
+        (nearly) coplanar in objective space the normal will be numerically
+        unreliable. The check ``norm == 0`` catches exact degeneracy; near-
+        degeneracy is not currently detected.
+
         Returns
         -------
         FrontierPoint
@@ -79,38 +100,46 @@ class FrontierResults:
         Raises
         ------
         ValueError
-            If fewer than 2 corner points are available or the frontier is empty.
+            If the frontier is empty, if fewer than N corners are available
+            (where N = number of objectives inferred from the first point), or
+            if the corner points are degenerate.
 
         """
         if not self.points:
             raise ValueError("No frontier points to evaluate.")
 
+        n_objectives = len(self.points[0].objectives)
         n_corners = len(self.corners)
+
         if n_corners < 2:
             raise ValueError(
                 f"Need at least 2 corner points for knee calculation; got {n_corners}."
+            )
+        if n_corners != n_objectives:
+            raise ValueError(
+                f"knee() requires exactly one corner per objective "
+                f"(N={n_objectives}), but {n_corners} corner(s) are available. "
+                f"This typically means one or more minimize_objective() calls "
+                f"failed during trace()."
             )
 
         corner_objs = np.array([c.objectives for c in self.corners])  # (N, N)
 
         # Normal to the hyperplane through the N corners.
         # Translate to origin using the first corner, then find the null space
-        # of the matrix whose rows are the translated corner vectors.
+        # of the (N-1) x N matrix whose rows are the translated corner vectors.
+        # For N objectives, that matrix has exactly one null-space direction.
         p0 = corner_objs[0]
         vecs = corner_objs[1:] - p0  # (N-1, N)
 
-        if n_corners == 2:
-            # 2D: rotate the single vector 90 degrees.
-            v = vecs[0]
-            normal = np.array([-v[1], v[0]], dtype=float)
-        else:
-            # General: last right singular vector spans the null space.
-            _, _, vt = linalg.svd(vecs)
-            normal = vt[-1].astype(float)
+        _, _, vt = linalg.svd(vecs, full_matrices=True)
+        normal = vt[-1].astype(float)  # last right singular vector = null space
 
         norm = float(np.linalg.norm(normal))
         if norm == 0.0:
-            raise ValueError("Corner points are degenerate (all identical).")
+            raise ValueError(
+                "Corner points are degenerate (all identical or collinear)."
+            )
         normal /= norm
 
         distances = np.array(
@@ -216,20 +245,29 @@ class MultiObjectiveOptimizer(ABC):
         3. For each grid point, call :meth:`solve_with_bounds`; silently skip
            any point that raises :class:`~cvxium.OptimizationError` or
            :class:`~cvxium.ProblemInfeasibleError`.
-        4. Return all successfully evaluated points together with the corners.
+        4. Deduplicate by objective vector (within ``1e-8`` absolute tolerance),
+           then return all unique points together with the corners.
 
         Parameters
         ----------
         num_points : int, default=50
             Number of grid points along each auxiliary-objective dimension.
-            Total solves is at most ``N * num_points^(N-1)`` where ``N`` is
+            Total solves is at most ``N + num_points^(N-1)`` where ``N`` is
             the number of objectives.
 
         Returns
         -------
         FrontierResults
 
+        Raises
+        ------
+        ValueError
+            If ``num_points < 1`` or fewer than 2 objectives are detected.
+
         """
+        if num_points < 1:
+            raise ValueError(f"num_points must be >= 1; got {num_points}.")
+
         # --- Step 1: compute corner points ---
         primary_ipm = self.minimize_objective(self.primary_objective)
         primary_objs = self.evaluate_objectives(primary_ipm.solution)
@@ -273,9 +311,9 @@ class MultiObjectiveOptimizer(ABC):
         # bounds_max[j] = value of auxiliary j at the primary minimum
         bounds_max = np.array([float(primary_objs[i]) for i in aux_indices])
 
-        # bounds_min[j] = value of auxiliary j at its own minimum (corner j+1)
-        # Fall back to bounds_max if that corner failed (will yield a degenerate
-        # one-point sweep, which trace() handles gracefully by returning corners).
+        # bounds_min[j] = value of auxiliary j at its own minimum (corner j+1).
+        # Fall back to bounds_max if that corner failed (yields a degenerate
+        # one-point sweep; trace() still returns the corners gracefully).
         bounds_min = bounds_max.copy()
         for j, aux_corner in enumerate(aux_corners):
             bounds_min[j] = float(aux_corner.objectives[aux_indices[j]])
@@ -290,10 +328,14 @@ class MultiObjectiveOptimizer(ABC):
             np.linspace(bounds_min[j], bounds_max[j], num_points) for j in range(n_aux)
         ]
 
+        # Corners are prepended so they survive deduplication (first-seen wins).
         points: list[FrontierPoint] = list(corners)
+        n_attempted = 0
+        n_skipped = 0
 
         for bounds_combo in itertools_product(*grids):
             bounds = np.array(bounds_combo)
+            n_attempted += 1
             try:
                 ipm = self.solve_with_bounds(bounds)
                 objs = self.evaluate_objectives(ipm.solution)
@@ -306,12 +348,22 @@ class MultiObjectiveOptimizer(ABC):
                     )
                 )
             except (OptimizationError, ProblemInfeasibleError):
-                continue
+                n_skipped += 1
+
+        # --- Step 4: deduplicate by objective vector ---
+        unique: list[FrontierPoint] = []
+        for p in points:
+            if not any(
+                np.allclose(p.objectives, q.objectives, atol=1e-8) for q in unique
+            ):
+                unique.append(p)
 
         return FrontierResults(
-            points=points,
+            points=unique,
             corners=corners,
             primary_objective=self.primary_objective,
+            n_attempted=n_attempted,
+            n_skipped=n_skipped,
         )
 
 
