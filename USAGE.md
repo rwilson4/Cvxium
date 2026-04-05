@@ -149,10 +149,10 @@ What kind of constraints are there: equality, inequality, both, or
 neither? Look in the table below and create a class that inherits from
 the class(es) specified.
 
-| Constraints           | Optimization                                                             | Feasibility                                                              |
-|-----------------------|--------------------------------------------------------------------------|--------------------------------------------------------------------------|
-| None                  | UnconstrainedNewtonSolver                                                | n/a                                                                      |
-| Equality              | EqualityConstrainedNewtonSolver                                          | EqualitySolver                                                           |
+| Constraints           | Optimization                                                             | Feasibility                                                                   |
+|-----------------------|--------------------------------------------------------------------------|-------------------------------------------------------------------------------|
+| None                  | UnconstrainedNewtonSolver                                                | n/a                                                                           |
+| Equality              | EqualityConstrainedNewtonSolver                                          | EqualitySolver                                                                |
 | Inequality            | InteriorPointMethodSolver                                                | FeasibilityInteriorPointSolver                                                |
 | Equality + Inequality | InteriorPointMethodSolver + EqualityConstrainedInteriorPointMethodSolver | FeasibilityInteriorPointSolver + EqualityConstrainedInteriorPointMethodSolver |
 
