@@ -1,6 +1,5 @@
 """Tests for MultiObjectiveOptimizer and FrontierResults."""
 
-
 import numpy as np
 import numpy.typing as npt
 import pytest
@@ -79,7 +78,9 @@ class BallConstrainedNorm(MultiObjectiveOptimizer):
             x = np.zeros_like(self.d)
         else:
             x = self.d.copy()
-        return _make_ipm_result(x, float(np.dot(x - self.d * objective_index, x - self.d * objective_index)))
+        return _make_ipm_result(
+            x, float(np.dot(x - self.d * objective_index, x - self.d * objective_index))
+        )
 
     def evaluate_objectives(
         self, x: npt.NDArray[np.float64]
@@ -131,11 +132,13 @@ class SeparableBallConstraints(MultiObjectiveOptimizer):
     def evaluate_objectives(
         self, x: npt.NDArray[np.float64]
     ) -> npt.NDArray[np.float64]:
-        return np.array([
-            float(x[0] ** 2 + x[1] ** 2),
-            float((x[0] - 1.0) ** 2),
-            float((x[1] - 1.0) ** 2),
-        ])
+        return np.array(
+            [
+                float(x[0] ** 2 + x[1] ** 2),
+                float((x[0] - 1.0) ** 2),
+                float((x[1] - 1.0) ** 2),
+            ]
+        )
 
 
 # ---------------------------------------------------------------------------

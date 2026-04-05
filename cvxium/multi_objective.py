@@ -166,9 +166,7 @@ class MultiObjectiveOptimizer(ABC):
         ...
 
     @abstractmethod
-    def minimize_objective(
-        self, objective_index: int
-    ) -> InteriorPointMethodResult:
+    def minimize_objective(self, objective_index: int) -> InteriorPointMethodResult:
         """Minimize a single objective with no bounds on the others.
 
         Used by :meth:`trace` to compute the N corner points of the frontier
@@ -289,8 +287,7 @@ class MultiObjectiveOptimizer(ABC):
 
         # --- Step 3: grid sweep ---
         grids = [
-            np.linspace(bounds_min[j], bounds_max[j], num_points)
-            for j in range(n_aux)
+            np.linspace(bounds_min[j], bounds_max[j], num_points) for j in range(n_aux)
         ]
 
         points: list[FrontierPoint] = list(corners)
