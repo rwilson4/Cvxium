@@ -11,6 +11,10 @@ from scipy import linalg
 
 from .exceptions import NewtonStepError, ProblemInfeasibleError
 from .numerical_helpers import (
+    multiply_arrow_sparsity_pattern,
+    multiply_block_plus_one,
+    multiply_diagonal,
+    multiply_rank_p_update,
     solve_block_plus_one,
     solve_diagonal_eta_inverse,
     solve_kkt_system,
@@ -578,14 +582,10 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
 
 
         """
-        M = self.dimension
         eta = self._hessian_ft_diagonal(x, t)
         zeta = self._hessian_ft_edge(x)
         theta = self._hessian_ft_corner(x)
-        Hy = np.zeros_like(y)
-        Hy[0:M] = eta * y[0:M] + y[M] * zeta
-        Hy[M] = np.dot(zeta, y[0:M]) + theta * y[M]
-        return Hy
+        return multiply_arrow_sparsity_pattern(y, eta, zeta, theta)
 
     def _hessian_ft_diagonal(
         self, x: npt.NDArray[np.float64], t: float
@@ -1096,37 +1096,22 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
 
         """
         M = self.dimension
-        y_x = y[:M]  # shape (M,)
-        y_s = y[M]  # scalar
-
         Bx_minus_c = self.B @ x[:M] - self.c  # shape (q,)
 
-        # Diagonal component
         eta = self._hessian_ft_diagonal(x)  # shape (M,)
-
-        # Rank-q factors
         kappa_pos = self._hessian_ft_kappa_pos(x, Bx_minus_c)  # shape (M, q)
         kappa_neg = self._hessian_ft_kappa_neg(x, Bx_minus_c)  # shape (M, q)
-
-        # Mixed derivatives
         hxs = self._hessian_ft_edge(x, Bx_minus_c)  # shape (M,)
         hss = self._hessian_ft_corner(x, Bx_minus_c)  # scalar
 
-        # Compute Hxx * y_x
-        Hxx_yx = (  # shape (M,)
-            eta * y_x
-            + kappa_pos @ (kappa_pos.T @ y_x)
-            + kappa_neg @ (kappa_neg.T @ y_x)
-        )
+        # Hxx = diag(eta) + kappa_pos @ kappa_pos^T + kappa_neg @ kappa_neg^T
+        def diag_plus_neg(z: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+            return multiply_rank_p_update(z, kappa_neg, multiply_diagonal, eta=eta)
 
-        # Add mixed derivative term
-        Hy_x = Hxx_yx + hxs * y_s  # shape (M,)
+        def hxx_multiply(z: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+            return multiply_rank_p_update(z, kappa_pos, diag_plus_neg)
 
-        # Compute lower block: Hxs^T y_x + Hss * y_s
-        Hy_s = np.dot(hxs, y_x) + hss * y_s  # scalar
-
-        # Concatenate result
-        return np.append(Hy_x, Hy_s)
+        return multiply_block_plus_one(y, hxs, hss, hxx_multiply)
 
     def _hessian_ft_diagonal(
         self, x: npt.NDArray[np.float64]

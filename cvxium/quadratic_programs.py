@@ -10,6 +10,8 @@ from scipy import linalg
 
 from .linear_programs import EqualityWithBoundsSolver
 from .numerical_helpers import (
+    multiply_diagonal,
+    multiply_rank_p_update,
     solve_diagonal_eta_inverse,
     solve_kkt_system,
     solve_rank_p_update,
@@ -440,10 +442,11 @@ class QuadraticProgramEqualityBoundsSolver(
                 # Q_vector_multiply handles (scale * Q + diag(diag_add)) directly.
                 # scale=2t > 0 and diag_add=d >= 0 are guaranteed by the barrier.
                 return self._Q_vector_multiply(y, scale=2.0 * t, diag_add=d)  # type: ignore[call-arg]
-            return 2.0 * t * self._Q_vector_multiply(y) + d * y
+            return 2.0 * t * self._Q_vector_multiply(y) + multiply_diagonal(y, d)
         if self._kappa_cache is not None:
-            return 2.0 * t * (self._kappa_cache @ (self._kappa_cache.T @ y)) + d * y
-        return 2.0 * t * (self.Q @ y) + d * y
+            kappa = np.sqrt(2.0 * t) * self._kappa_cache
+            return multiply_rank_p_update(y, kappa, multiply_diagonal, eta=d)
+        return multiply_diagonal(y, d) + 2.0 * t * (self.Q @ y)
 
     # ------------------------------------------------------------------
     # Newton step
