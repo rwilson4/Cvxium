@@ -1,5 +1,6 @@
 """Base optimization classes."""
 
+import logging
 import time
 from abc import ABC, abstractmethod, abstractproperty
 from dataclasses import dataclass
@@ -21,6 +22,33 @@ from .exceptions import (
     ProblemInfeasibleError,
     SevereCurvatureError,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _configure_verbose_logging() -> None:
+    """Attach a console handler to the cvxium logger if none exists.
+
+    Called when a solver is constructed with ``verbose=True``.  Adds a
+    :class:`logging.StreamHandler` that emits bare messages (no timestamp or
+    level prefix) to stderr, and sets the ``cvxium`` logger level to DEBUG so
+    both INFO (centering steps) and DEBUG (Newton steps, BTLS) records are
+    shown.
+
+    If any non-NullHandler is already attached to the ``cvxium`` logger, this
+    is a no-op — the assumption is that the application has already configured
+    logging and knows what it wants.
+    """
+    parent = logging.getLogger("cvxium")
+    has_real_handler = any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.NullHandler)
+        for h in parent.handlers
+    )
+    if not has_real_handler:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        parent.addHandler(handler)
+        parent.setLevel(logging.DEBUG)
 
 
 @dataclass
@@ -68,7 +96,11 @@ class OptimizationSettings:
         excessively small steps that could result in numerical issues or ineffective
         exploration of the optimization landscape.
     verbose : bool, default=False
-        If True, print status along with how long it took to execute each step.
+        If True, attach a console handler to the ``cvxium`` logger and emit
+        progress at ``INFO`` level (centering steps) and ``DEBUG`` level
+        (Newton steps and backtracking line search). For finer-grained
+        control, leave this False and configure
+        ``logging.getLogger("cvxium")`` directly.
 
     """
 
@@ -261,6 +293,8 @@ class Optimizer(ABC):
             self.settings: OptimizationSettings = OptimizationSettings()
         else:
             self.settings = settings
+        if self.settings.verbose:
+            _configure_verbose_logging()
 
     @abstractproperty
     def num_eq_constraints(self) -> int:
@@ -334,6 +368,8 @@ class BaseInteriorPointMethodSolver(Optimizer):
             self.settings: OptimizationSettings = OptimizationSettings()
         else:
             self.settings = settings
+        if self.settings.verbose:
+            _configure_verbose_logging()
 
     def solve(
         self,
@@ -375,10 +411,14 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
         # Applicable only for Phase I methods.
         if not fully_optimize and self.is_feasible(x):
-            if self.settings.verbose:
-                print(
-                    f"  Phase I solution was feasible so we're done ({self.__class__.__name__})"
-                )
+            logger.info(
+                "  Phase I solution was feasible so we're done (%s)",
+                self.__class__.__name__,
+                extra={
+                    "cvx_event": "phase1_feasible",
+                    "cvx_solver": self.__class__.__name__,
+                },
+            )
             return phase1_res
 
         t = self.initialize_barrier_parameter(x0=x)
@@ -394,9 +434,12 @@ class BaseInteriorPointMethodSolver(Optimizer):
             )
             + 1
         )
-        if self.settings.verbose:
-            overall_start_time = time.time()
-            print(f"  Starting IPM ({self.__class__.__name__})")
+        overall_start_time = time.time()
+        logger.info(
+            "  Starting IPM (%s)",
+            self.__class__.__name__,
+            extra={"cvx_event": "ipm_start", "cvx_solver": self.__class__.__name__},
+        )
 
         inner_nits = []
         inner_suboptimalities = []
@@ -408,15 +451,24 @@ class BaseInteriorPointMethodSolver(Optimizer):
         equality_multipliers = np.zeros(1)
         inequality_multipliers = np.zeros(1)
         for nit in range(num_steps):
-            if self.settings.verbose:
-                print(f"  {nit + 1:02d} Beginning centering step with {t=:}")
-                start_time = time.time()
+            step_start_time = time.time()
+            logger.info(
+                "  %02d Beginning centering step with t=%s",
+                nit + 1,
+                t,
+                extra={
+                    "cvx_event": "centering_start",
+                    "cvx_outer_nit": nit + 1,
+                    "cvx_t": t,
+                },
+            )
 
             try:
                 result = self.centering_step(
                     x,
                     t,
                     last_step=(nit + 1 == num_steps),
+                    outer_nit=nit + 1,
                     fully_optimize=fully_optimize,
                 )
             except CenteringStepError as e:
@@ -454,12 +506,17 @@ class BaseInteriorPointMethodSolver(Optimizer):
                     last_iterate=e.last_iterate,
                 ) from e
 
-            if self.settings.verbose:
-                end_time = time.time()
-                print(
-                    f"  {nit + 1:02d} Centering step completed in "
-                    f"{1000 * (end_time - start_time):.03f} ms"
-                )
+            step_elapsed = 1000 * (time.time() - step_start_time)
+            logger.info(
+                "  %02d Centering step completed in %.3f ms",
+                nit + 1,
+                step_elapsed,
+                extra={
+                    "cvx_event": "centering_done",
+                    "cvx_outer_nit": nit + 1,
+                    "cvx_elapsed_ms": step_elapsed,
+                },
+            )
 
             x = result.solution
             equality_multipliers = result.equality_multipliers
@@ -472,11 +529,11 @@ class BaseInteriorPointMethodSolver(Optimizer):
             if not fully_optimize and self.is_feasible(x):
                 status = 2
                 message = "Feasibility method successfully found a feasible point"
-                if self.settings.verbose:
-                    print(
-                        f"  {nit + 1:02d} Result was strictly feasible so we're "
-                        "early-stopping."
-                    )
+                logger.info(
+                    "  %02d Result was strictly feasible so we're early-stopping.",
+                    nit + 1,
+                    extra={"cvx_event": "early_stop", "cvx_outer_nit": nit + 1},
+                )
                 break
 
             # Dual can provide certificate of infeasibility, in which case we can quit
@@ -486,13 +543,17 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
             t *= self.settings.barrier_multiplier
 
-        if self.settings.verbose:
-            overall_end_time = time.time()
-            print(
-                f"  IPM completed in "
-                f"{1000 * (overall_end_time - overall_start_time):.03f} ms"
-                f" ({self.__class__.__name__})"
-            )
+        overall_elapsed = 1000 * (time.time() - overall_start_time)
+        logger.info(
+            "  IPM completed in %.3f ms (%s)",
+            overall_elapsed,
+            self.__class__.__name__,
+            extra={
+                "cvx_event": "ipm_done",
+                "cvx_solver": self.__class__.__name__,
+                "cvx_elapsed_ms": overall_elapsed,
+            },
+        )
 
         # Applicable only for Phase I methods.
         if not fully_optimize and not self.is_feasible(x):
@@ -563,6 +624,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
         x0: npt.NDArray[np.float64],
         t: float,
         last_step: bool,
+        outer_nit: int = 0,
         fully_optimize: bool = False,
         **kwargs: Any,
     ) -> NewtonResult:
@@ -605,8 +667,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
         suboptimality = np.inf
         suboptimalities = []
         for nit in range(self.settings.max_inner_iterations):
-            if self.settings.verbose:
-                start_time = time.time()
+            newton_start = time.time()
 
             try:
                 delta_x, nu_hat = self.calculate_newton_step(x, t)
@@ -617,26 +678,34 @@ class BaseInteriorPointMethodSolver(Optimizer):
                     last_iterate=x,
                 ) from e
 
-            if self.settings.verbose:
-                end_time = time.time()
+            newton_elapsed = 1000 * (time.time() - newton_start)
 
             # Check for convergence
             lambda_squared = self.newton_decrement_squared(x, t, delta_x)
             suboptimality = 0.5 * lambda_squared
             suboptimalities.append(suboptimality)
-            if self.settings.verbose:
-                if not in_quadratic_phase and np.sqrt(lambda_squared) <= eta:
-                    in_quadratic_phase = True
-                    quadratic_convergence = " (quadratic convergence threshold)"
-                else:
-                    quadratic_convergence = ""
 
-                print(
-                    f"    {nit + 1:02d} Newton step calculated in "
-                    f"{1000 * (end_time - start_time):.03f} ms; "
-                    f"Sub-optimality {suboptimality} = 0.5 * {np.sqrt(lambda_squared)}^2"
-                    f"{quadratic_convergence}"
-                )
+            lambda_norm = np.sqrt(lambda_squared)
+            if not in_quadratic_phase and lambda_norm <= eta:
+                in_quadratic_phase = True
+                quadratic_convergence = " (quadratic convergence threshold)"
+            else:
+                quadratic_convergence = ""
+            logger.debug(
+                "    %02d Newton step in %.3f ms; sub-opt %.6g = 0.5 * %.6g^2%s",
+                nit + 1,
+                newton_elapsed,
+                suboptimality,
+                lambda_norm,
+                quadratic_convergence,
+                extra={
+                    "cvx_event": "newton_step",
+                    "cvx_outer_nit": outer_nit,
+                    "cvx_inner_nit": nit + 1,
+                    "cvx_elapsed_ms": newton_elapsed,
+                    "cvx_suboptimality": suboptimality,
+                },
+            )
 
             if suboptimality < self.settings.inner_tolerance:
                 nu_star = nu_hat / t
@@ -696,18 +765,29 @@ class BaseInteriorPointMethodSolver(Optimizer):
                     inequality_multipliers=lambda_star,
                 ) from e
 
-            if self.settings.verbose:
+            if logger.isEnabledFor(logging.DEBUG):
                 ft = self.evaluate_barrier_objective(x, t)
                 ft_new = self.evaluate_barrier_objective(x + btls_s * delta_x, t)
                 expected_improvement = (
                     self.settings.backtracking_alpha
                     * self.settings.backtracking_beta
                     * lambda_squared
-                    / (1 + np.sqrt(lambda_squared))
+                    / (1 + lambda_norm)
                 )
-                print(
-                    f"    {nit + 1:02d} {btls_s=:}, improvement={ft - ft_new}, "
-                    f"expected improvement = {expected_improvement}"
+                logger.debug(
+                    "    %02d btls_s=%.4f, improvement=%.6g, expected improvement=%.6g",
+                    nit + 1,
+                    btls_s,
+                    ft - ft_new,
+                    expected_improvement,
+                    extra={
+                        "cvx_event": "btls",
+                        "cvx_outer_nit": outer_nit,
+                        "cvx_inner_nit": nit + 1,
+                        "cvx_btls_s": btls_s,
+                        "cvx_improvement": ft - ft_new,
+                        "cvx_expected_improvement": expected_improvement,
+                    },
                 )
 
             # Applicable only for Phase I methods.
