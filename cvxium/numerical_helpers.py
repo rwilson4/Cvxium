@@ -613,6 +613,446 @@ def solve_banded(
     return linalg.cho_solve_banded((cb, lower), b)
 
 
+def multiply_diagonal(
+    y: npt.NDArray[np.float64],
+    eta: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    """Compute H @ y.
+
+    Computes the matrix-vector (or matrix-matrix) product H @ y where H is diagonal,
+       H = diag(eta).
+    Because of this structure, the product can be computed in linear time.
+
+    Parameters
+    ----------
+     y : npt.NDArray[np.float64]
+        Right hand side. Can be either a vector or a matrix, in which case we compute
+        H @ y for each column of y.
+     eta : npt.NDArray[np.float64]
+        Diagonal elements of H.
+
+    Returns
+    -------
+     z : npt.NDArray[np.float64]
+        The product H @ y.
+
+    """
+    if y.ndim == 1:
+        if y.shape != eta.shape:
+            raise ValueError("y and eta must have the same length.")
+        return eta * y
+    elif y.ndim == 2:
+        if y.shape[0] != eta.shape[0]:
+            raise ValueError("Number of rows in y must match length of eta.")
+        return eta[:, np.newaxis] * y
+    else:
+        raise ValueError("y must be either a 1D or 2D NumPy array.")
+
+
+def multiply_rank_one_update(
+    y: npt.NDArray[np.float64],
+    kappa: npt.NDArray[np.float64],
+    A_multiply: Callable[..., npt.NDArray[np.float64]],
+    **kwargs: Any,
+) -> npt.NDArray[np.float64]:
+    """Compute H @ y.
+
+    Computes the matrix-vector (or matrix-matrix) product H @ y where
+    H = A + kappa * kappa^T, where A has some special structure that makes it easy to
+    compute A @ z, and kappa is a vector. Thus, H is a rank-one update to A.
+
+    Parameters
+    ----------
+     y : npt.NDArray[np.float64]
+        Right hand side. Can be either a vector or a matrix, in which case we compute
+        H @ y for each column of y.
+     kappa : npt.NDArray[np.float64]
+        Rank-one component of H.
+     A_multiply : Callable
+        A function that computes A @ z. The first argument to A_multiply will be z.
+        Additional arguments will be passed via **kwargs. A_multiply should be able to
+        accept multiple right-hand-sides.
+     kwargs
+        Extra arguments to pass to A_multiply.
+
+    Returns
+    -------
+     z : npt.NDArray[np.float64]
+        The product H @ y.
+
+    Notes
+    -----
+    Let H = A + kappa * kappa^T, where kappa is a vector of length M. We compute
+    H @ y = A @ y + kappa * (kappa^T @ y) in O(t + 3*M) time, where t is the time
+    needed to compute A @ z:
+       1. Compute A @ y (t time).
+       2. Compute kappa^T @ y (2*M flops).
+       3. Add kappa * (kappa^T @ y) (2*M flops).
+    In total that's t + 4*M flops.
+
+    """
+    if y.ndim == 1:
+        if y.shape != kappa.shape:
+            raise ValueError("y and kappa must have the same length.")
+    elif y.ndim == 2:
+        if y.shape[0] != kappa.shape[0]:
+            raise ValueError("Number of rows in y must match length of kappa.")
+    else:
+        raise ValueError("y must be either a 1D or 2D NumPy array.")
+
+    Ay = A_multiply(y, **kwargs)
+    if y.ndim == 1:
+        return Ay + kappa * np.dot(kappa, y)
+    else:
+        return Ay + np.outer(kappa, kappa.T @ y)
+
+
+def multiply_rank_p_update(
+    y: npt.NDArray[np.float64],
+    kappa: npt.NDArray[np.float64],
+    A_multiply: Callable[..., npt.NDArray[np.float64]],
+    **kwargs: Any,
+) -> npt.NDArray[np.float64]:
+    """Compute H @ y.
+
+    Computes the matrix-vector (or matrix-matrix) product H @ y where
+    H = A + kappa * kappa^T, where A has some special structure, and kappa is an M-by-p
+    matrix. Thus, H is a rank-p update to A.
+
+    Parameters
+    ----------
+     y : npt.NDArray[np.float64]
+        Right hand side. Can be either a vector or a matrix, in which case we compute
+        H @ y for each column of y.
+     kappa : npt.NDArray[np.float64]
+        Rank-p component of H, an M-by-p matrix.
+     A_multiply : Callable
+        A function that computes A @ z. The first argument to A_multiply will be z.
+        Additional arguments will be passed via **kwargs. A_multiply should be able to
+        accept multiple right-hand-sides.
+     kwargs
+        Extra arguments to pass to A_multiply.
+
+    Returns
+    -------
+     z : npt.NDArray[np.float64]
+        The product H @ y.
+
+    Notes
+    -----
+    Let H = A + kappa * kappa^T, where kappa is an M-by-p matrix. We compute
+    H @ y = A @ y + kappa @ (kappa^T @ y) in O(t + 4*M*p) time, where t is the time
+    needed to compute A @ z:
+       1. Compute A @ y (t time).
+       2. Compute kappa^T @ y (2*M*p flops for a vector y).
+       3. Add kappa @ (kappa^T @ y) (2*M*p flops).
+    In total that's t + 4*M*p flops.
+
+    """
+    if y.ndim not in (1, 2):
+        raise ValueError("y must be either a 1D or 2D NumPy array.")
+
+    if y.shape[0] != kappa.shape[0]:
+        raise ValueError("Number of rows in y must match number of rows in kappa.")
+
+    return A_multiply(y, **kwargs) + kappa @ (kappa.T @ y)
+
+
+def multiply_block_plus_one(
+    y: npt.NDArray[np.float64],
+    A12: npt.NDArray[np.float64],
+    A22: float,
+    A11_multiply: Callable[..., npt.NDArray[np.float64]],
+    **kwargs: Any,
+) -> npt.NDArray[np.float64]:
+    """Compute H @ y.
+
+    Computes the matrix-vector (or matrix-matrix) product H @ y where H has a block
+    structure:
+         _              _
+        |    A11    A12  |
+    H = |                |.
+        |_  A12^T   A22 _|
+
+    We assume that A12 is a vector and A22 is a scalar. A11 has special structure that
+    allows efficient computation of A11 @ z.
+
+    Parameters
+    ----------
+     y : npt.NDArray[np.float64]
+        Right hand side. Can be either a vector or a matrix, in which case we compute
+        H @ y for each column of y.
+     A12 : npt.NDArray[np.float64]
+        Last row/column of H, other than the bottom right element.
+     A22 : float
+        The bottom right element of H.
+     A11_multiply : Callable
+        A function that computes A11 @ z. The first argument to A11_multiply will be z.
+        Additional arguments will be passed via **kwargs. A11_multiply should be able to
+        accept multiple right-hand-sides.
+     kwargs
+        Extra arguments to pass to A11_multiply.
+
+    Returns
+    -------
+     z : npt.NDArray[np.float64]
+        The product H @ y.
+
+    """
+    if A12.ndim != 1:
+        raise ValueError("Dimension mismatch: A12 must be a 1D array.")
+
+    M = A12.shape[0]
+    if y.shape[0] != M + 1:
+        raise ValueError(
+            "Dimension mismatch: y must have M + 1 rows, where M = len(A12)."
+        )
+
+    if y.ndim == 1:
+        y1 = y[:M]
+        y2 = y[M]
+    elif y.ndim == 2:
+        y1 = y[:M, :]
+        y2 = y[M, :]
+    else:
+        raise ValueError("y must be either a 1D or 2D NumPy array.")
+
+    z = np.zeros_like(y)
+    if y.ndim == 1:
+        z[:M] = A11_multiply(y1, **kwargs) + A12 * y2
+        z[M] = np.dot(A12, y1) + A22 * y2
+    else:
+        z[:M, :] = A11_multiply(y1, **kwargs) + np.outer(A12, y2)
+        z[M, :] = A12.T @ y1 + A22 * y2
+    return z
+
+
+def multiply_block(
+    y: npt.NDArray[np.float64],
+    A12: npt.NDArray[np.float64],
+    A22: npt.NDArray[np.float64],
+    A11_multiply: Callable[..., npt.NDArray[np.float64]],
+    **kwargs: Any,
+) -> npt.NDArray[np.float64]:
+    """Compute H @ y.
+
+    Computes the matrix-vector (or matrix-matrix) product H @ y where H has a block
+    structure:
+         _                 _
+        |    A11      A12   |
+    H = |                   |.
+        |_  A12^T     A22  _|
+
+    We assume that A11 has special structure that allows efficient computation of A11 @ z.
+    A12 is an M-by-p matrix and A22 is a p-by-p matrix.
+
+    Parameters
+    ----------
+     y : npt.NDArray[np.float64]
+        Right hand side. Can be either a vector or a matrix, in which case we compute
+        H @ y for each column of y.
+     A12 : npt.NDArray[np.float64]
+        Off-diagonal block of H, an M-by-p matrix.
+     A22 : npt.NDArray[np.float64]
+        Lower-right block of H, a p-by-p matrix.
+     A11_multiply : Callable
+        A function that computes A11 @ z. The first argument to A11_multiply will be z.
+        Additional arguments will be passed via **kwargs. A11_multiply should be able to
+        accept multiple right-hand-sides.
+     kwargs
+        Extra arguments to pass to A11_multiply.
+
+    Returns
+    -------
+     z : npt.NDArray[np.float64]
+        The product H @ y.
+
+    """
+    if A12.ndim <= 1 or A12.shape[1] <= 1:
+        raise ValueError("Please use `multiply_block_plus_one` for this.")
+
+    if A12.ndim > 2:
+        raise ValueError("Dimension mismatch: A12 should be a matrix.")
+
+    M, p = A12.shape
+    if A22.ndim != 2 or not all(s == p for s in A22.shape):
+        raise ValueError(f"Dimension mismatch: {A22.shape=:}; expected ({p}, {p}).")
+
+    if y.shape[0] != M + p:
+        raise ValueError(f"Dimension mismatch: {y.shape[0]=:}; expected {M + p}.")
+
+    if y.ndim == 1:
+        y1 = y[:M]
+        y2 = y[M:]
+    elif y.ndim == 2:
+        y1 = y[:M, :]
+        y2 = y[M:, :]
+    else:
+        raise ValueError("y must be either a 1D or 2D NumPy array.")
+
+    z = np.zeros_like(y)
+    z[:M] = A11_multiply(y1, **kwargs) + A12 @ y2
+    z[M:] = A12.T @ y1 + A22 @ y2
+    return z
+
+
+def multiply_arrow_sparsity_pattern(
+    y: npt.NDArray[np.float64],
+    eta: npt.NDArray[np.float64],
+    zeta: npt.NDArray[np.float64],
+    theta: float,
+) -> npt.NDArray[np.float64]:
+    """Compute H @ y.
+
+    Computes the matrix-vector (or matrix-matrix) product H @ y where H has an arrow
+    sparsity pattern:
+         _                 _
+        |  diag(eta)  zeta  |
+    H = |                   |.
+        |_  zeta^T   theta _|
+
+    Because of this structure, the product can be computed in linear time.
+
+    Parameters
+    ----------
+     y : npt.NDArray[np.float64]
+        Right hand side. Can be either a vector or a matrix, in which case we compute
+        H @ y for each column of y.
+     eta : npt.NDArray[np.float64]
+        Diagonal elements of the upper left block of H.
+     zeta : npt.NDArray[np.float64]
+        Last row/column of H, other than the bottom right element.
+     theta : float
+        The bottom right element of H.
+
+    Returns
+    -------
+     z : npt.NDArray[np.float64]
+        The product H @ y.
+
+    Notes
+    -----
+    For a vector y = [y1; y2] where y1 has length M and y2 is a scalar:
+       z[:M] = diag(eta) @ y1 + zeta * y2 = eta * y1 + zeta * y2
+       z[M]  = zeta^T @ y1 + theta * y2
+
+    This takes 4*M multiplies and 2*M + 1 adds, or 6*M + 1 flops total.
+
+    """
+    if eta.shape != zeta.shape:
+        raise ValueError("Dimension mismatch: eta and zeta had different dimensions.")
+
+    M = eta.shape[0]
+    if y.shape[0] != M + 1:
+        raise ValueError(
+            "Dimension mismatch: y must have M + 1 rows, where M = len(eta)."
+        )
+
+    if y.ndim == 1:
+        y1 = y[:M]
+        y2 = y[M]
+    elif y.ndim == 2:
+        y1 = y[:M, :]
+        y2 = y[M, :]
+    else:
+        raise ValueError("y must be either a 1D or 2D NumPy array.")
+
+    z = np.zeros_like(y)
+    if y.ndim == 1:
+        z[:M] = eta * y1 + zeta * y2
+        z[M] = np.dot(zeta, y1) + theta * y2
+        return z
+
+    z[:M, :] = eta[:, np.newaxis] * y1 + np.outer(zeta, y2)
+    z[M, :] = zeta.T @ y1 + theta * y2
+    return z
+
+
+def multiply_banded(
+    y: npt.NDArray[np.float64],
+    ab: npt.NDArray[np.float64],
+    lower: bool = False,
+) -> npt.NDArray[np.float64]:
+    """Compute H @ y.
+
+    Computes the matrix-vector (or matrix-matrix) product H @ y where H is a symmetric
+    banded matrix stored in the compact banded form used by
+    ``scipy.linalg.cholesky_banded``.
+
+    Parameters
+    ----------
+     y : npt.NDArray[np.float64]
+        Right hand side. Can be either a vector or a matrix, in which case we compute
+        H @ y for each column of y.
+     ab : npt.NDArray[np.float64]
+        Banded storage of the symmetric matrix H, shape ``(p+1, n)`` where ``n`` is the
+        matrix order and ``p`` is the number of super-diagonals (when ``lower=False``) or
+        sub-diagonals (when ``lower=True``).
+        If ``lower=False`` (default): ``ab[i, j] = H[j - p + i, j]`` for valid indices.
+        If ``lower=True``: ``ab[i, j] = H[j + i, j]`` for valid indices.
+     lower : bool, optional
+        Whether ``ab`` stores the lower (``True``) or upper (``False``, default)
+        triangular band.
+
+    Returns
+    -------
+     z : npt.NDArray[np.float64]
+        The product H @ y.
+
+    Notes
+    -----
+    Exploits the banded storage to compute the product in O(n * p) time by iterating
+    over diagonals, compared with O(n^2) for the dense case.
+
+    """
+    if y.ndim not in (1, 2):
+        raise ValueError("y must be either a 1D or 2D NumPy array.")
+
+    n = ab.shape[1]
+    if y.shape[0] != n:
+        raise ValueError(
+            f"Dimension mismatch: y has {y.shape[0]} rows but ab implies n={n}."
+        )
+
+    p = ab.shape[0] - 1
+    z = np.zeros_like(y)
+
+    if lower:
+        # ab[d, :n-d] = d-th subdiagonal of H (= d-th superdiagonal by symmetry)
+        for d in range(p + 1):
+            diag = ab[d, : n - d]
+            if d == 0:
+                if y.ndim == 1:
+                    z += diag * y
+                else:
+                    z += diag[:, np.newaxis] * y
+            else:
+                if y.ndim == 1:
+                    z[: n - d] += diag * y[d:]
+                    z[d:] += diag * y[: n - d]
+                else:
+                    z[: n - d] += diag[:, np.newaxis] * y[d:]
+                    z[d:] += diag[:, np.newaxis] * y[: n - d]
+    else:
+        # ab[p-d, d:] = d-th superdiagonal of H
+        for d in range(p + 1):
+            diag = ab[p - d, d:]
+            if d == 0:
+                if y.ndim == 1:
+                    z += diag * y
+                else:
+                    z += diag[:, np.newaxis] * y
+            else:
+                if y.ndim == 1:
+                    z[: n - d] += diag * y[d:]
+                    z[d:] += diag * y[: n - d]
+                else:
+                    z[: n - d] += diag[:, np.newaxis] * y[d:]
+                    z[d:] += diag[:, np.newaxis] * y[: n - d]
+
+    return z
+
+
 def solve_kkt_system(
     A: npt.NDArray[np.float64],
     g: npt.NDArray[np.float64],
