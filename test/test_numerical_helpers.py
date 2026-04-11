@@ -855,9 +855,7 @@ def test_solve_banded_multiple_rhs(seed: int, M: int, p: int, q: int) -> None:
     np.testing.assert_allclose(H @ x_upper, b, rtol=1e-8, atol=1e-8)
 
 
-def _make_block_diagonal_system(
-    seed: int, M0: int, M1: int, M2: int
-) -> tuple[
+def _make_block_diagonal_system(seed: int, M0: int, M1: int, M2: int) -> tuple[
     npt.NDArray[np.float64],  # H (dense block diagonal)
     list[int],  # block_sizes
     list[Callable[..., npt.NDArray[np.float64]]],  # block_multipliers
