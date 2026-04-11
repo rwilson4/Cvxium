@@ -337,7 +337,164 @@ More generally, look at the call graph from
 that this path does not trigger computation that is only needed by
 `calculate_newton_step`.
 
-## 7. The full checklist for a new solver
+## 7. Logging and debugging
+
+Cvxium emits structured log records through Python's standard `logging`
+module, so you can observe solver behavior without changing any solver
+code.
+
+### 7a. Basic usage: verbose=True
+
+The quickest way to enable output is to pass `verbose=True` in
+`OptimizationSettings`. This attaches a console handler to the
+`cvxium` logger and produces output that looks like:
+
+```
+  Starting IPM (MyQPSolver)
+  01 Beginning centering step with t=12.5
+    01 Newton step in 1.234 ms; sub-opt 3.2e-02 = 0.5 * 0.253^2
+    01 btls_s=0.5000, improvement=1.23e-04, expected improvement=9.87e-05
+    02 Newton step in 0.987 ms; sub-opt 4.1e-03 = 0.5 * 0.091^2
+    02 btls_s=1.0000, improvement=3.11e-03, expected improvement=2.84e-03
+    03 Newton step in 0.991 ms; sub-opt 8.7e-08 = 0.5 * 4.2e-04^2 (quadratic convergence threshold)
+    03 btls_s=1.0000, improvement=3.28e-03, expected improvement=3.28e-03
+  01 Centering step completed in 3.212 ms
+  02 Beginning centering step with t=125.0
+  ...
+  IPM completed in 31.4 ms (MyQPSolver)
+```
+
+Two-space indentation marks outer IPM events (centering steps); four
+spaces mark inner Newton/BTLS events. `INFO`-level records cover the
+outer loop; `DEBUG`-level records cover the inner loop. With
+`verbose=True`, both levels are shown.
+
+To enable only outer-loop visibility:
+
+```python
+import logging
+logging.getLogger("cvxium").setLevel(logging.INFO)
+logging.getLogger("cvxium").addHandler(logging.StreamHandler())
+```
+
+### 7b. Writing logs to a file
+
+Attach a `FileHandler` to get output on disk while keeping the console
+quiet, or combine both:
+
+```python
+import logging
+
+file_handler = logging.FileHandler("solver.log")
+file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+
+logging.getLogger("cvxium").setLevel(logging.DEBUG)
+logging.getLogger("cvxium").addHandler(file_handler)
+```
+
+### 7c. Avoiding noise from other libraries
+
+If you have configured the root logger at DEBUG level (e.g. via
+`logging.basicConfig(level=logging.DEBUG)`), third-party libraries
+such as scipy may emit their own debug records. Suppress them while
+keeping Cvxium verbose by configuring at the specific logger level
+rather than at root:
+
+```python
+import logging
+logging.basicConfig(level=logging.WARNING)          # everything quiet by default
+logging.getLogger("cvxium").setLevel(logging.DEBUG) # cvxium at full verbosity
+```
+
+### 7d. Collecting per-iteration data with IterationHandler
+
+`IterationHandler` accumulates every log record into a list of dicts.
+This is useful for plotting convergence, profiling individual steps, or
+writing post-hoc analysis scripts.
+
+```python
+import logging
+from cvxium import IterationHandler, OptimizationSettings
+
+handler = IterationHandler()
+logging.getLogger("cvxium").addHandler(handler)
+logging.getLogger("cvxium").setLevel(logging.DEBUG)
+
+# verbose=False so we don't also get console output
+solver = MySolver(settings=OptimizationSettings(verbose=False))
+solver.solve()
+
+df = handler.to_dataframe()   # requires pandas
+
+# Per-centering-step timing
+centering = df[df["event"] == "centering_done"]
+print(centering[["outer_nit", "elapsed_ms"]])
+
+# Per-Newton-step suboptimality
+newton = df[df["event"] == "newton_step"]
+print(newton[["outer_nit", "inner_nit", "elapsed_ms", "suboptimality"]])
+```
+
+Available `event` values: `ipm_start`, `ipm_done`, `centering_start`,
+`centering_done`, `early_stop`, `phase1_feasible`, `newton_step`,
+`btls`, `feasible_initial_guess`, `svd_done`.
+
+The structured extra fields available on each record are:
+
+| Field | Events where present |
+|---|---|
+| `solver` | `ipm_start`, `ipm_done`, `phase1_feasible` |
+| `outer_nit` | all outer-loop and inner-loop events |
+| `inner_nit` | `newton_step`, `btls` |
+| `elapsed_ms` | `centering_done`, `ipm_done`, `newton_step`, `svd_done` |
+| `suboptimality` | `newton_step` |
+| `t` | `centering_start` |
+| `btls_s` | `btls` |
+| `improvement` | `btls` |
+| `expected_improvement` | `btls` |
+
+### 7e. What to look for: debugging tips
+
+**Backtracking line search step size after quadratic convergence.**
+Once the log marks `(quadratic convergence threshold)`, the Newton
+decrement has crossed into the quadratic phase and the step modifier
+returned by the backtracking line search should always be `s=1.0000`.
+A step shorter than 1 at this point means the Armijo sufficient-decrease
+condition is not being satisfied, which indicates a bug — most likely
+in `hessian_multiply` or `calculate_newton_step`. Check those against a
+naive finite-difference implementation.
+
+**First centering step is slow to converge.**
+The first centering step runs with the initial barrier parameter `t`.
+If it takes many Newton iterations to converge, `t` is likely too large
+for the starting point `x0`: the barrier objective is sharply curved
+near the constraint boundaries, and the Hessian is ill-conditioned. Two
+levers to try:
+- Override `initialize_barrier_parameter` to return a smaller `t` that
+  is a better match for the curvature at `x0`.
+- Pass a better initial guess `x0` that is farther from the constraint
+  boundaries, so that the barrier terms are less dominant.
+
+**Later centering steps are slow to converge.**
+Ill-conditioning of the Hessian worsens as `t` grows large, because
+the barrier terms shrink and the problem approaches its unconstrained
+limit. This is exacerbated when there are many inequality constraints.
+If convergence stalls on later centering steps, consider relaxing the
+tolerances:
+
+- `outer_tolerance_soft` (default `1e-3`) is the practical stopping
+  threshold. The solver tries to do better, but exits gracefully if it
+  cannot. Raising this value (e.g. to `1e-2`) gives the solver more
+  room to fail gracefully. Many practical applications do not require
+  high precision.
+- `outer_tolerance` (default `1e-6`) is the aspirational threshold. If
+  the solver is exiting early because it cannot meet `outer_tolerance`
+  but *can* meet `outer_tolerance_soft`, that is the intended behavior.
+  Raising `outer_tolerance` closer to `outer_tolerance_soft` causes the
+  solver to stop sooner and avoids the ill-conditioned late steps
+  entirely.
+
+## 8. The full checklist for a new solver
 
 1. **Write the Lagrangian.** One multiplier per constraint.
 2. **Derive the dual function.** Verify `g <= f0` at feasible points.

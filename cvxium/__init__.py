@@ -116,6 +116,7 @@ References
 
 """
 
+import logging
 import pathlib
 from importlib.resources import files as _resource_files
 
@@ -130,6 +131,7 @@ from .exceptions import (
     ProblemInfeasibleError,
     SevereCurvatureError,
 )
+from .handlers import IterationHandler
 from .linear_programs import (
     EqualitySolver,
     EqualityWithBoundsAndImbalanceConstraintSolver,
@@ -167,6 +169,8 @@ from .quadratic_programs import (
     QuadraticProgramEqualityBoundsSolver,
 )
 
+logging.getLogger(__name__).addHandler(logging.NullHandler())
+
 
 def usage() -> None:
     """Print USAGE.md to stdout."""
@@ -196,6 +200,7 @@ __all__ = [
     "InteriorPointMethodResult",
     "InteriorPointMethodSolver",
     "InvalidDescentDirectionError",
+    "IterationHandler",
     "NewtonResult",
     "NewtonStepError",
     "OptimizationError",

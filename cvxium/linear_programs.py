@@ -1,5 +1,6 @@
 """Linear program solvers."""
 
+import logging
 import time
 from functools import cache
 from typing import Any
@@ -23,7 +24,10 @@ from .optimization import (
     OptimizationResult,
     OptimizationSettings,
     ProblemCertifiablyInfeasibleError,
+    _configure_verbose_logging,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class EqualitySolver(FeasibilitySolver):
@@ -39,6 +43,8 @@ class EqualitySolver(FeasibilitySolver):
             self.settings: OptimizationSettings = OptimizationSettings()
         else:
             self.settings = settings
+        if self.settings.verbose:
+            _configure_verbose_logging()
 
         p, _ = A.shape
         assert len(b.shape) == 1
@@ -107,8 +113,10 @@ class EqualitySolver(FeasibilitySolver):
 
         """
         if x0 is not None and np.all(np.abs(self.A @ x0 - self.b) < 1e-10):
-            if self.settings.verbose:
-                print("  Initial guess was feasible.")
+            logger.info(
+                "  Initial guess was feasible.",
+                extra={"cvx_event": "feasible_initial_guess"},
+            )
             return OptimizationResult(solution=x0)
 
         # If A = U * s * Vh, then we seek to solve:
@@ -117,8 +125,7 @@ class EqualitySolver(FeasibilitySolver):
         # Then s * Vh * x = U^T * b
         # Vh * x = (U^T * b) / s
         # x = Vh^T * (U^T * b) / s
-        if self.settings.verbose:
-            start_time = time.time()
+        svd_start = time.time()
 
         U, s, Vh = self.svd_A()
         rank = int(np.sum(s > 1e-10))
@@ -146,9 +153,12 @@ class EqualitySolver(FeasibilitySolver):
             s_inv[0:rank] = 1.0 / s[0:rank]
             x = Vh.T @ (s_inv * (U.T @ self.b))
 
-        if self.settings.verbose:
-            end_time = time.time()
-            print(f"  SVD calculated in {1000 * (end_time - start_time):.03f} ms")
+        svd_elapsed = 1000 * (time.time() - svd_start)
+        logger.info(
+            "  SVD calculated in %.3f ms",
+            svd_elapsed,
+            extra={"cvx_event": "svd_done", "cvx_elapsed_ms": svd_elapsed},
+        )
 
         return OptimizationResult(solution=x)
 
