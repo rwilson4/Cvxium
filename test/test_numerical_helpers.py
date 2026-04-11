@@ -1,6 +1,8 @@
 """Test numerical helpers."""
 
+import functools
 import time
+from collections.abc import Callable
 
 import numpy as np
 import numpy.typing as npt
@@ -8,8 +10,13 @@ import pytest
 from scipy import linalg
 
 from cvxium.numerical_helpers import (
+    multiply_arrow_sparsity_pattern,
+    multiply_block_diagonal,
+    multiply_diagonal,
+    multiply_rank_one_update,
     solve_arrow_sparsity_pattern,
     solve_banded,
+    solve_block_diagonal,
     solve_block_plus_one,
     solve_diagonal,
     solve_kkt_system,
@@ -846,3 +853,200 @@ def test_solve_banded_multiple_rhs(seed: int, M: int, p: int, q: int) -> None:
 
     # Verify H*x = b
     np.testing.assert_allclose(H @ x_upper, b, rtol=1e-8, atol=1e-8)
+
+
+def _make_block_diagonal_system(
+    seed: int, M0: int, M1: int, M2: int
+) -> tuple[
+    npt.NDArray[np.float64],  # H (dense block diagonal)
+    list[int],  # block_sizes
+    list[Callable[..., npt.NDArray[np.float64]]],  # block_multipliers
+    list[Callable[..., npt.NDArray[np.float64]]],  # block_solvers
+]:
+    """Build a block diagonal test system with three different block structures.
+
+    Block 0 (size M0):       diagonal.
+    Block 1 (size M1 + 1):   arrow sparsity pattern.
+    Block 2 (size M2):       diagonal + rank-1 update.
+    """
+    np.random.seed(seed)
+
+    # Block 0: diagonal
+    eta0 = np.random.rand(M0) + 1.0
+    H0 = np.diag(eta0)
+
+    # Block 1: arrow sparsity pattern
+    eta1 = np.random.rand(M1) + 1.0
+    zeta1 = np.random.randn(M1)
+    theta1 = np.dot(zeta1 / eta1, zeta1) + 1.0
+    H1 = np.zeros((M1 + 1, M1 + 1))
+    H1[:M1, :M1] = np.diag(eta1)
+    H1[M1, :M1] = zeta1
+    H1[:M1, M1] = zeta1
+    H1[M1, M1] = theta1
+
+    # Block 2: diagonal + rank-1 update
+    eta2 = np.random.rand(M2) + 1.0
+    kappa2 = np.random.randn(M2)
+    H2 = np.diag(eta2) + np.outer(kappa2, kappa2)
+
+    # Assemble full block diagonal matrix
+    s0, s1, s2 = M0, M1 + 1, M2
+    N = s0 + s1 + s2
+    H = np.zeros((N, N))
+    H[:s0, :s0] = H0
+    H[s0 : s0 + s1, s0 : s0 + s1] = H1
+    H[s0 + s1 :, s0 + s1 :] = H2
+
+    block_sizes = [s0, s1, s2]
+
+    block_multipliers: list[Callable[..., npt.NDArray[np.float64]]] = [
+        functools.partial(multiply_diagonal, eta=eta0),
+        functools.partial(
+            multiply_arrow_sparsity_pattern, eta=eta1, zeta=zeta1, theta=theta1
+        ),
+        functools.partial(
+            multiply_rank_one_update,
+            kappa=kappa2,
+            A_multiply=multiply_diagonal,
+            eta=eta2,
+        ),
+    ]
+
+    block_solvers: list[Callable[..., npt.NDArray[np.float64]]] = [
+        functools.partial(solve_diagonal, eta=eta0),
+        functools.partial(
+            solve_arrow_sparsity_pattern, eta=eta1, zeta=zeta1, theta=theta1
+        ),
+        functools.partial(
+            solve_rank_one_update, kappa=kappa2, A_solve=solve_diagonal, eta=eta2
+        ),
+    ]
+
+    return H, block_sizes, block_multipliers, block_solvers
+
+
+@pytest.mark.parametrize(
+    "seed,M0,M1,M2",
+    [
+        (119, 20, 13, 10),
+        (219, 50, 19, 30),
+        (319, 10, 9, 5),
+        (419, 100, 49, 50),
+        (519, 7, 4, 3),
+    ],
+)
+def test_multiply_block_diagonal(seed: int, M0: int, M1: int, M2: int) -> None:
+    """Test H @ y for a block diagonal matrix with mixed block structures."""
+    H, block_sizes, block_multipliers, _ = _make_block_diagonal_system(seed, M0, M1, M2)
+    N = sum(block_sizes)
+    np.random.seed(seed + 1000)
+    y = np.random.randn(N)
+
+    st = time.time()
+    z_expected = H @ y
+    mt = time.time()
+    z = multiply_block_diagonal(y, block_sizes, block_multipliers)
+    et = time.time()
+
+    print(f"Slow way completed in {1e6 * (mt - st):.03f} us")
+    print(f"Fast way completed in {1e6 * (et - mt):.03f} us")
+
+    np.testing.assert_allclose(z, z_expected, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M0,M1,M2,q",
+    [
+        (120, 20, 13, 10, 5),
+        (220, 50, 19, 30, 10),
+        (320, 10, 9, 5, 3),
+        (420, 100, 49, 50, 20),
+        (520, 7, 4, 3, 4),
+    ],
+)
+def test_multiply_block_diagonal_multiple_rhs(
+    seed: int, M0: int, M1: int, M2: int, q: int
+) -> None:
+    """Test H @ Y for a block diagonal matrix with multiple RHS."""
+    H, block_sizes, block_multipliers, _ = _make_block_diagonal_system(seed, M0, M1, M2)
+    N = sum(block_sizes)
+    np.random.seed(seed + 1000)
+    y = np.random.randn(N, q)
+
+    st = time.time()
+    z_expected = H @ y
+    mt = time.time()
+    z = multiply_block_diagonal(y, block_sizes, block_multipliers)
+    et = time.time()
+
+    print(f"Slow way completed in {1e6 * (mt - st):.03f} us")
+    print(f"Fast way completed in {1e6 * (et - mt):.03f} us")
+
+    np.testing.assert_allclose(z, z_expected, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M0,M1,M2",
+    [
+        (121, 20, 13, 10),
+        (221, 50, 19, 30),
+        (321, 10, 9, 5),
+        (421, 100, 49, 50),
+        (521, 7, 4, 3),
+    ],
+)
+def test_solve_block_diagonal(seed: int, M0: int, M1: int, M2: int) -> None:
+    """Test H * x = b for a block diagonal matrix with mixed block structures."""
+    H, block_sizes, _, block_solvers = _make_block_diagonal_system(seed, M0, M1, M2)
+    N = sum(block_sizes)
+    np.random.seed(seed + 1000)
+    b = np.random.randn(N)
+
+    st = time.time()
+    x_expected = np.linalg.solve(H, b)
+    mt = time.time()
+    x = solve_block_diagonal(b, block_sizes, block_solvers)
+    et = time.time()
+
+    print(f"Slow way completed in {1e6 * (mt - st):.03f} us")
+    print(f"Fast way completed in {1e6 * (et - mt):.03f} us")
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H * x = b
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M0,M1,M2,q",
+    [
+        (122, 20, 13, 10, 5),
+        (222, 50, 19, 30, 10),
+        (322, 10, 9, 5, 3),
+        (422, 100, 49, 50, 20),
+        (522, 7, 4, 3, 4),
+    ],
+)
+def test_solve_block_diagonal_multiple_rhs(
+    seed: int, M0: int, M1: int, M2: int, q: int
+) -> None:
+    """Test H * x = B for a block diagonal matrix with multiple RHS."""
+    H, block_sizes, _, block_solvers = _make_block_diagonal_system(seed, M0, M1, M2)
+    N = sum(block_sizes)
+    np.random.seed(seed + 1000)
+    b = np.random.randn(N, q)
+
+    st = time.time()
+    x_expected = np.linalg.solve(H, b)
+    mt = time.time()
+    x = solve_block_diagonal(b, block_sizes, block_solvers)
+    et = time.time()
+
+    print(f"Slow way completed in {1e3 * (mt - st):.03f} ms")
+    print(f"Fast way completed in {1e3 * (et - mt):.03f} ms")
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H * x = B
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
