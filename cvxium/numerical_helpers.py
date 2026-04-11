@@ -1,6 +1,6 @@
 """Numerical linear algebra routines."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
@@ -613,6 +613,85 @@ def solve_banded(
     return linalg.cho_solve_banded((cb, lower), b)
 
 
+def solve_block_diagonal(
+    b: npt.NDArray[np.float64],
+    block_sizes: Sequence[int],
+    block_solvers: Sequence[Callable[..., npt.NDArray[np.float64]]],
+) -> npt.NDArray[np.float64]:
+    """Solve H * x = b.
+
+    Solves a linear system of equations where H is block diagonal:
+         _                              _
+        |  H_0                           |
+        |      H_1                       |
+    H = |          ...                   |.
+        |_                H_{k-1}       _|
+
+    Each diagonal block H_i can have its own special structure. The callable
+    block_solvers[i] solves H_i * x_i = b_i for any compatible vector or matrix b_i.
+
+    Parameters
+    ----------
+     b : npt.NDArray[np.float64]
+        Right hand side. Can be either a vector or a matrix, in which case we solve
+        H * x = b for each column of b.
+     block_sizes : list[int]
+        Sizes of each diagonal block. Must satisfy sum(block_sizes) == b.shape[0].
+     block_solvers : list[Callable]
+        One callable per block. block_solvers[i](c) solves H_i * x_i = c. Each
+        callable must already have its block-specific parameters bound (e.g., via
+        functools.partial).
+
+    Returns
+    -------
+     x : npt.NDArray[np.float64]
+        The solution.
+
+    Notes
+    -----
+    Because H is block diagonal, solving H * x = b reduces to k independent systems:
+       H_0 * x_0 = b_0
+       H_1 * x_1 = b_1
+       ...
+       H_{k-1} * x_{k-1} = b_{k-1}
+    where b_i is the segment of b corresponding to block i. Each system is solved
+    independently, so the total cost is the sum of the individual block solve costs.
+    The blocks may exploit entirely different structures (diagonal, arrow, rank-p update,
+    etc.) and the helpers in this module are composable within each block.
+
+    Example
+    -------
+    To solve a block diagonal system where block 0 is diagonal and block 1 is an arrow
+    sparsity pattern::
+
+        import functools
+        solver0 = functools.partial(solve_diagonal, eta=eta0)
+        solver1 = functools.partial(solve_arrow_sparsity_pattern,
+                                    eta=eta1, zeta=zeta1, theta=theta1)
+        x = solve_block_diagonal(b, [M0, M1 + 1], [solver0, solver1])
+
+    """
+    if b.ndim not in (1, 2):
+        raise ValueError("b must be either a 1D or 2D NumPy array.")
+
+    if len(block_sizes) != len(block_solvers):
+        raise ValueError("block_sizes and block_solvers must have the same length.")
+
+    N = sum(block_sizes)
+    if b.shape[0] != N:
+        raise ValueError(
+            f"Dimension mismatch: b has {b.shape[0]} rows but block_sizes sum to {N}."
+        )
+
+    x = np.zeros_like(b)
+    start = 0
+    for size, solver in zip(block_sizes, block_solvers, strict=True):
+        end = start + size
+        x[start:end] = solver(b[start:end])
+        start = end
+    return x
+
+
 def multiply_diagonal(
     y: npt.NDArray[np.float64],
     eta: npt.NDArray[np.float64],
@@ -1050,6 +1129,83 @@ def multiply_banded(
                     z[: n - d] += diag[:, np.newaxis] * y[d:]
                     z[d:] += diag[:, np.newaxis] * y[: n - d]
 
+    return z
+
+
+def multiply_block_diagonal(
+    y: npt.NDArray[np.float64],
+    block_sizes: Sequence[int],
+    block_multipliers: Sequence[Callable[..., npt.NDArray[np.float64]]],
+) -> npt.NDArray[np.float64]:
+    """Compute H @ y.
+
+    Computes the matrix-vector (or matrix-matrix) product H @ y where H is block diagonal:
+         _                              _
+        |  H_0                           |
+        |      H_1                       |
+    H = |          ...                   |.
+        |_                H_{k-1}       _|
+
+    Each diagonal block H_i can have its own special structure. The callable
+    block_multipliers[i] computes H_i @ z for any compatible vector or matrix z.
+
+    Parameters
+    ----------
+     y : npt.NDArray[np.float64]
+        Right hand side. Can be either a vector or a matrix, in which case we compute
+        H @ y for each column of y.
+     block_sizes : list[int]
+        Sizes of each diagonal block. Must satisfy sum(block_sizes) == y.shape[0].
+     block_multipliers : list[Callable]
+        One callable per block. block_multipliers[i](z) computes H_i @ z. Each
+        callable must already have its block-specific parameters bound (e.g., via
+        functools.partial).
+
+    Returns
+    -------
+     z : npt.NDArray[np.float64]
+        The product H @ y.
+
+    Notes
+    -----
+    Because H is block diagonal:
+       H @ y = [H_0 @ y_0; H_1 @ y_1; ...; H_{k-1} @ y_{k-1}]
+    where y_i is the segment of y corresponding to block i. Each block multiply is
+    performed independently, so the total cost is the sum of the individual block
+    multiply costs. The blocks may exploit entirely different structures (diagonal,
+    arrow, rank-p update, etc.) and the helpers in this module are composable within
+    each block.
+
+    Example
+    -------
+    To multiply a block diagonal matrix where block 0 is diagonal and block 1 is an
+    arrow sparsity pattern::
+
+        import functools
+        mult0 = functools.partial(multiply_diagonal, eta=eta0)
+        mult1 = functools.partial(multiply_arrow_sparsity_pattern,
+                                  eta=eta1, zeta=zeta1, theta=theta1)
+        z = multiply_block_diagonal(y, [M0, M1 + 1], [mult0, mult1])
+
+    """
+    if y.ndim not in (1, 2):
+        raise ValueError("y must be either a 1D or 2D NumPy array.")
+
+    if len(block_sizes) != len(block_multipliers):
+        raise ValueError("block_sizes and block_multipliers must have the same length.")
+
+    N = sum(block_sizes)
+    if y.shape[0] != N:
+        raise ValueError(
+            f"Dimension mismatch: y has {y.shape[0]} rows but block_sizes sum to {N}."
+        )
+
+    z = np.zeros_like(y)
+    start = 0
+    for size, multiplier in zip(block_sizes, block_multipliers, strict=True):
+        end = start + size
+        z[start:end] = multiplier(y[start:end])
+        start = end
     return z
 
 
