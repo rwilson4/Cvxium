@@ -243,7 +243,12 @@ def test_multiply_arrow_plus_rank_p(seed: int, M: int, r: int) -> None:
     z_expected = H @ y
     mt = time.time()
     z = multiply_rank_p_update(
-        y, kappa, A_multiply=multiply_arrow_sparsity_pattern, eta=eta, zeta=zeta, theta=theta
+        y,
+        kappa,
+        A_multiply=multiply_arrow_sparsity_pattern,
+        eta=eta,
+        zeta=zeta,
+        theta=theta,
     )
     et = time.time()
 
@@ -286,7 +291,12 @@ def test_multiply_arrow_plus_rank_p_multiple_rhs(
     Z_expected = H @ Y
     mt = time.time()
     Z = multiply_rank_p_update(
-        Y, kappa, A_multiply=multiply_arrow_sparsity_pattern, eta=eta, zeta=zeta, theta=theta
+        Y,
+        kappa,
+        A_multiply=multiply_arrow_sparsity_pattern,
+        eta=eta,
+        zeta=zeta,
+        theta=theta,
     )
     et = time.time()
 
