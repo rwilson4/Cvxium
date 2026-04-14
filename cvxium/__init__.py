@@ -137,6 +137,11 @@ from .linear_programs import (
     EqualityWithBoundsAndImbalanceConstraintSolver,
     EqualityWithBoundsSolver,
 )
+from .multi_objective import (
+    FrontierPoint,
+    FrontierResults,
+    MultiObjectiveOptimizer,
+)
 from .numerical_helpers import (
     multiply_arrow_sparsity_pattern,
     multiply_banded,
@@ -205,11 +210,14 @@ __all__ = [
     "EqualityWithBoundsSolver",
     "FeasibilityInteriorPointSolver",
     "FeasibilitySolver",
+    "FrontierPoint",
+    "FrontierResults",
     "InteriorPointMethodError",
     "InteriorPointMethodResult",
     "InteriorPointMethodSolver",
     "InvalidDescentDirectionError",
     "IterationHandler",
+    "MultiObjectiveOptimizer",
     "NewtonResult",
     "NewtonStepError",
     "OptimizationError",
