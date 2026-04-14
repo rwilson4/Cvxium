@@ -92,13 +92,14 @@ def solve_rank_one_update(
     b: npt.NDArray[np.float64],
     kappa: npt.NDArray[np.float64],
     A_solve: Callable[..., npt.NDArray[np.float64]],
+    d: float | None = None,
     **kwargs: Any,
 ) -> npt.NDArray[np.float64]:
     """Solve H * x = b.
 
-    Solves a linear system of equations where H = A + kappa * kappa^T, where A has some
-    special structure that makes it easy to solve A * y = c, and kappa is a vector.
-    Thus, H is a rank-one update to A.
+    Solves a linear system of equations where H = A + d * kappa * kappa^T, where A has
+    some special structure that makes it easy to solve A * y = c, and kappa is a vector.
+    Thus, H is a rank-one update to A. When d is omitted, H = A + kappa * kappa^T.
 
     Parameters
     ----------
@@ -111,6 +112,8 @@ def solve_rank_one_update(
         A function that solves A * y = c. The first argument to A_solve will be c.
         Additional arguments will be passed via **kwargs. A_solve should be able to
         accept multiple right-hand-sides.
+     d : float, optional
+        Positive scalar weight on the rank-one term. Defaults to 1.0.
      kwargs
         Extra arguments to pass to A_solve.
 
@@ -121,15 +124,13 @@ def solve_rank_one_update(
 
     Notes
     -----
-    Let H = A + kappa * kappa^T, where kappa is a vector of length M. We can solve
-    H * x = b in O(2*t + 6*M) time, where t is the time needed to solve A*y = c, as
-    follows:
+    Let H = A + d * kappa * kappa^T, where kappa is a vector of length M and d > 0.
+    By the Sherman-Morrison formula, the Schur complement denominator becomes
+    1/d + kappa^T * A^{-1} * kappa. We can solve H * x = b in O(2*t + 6*M) time,
+    where t is the time needed to solve A*y = c, as follows:
        1. Solve A * x' = b (t time).
        2. Solve A * xi = kappa (t time).
-       3. Calculate x as x' - ((kappa^T * x') / (1 + kappa^T * xi)) * xi. This is 2 dot
-          products (each involving M multiplies and M-1 adds) plus M multiplies and M
-          subtractions, or O(3M) multiplies plus O(3M) adds, plus a single add and a
-          division.
+       3. Calculate x as x' - ((kappa^T * x') / (1/d + kappa^T * xi)) * xi.
     In total that's 2*t, 3M multiplies, and 3M adds.
 
 
@@ -143,9 +144,13 @@ def solve_rank_one_update(
     else:
         raise ValueError("b must be either a 1D or 2D NumPy array.")
 
+    if d is not None and d <= 0:
+        raise ValueError("d must be strictly positive.")
+
     x_prime = A_solve(b, **kwargs)
     xi = A_solve(kappa, **kwargs)
-    den = 1.0 / (1.0 + np.dot(kappa, xi))
+    schur_diag = (1.0 / d if d is not None else 1.0)
+    den = 1.0 / (schur_diag + np.dot(kappa, xi))
 
     if b.ndim == 1:
         return x_prime - (np.dot(kappa, x_prime) * den) * xi
@@ -159,13 +164,15 @@ def solve_rank_p_update(
     b: npt.NDArray[np.float64],
     kappa: npt.NDArray[np.float64],
     A_solve: Callable[..., npt.NDArray[np.float64]],
+    d: npt.NDArray[np.float64] | None = None,
     **kwargs: Any,
 ) -> npt.NDArray[np.float64]:
     """Solve H * x = b.
 
-    Solves a linear system of equations where H = A + kappa * kappa^T, where A has some
-    special structure that makes it easy to solve A * y = c, and kappa is rank p. Thus,
-    H is a rank-p update to A.
+    Solves a linear system of equations where H = A + kappa @ D @ kappa^T, where A has
+    some special structure that makes it easy to solve A * y = c, kappa is rank p, and
+    D = diag(d) with strictly positive d. Thus, H is a rank-p update to A. When d is
+    omitted, D = I and H = A + kappa @ kappa^T.
 
     Parameters
     ----------
@@ -173,11 +180,13 @@ def solve_rank_p_update(
         Right hand side. Can be either a vector or a matrix, in which case we solve the
         system for each column of b.
      kappa : npt.NDArray[np.float64]
-        Rank-p component of H.
+        Rank-p component of H, an M-by-p matrix.
      A_solve : Callable
         A function that solves A * y = c. The first argument to A_solve will be c.
         Additional arguments will be passed via **kwargs. A_solve should be able to
         accept multiple right-hand-sides.
+     d : npt.NDArray[np.float64], optional
+        Strictly positive vector of length p defining D = diag(d). Defaults to all ones.
      kwargs
         Extra arguments to pass to A_solve.
 
@@ -188,14 +197,16 @@ def solve_rank_p_update(
 
     Notes
     -----
-    Let H = A + kappa * kappa^T, where kappa is an M-by-p matrix. We can solve H * x = b
-    in O((p + q) * t + 2 * M * p * (p + 2 * q)) time, where t is the number of flops
+    Let H = A + kappa @ D @ kappa^T, where kappa is an M-by-p matrix and D = diag(d)
+    with d > 0. By the Woodbury identity, the Schur complement matrix is
+    G = D^{-1} + kappa^T @ A^{-1} @ kappa. We can solve H * x = b in
+    O((p + q) * t + 2 * M * p * (p + 2 * q)) time, where t is the number of flops
     needed to solve A*y = c, as follows:
        1. Solve A * xi = kappa. This is p solves with A (at most p * t flops; by passing
           multiple right hand sides it may be less than p * t flops, since we avoid
           duplicating calculations unnecessarily). xi is M-by-p.
-       2. Calculate G = I + kappa^T * xi (p^2 * M multiplies and p^2 * (M - 1) + p adds,
-          or O(2 * M * p^2) flops). G is p-by-p.
+       2. Calculate G = D^{-1} + kappa^T * xi (p^2 * M multiplies and p^2 * (M - 1) + p
+          adds, or O(2 * M * p^2) flops). G is p-by-p.
        3. Compute the Cholesky factorization of G (1/3 * p^3 flops).
        4. Solve A * x' = b (When there are q right-hand-sides, this is at most q * t
           flops). x' is M-by-q.
@@ -216,11 +227,22 @@ def solve_rank_p_update(
     if b.shape[0] != kappa.shape[0]:
         raise ValueError("Number of rows in beta must match length of kappa.")
 
+    p = kappa.shape[1]
+
+    if d is not None:
+        if d.shape != (p,):
+            raise ValueError("d must be a 1D array of length p (kappa.shape[1]).")
+        if not np.all(d > 0):
+            raise ValueError("d must have strictly positive entries.")
+
     # xi is M-by-p
     xi = A_solve(kappa, **kwargs)
 
-    # G is p-by-p
-    G = np.eye(kappa.shape[1]) + kappa.T @ xi
+    # G is p-by-p; G = D^{-1} + kappa^T @ xi
+    if d is not None:
+        G = np.diag(1.0 / d) + kappa.T @ xi
+    else:
+        G = np.eye(p) + kappa.T @ xi
     try:
         c, lower = linalg.cho_factor(G, lower=True)
     except np.linalg.LinAlgError:
@@ -732,13 +754,15 @@ def multiply_rank_one_update(
     y: npt.NDArray[np.float64],
     kappa: npt.NDArray[np.float64],
     A_multiply: Callable[..., npt.NDArray[np.float64]],
+    d: float | None = None,
     **kwargs: Any,
 ) -> npt.NDArray[np.float64]:
     """Compute H @ y.
 
     Computes the matrix-vector (or matrix-matrix) product H @ y where
-    H = A + kappa * kappa^T, where A has some special structure that makes it easy to
-    compute A @ z, and kappa is a vector. Thus, H is a rank-one update to A.
+    H = A + d * kappa * kappa^T, where A has some special structure that makes it easy to
+    compute A @ z, and kappa is a vector. Thus, H is a rank-one update to A. When d is
+    omitted, H = A + kappa * kappa^T.
 
     Parameters
     ----------
@@ -751,6 +775,8 @@ def multiply_rank_one_update(
         A function that computes A @ z. The first argument to A_multiply will be z.
         Additional arguments will be passed via **kwargs. A_multiply should be able to
         accept multiple right-hand-sides.
+     d : float, optional
+        Positive scalar weight on the rank-one term. Defaults to 1.0.
      kwargs
         Extra arguments to pass to A_multiply.
 
@@ -761,12 +787,12 @@ def multiply_rank_one_update(
 
     Notes
     -----
-    Let H = A + kappa * kappa^T, where kappa is a vector of length M. We compute
-    H @ y = A @ y + kappa * (kappa^T @ y) in O(t + 3*M) time, where t is the time
-    needed to compute A @ z:
+    Let H = A + d * kappa * kappa^T, where kappa is a vector of length M and d > 0. We
+    compute H @ y = A @ y + d * kappa * (kappa^T @ y) in O(t + 3*M) time, where t is
+    the time needed to compute A @ z:
        1. Compute A @ y (t time).
        2. Compute kappa^T @ y (2*M flops).
-       3. Add kappa * (kappa^T @ y) (2*M flops).
+       3. Add d * kappa * (kappa^T @ y) (2*M flops).
     In total that's t + 4*M flops.
 
     """
@@ -779,24 +805,30 @@ def multiply_rank_one_update(
     else:
         raise ValueError("y must be either a 1D or 2D NumPy array.")
 
+    if d is not None and d <= 0:
+        raise ValueError("d must be strictly positive.")
+
+    scale = d if d is not None else 1.0
     Ay = A_multiply(y, **kwargs)
     if y.ndim == 1:
-        return Ay + kappa * np.dot(kappa, y)
+        return Ay + scale * kappa * np.dot(kappa, y)
     else:
-        return Ay + np.outer(kappa, kappa.T @ y)
+        return Ay + scale * np.outer(kappa, kappa.T @ y)
 
 
 def multiply_rank_p_update(
     y: npt.NDArray[np.float64],
     kappa: npt.NDArray[np.float64],
     A_multiply: Callable[..., npt.NDArray[np.float64]],
+    d: npt.NDArray[np.float64] | None = None,
     **kwargs: Any,
 ) -> npt.NDArray[np.float64]:
     """Compute H @ y.
 
     Computes the matrix-vector (or matrix-matrix) product H @ y where
-    H = A + kappa * kappa^T, where A has some special structure, and kappa is an M-by-p
-    matrix. Thus, H is a rank-p update to A.
+    H = A + kappa @ D @ kappa^T, where A has some special structure, kappa is an M-by-p
+    matrix, and D = diag(d) with strictly positive d. Thus, H is a rank-p update to A.
+    When d is omitted, D = I and H = A + kappa @ kappa^T.
 
     Parameters
     ----------
@@ -809,6 +841,8 @@ def multiply_rank_p_update(
         A function that computes A @ z. The first argument to A_multiply will be z.
         Additional arguments will be passed via **kwargs. A_multiply should be able to
         accept multiple right-hand-sides.
+     d : npt.NDArray[np.float64], optional
+        Strictly positive vector of length p defining D = diag(d). Defaults to all ones.
      kwargs
         Extra arguments to pass to A_multiply.
 
@@ -819,13 +853,14 @@ def multiply_rank_p_update(
 
     Notes
     -----
-    Let H = A + kappa * kappa^T, where kappa is an M-by-p matrix. We compute
-    H @ y = A @ y + kappa @ (kappa^T @ y) in O(t + 4*M*p) time, where t is the time
-    needed to compute A @ z:
+    Let H = A + kappa @ D @ kappa^T, where kappa is an M-by-p matrix and D = diag(d)
+    with d > 0. We compute H @ y = A @ y + kappa @ (D @ (kappa^T @ y)) in O(t + 4*M*p)
+    time, where t is the time needed to compute A @ z:
        1. Compute A @ y (t time).
        2. Compute kappa^T @ y (2*M*p flops for a vector y).
-       3. Add kappa @ (kappa^T @ y) (2*M*p flops).
-    In total that's t + 4*M*p flops.
+       3. Scale by D: d * (kappa^T @ y) (p flops).
+       4. Add kappa @ (D @ (kappa^T @ y)) (2*M*p flops).
+    In total that's t + 4*M*p + p flops.
 
     """
     if y.ndim not in (1, 2):
@@ -834,7 +869,21 @@ def multiply_rank_p_update(
     if y.shape[0] != kappa.shape[0]:
         raise ValueError("Number of rows in y must match number of rows in kappa.")
 
-    return A_multiply(y, **kwargs) + kappa @ (kappa.T @ y)
+    p = kappa.shape[1]
+
+    if d is not None:
+        if d.shape != (p,):
+            raise ValueError("d must be a 1D array of length p (kappa.shape[1]).")
+        if not np.all(d > 0):
+            raise ValueError("d must have strictly positive entries.")
+
+    kkt = kappa.T @ y  # shape: (p,) or (p, q)
+    if d is not None:
+        if y.ndim == 1:
+            kkt = d * kkt
+        else:
+            kkt = d[:, np.newaxis] * kkt
+    return A_multiply(y, **kwargs) + kappa @ kkt
 
 
 def multiply_block_plus_one(

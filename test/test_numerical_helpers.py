@@ -1048,3 +1048,141 @@ def test_solve_block_diagonal_multiple_rhs(
 
     # Verify H * x = B
     np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M",
+    [
+        (123, 100),
+        (223, 200),
+        (323, 50),
+        (423, 500),
+        (523, 13),
+    ],
+)
+def test_solve_diagonal_plus_rank_one_with_d(seed: int, M: int) -> None:
+    """Test solving H*x = b for H = diag(eta) + d*kappa*kappa^T with scalar d."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    kappa = np.random.randn(M)
+    d = float(np.random.rand() + 0.5)
+    H = np.diag(eta) + d * np.outer(kappa, kappa)
+    b = np.random.randn(M)
+
+    x_expected = np.linalg.solve(H, b)
+    x = solve_rank_one_update(b, kappa, A_solve=solve_diagonal, d=d, eta=eta)
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H*x = b
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M,p",
+    [
+        (124, 100, 20),
+        (224, 200, 30),
+        (324, 50, 5),
+        (424, 500, 100),
+        (524, 13, 3),
+    ],
+)
+def test_solve_diagonal_plus_rank_one_with_d_multiple_rhs(
+    seed: int, M: int, p: int
+) -> None:
+    """Test solving H*x = b for H = diag(eta) + d*kappa*kappa^T, multiple RHS."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    kappa = np.random.randn(M)
+    d = float(np.random.rand() + 0.5)
+    H = np.diag(eta) + d * np.outer(kappa, kappa)
+    b = np.random.randn(M, p)
+
+    x_expected = np.linalg.solve(H, b)
+    x = solve_rank_one_update(b, kappa, A_solve=solve_diagonal, d=d, eta=eta)
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H*x = b
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M,p",
+    [
+        (125, 100, 3),
+        (225, 200, 10),
+        (325, 50, 2),
+        (425, 500, 10),
+        (525, 13, 2),
+    ],
+)
+def test_solve_arrow_plus_rank_p_with_d(seed: int, M: int, p: int) -> None:
+    """Test solving H*x = b for H = arrow + kappa @ D @ kappa^T with diagonal D."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    zeta = np.random.randn(M)
+    theta = np.dot(zeta / eta, zeta) + 1.0
+
+    A = np.zeros((M + 1, M + 1))
+    A[0:M, 0:M] = np.diag(eta)
+    A[M, 0:M] = zeta
+    A[0:M, M] = zeta
+    A[M, M] = theta
+
+    kappa = np.random.randn(M + 1, p)
+    d = np.random.rand(p) + 0.5
+    H = A + kappa @ np.diag(d) @ kappa.T
+    b = np.random.randn(M + 1)
+
+    x_expected = np.linalg.solve(H, b)
+    x = solve_rank_p_update(
+        b, kappa, A_solve=solve_arrow_sparsity_pattern, d=d, eta=eta, zeta=zeta, theta=theta
+    )
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H*x = b
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M,p,q",
+    [
+        (126, 100, 3, 20),
+        (226, 200, 10, 30),
+        (326, 50, 2, 5),
+        (426, 500, 10, 100),
+        (526, 13, 2, 3),
+    ],
+)
+def test_solve_arrow_plus_rank_p_with_d_multiple_rhs(
+    seed: int, M: int, p: int, q: int
+) -> None:
+    """Test solving H*x = b for H = arrow + kappa @ D @ kappa^T, multiple RHS."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    zeta = np.random.randn(M)
+    theta = np.dot(zeta / eta, zeta) + 1.0
+
+    A = np.zeros((M + 1, M + 1))
+    A[0:M, 0:M] = np.diag(eta)
+    A[M, 0:M] = zeta
+    A[0:M, M] = zeta
+    A[M, M] = theta
+
+    kappa = np.random.randn(M + 1, p)
+    d = np.random.rand(p) + 0.5
+    H = A + kappa @ np.diag(d) @ kappa.T
+    b = np.random.randn(M + 1, q)
+
+    x_expected = np.linalg.solve(H, b)
+    x = solve_rank_p_update(
+        b, kappa, A_solve=solve_arrow_sparsity_pattern, d=d, eta=eta, zeta=zeta, theta=theta
+    )
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H*x = b
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
