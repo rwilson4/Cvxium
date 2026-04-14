@@ -99,7 +99,8 @@ def solve_rank_one_update(
 
     Solves a linear system of equations where H = A + d * kappa * kappa^T, where A has
     some special structure that makes it easy to solve A * y = c, and kappa is a vector.
-    Thus, H is a rank-one update to A. When d is omitted, H = A + kappa * kappa^T.
+    Thus, H is a rank-one update (d > 0) or downdate (d < 0) to A. When d is omitted,
+    H = A + kappa * kappa^T.
 
     Parameters
     ----------
@@ -113,7 +114,8 @@ def solve_rank_one_update(
         Additional arguments will be passed via **kwargs. A_solve should be able to
         accept multiple right-hand-sides.
      d : float, optional
-        Positive scalar weight on the rank-one term. Defaults to 1.0.
+        Scalar weight on the rank-one term. Positive means update, negative means
+        downdate. Must be nonzero. Defaults to 1.0.
      kwargs
         Extra arguments to pass to A_solve.
 
@@ -124,13 +126,20 @@ def solve_rank_one_update(
 
     Notes
     -----
-    Let H = A + d * kappa * kappa^T, where kappa is a vector of length M and d > 0.
-    By the Sherman-Morrison formula, the Schur complement denominator becomes
-    1/d + kappa^T * A^{-1} * kappa. We can solve H * x = b in O(2*t + 6*M) time,
-    where t is the time needed to solve A*y = c, as follows:
+    Let H = A + d * kappa * kappa^T, where kappa is a vector of length M. By the
+    Sherman-Morrison formula, the Schur complement is the scalar
+    G = 1/d + kappa^T * A^{-1} * kappa. The formula is valid whenever G != 0.
+
+    When A is positive definite, the sign of G reveals H's definiteness:
+     - d > 0 (update): G > 0 always; H is PD.
+     - d < 0 (downdate): G < 0 -> H is PD; G = 0 -> H is singular;
+       G > 0 -> H is indefinite (downdate too large).
+
+    We raise NewtonStepError if H is not positive definite (G = 0 or G has the
+    wrong sign for the sign of d). The solve itself is O(2*t + 6*M):
        1. Solve A * x' = b (t time).
        2. Solve A * xi = kappa (t time).
-       3. Calculate x as x' - ((kappa^T * x') / (1/d + kappa^T * xi)) * xi.
+       3. Calculate x as x' - ((kappa^T * x') / G) * xi.
     In total that's 2*t, 3M multiplies, and 3M adds.
 
 
@@ -144,13 +153,21 @@ def solve_rank_one_update(
     else:
         raise ValueError("b must be either a 1D or 2D NumPy array.")
 
-    if d is not None and d <= 0:
-        raise ValueError("d must be strictly positive.")
+    if d is not None and d == 0:
+        raise ValueError("d must be nonzero.")
 
     x_prime = A_solve(b, **kwargs)
     xi = A_solve(kappa, **kwargs)
     schur_diag = 1.0 / d if d is not None else 1.0
-    den = 1.0 / (schur_diag + np.dot(kappa, xi))
+    G = schur_diag + np.dot(kappa, xi)
+
+    # For a downdate (d < 0), H is PD only when G < 0.
+    # G > 0 with d < 0 means the downdate is too large; H is indefinite.
+    # G = 0 means H is singular.
+    if d is not None and d < 0 and G >= 0:
+        raise NewtonStepError("H is not positive definite")
+
+    den = 1.0 / G
 
     if b.ndim == 1:
         return x_prime - (np.dot(kappa, x_prime) * den) * xi
@@ -171,8 +188,8 @@ def solve_rank_p_update(
 
     Solves a linear system of equations where H = A + kappa @ D @ kappa^T, where A has
     some special structure that makes it easy to solve A * y = c, kappa is rank p, and
-    D = diag(d) with strictly positive d. Thus, H is a rank-p update to A. When d is
-    omitted, D = I and H = A + kappa @ kappa^T.
+    D = diag(d). Thus, H is a rank-p update (d > 0) or downdate (d < 0) to A, or a mix
+    of both. When d is omitted, D = I and H = A + kappa @ kappa^T.
 
     Parameters
     ----------
@@ -186,7 +203,8 @@ def solve_rank_p_update(
         Additional arguments will be passed via **kwargs. A_solve should be able to
         accept multiple right-hand-sides.
      d : npt.NDArray[np.float64], optional
-        Strictly positive vector of length p defining D = diag(d). Defaults to all ones.
+        Nonzero vector of length p defining D = diag(d). Positive entries are updates,
+        negative entries are downdates. Defaults to all ones.
      kwargs
         Extra arguments to pass to A_solve.
 
@@ -197,28 +215,28 @@ def solve_rank_p_update(
 
     Notes
     -----
-    Let H = A + kappa @ D @ kappa^T, where kappa is an M-by-p matrix and D = diag(d)
-    with d > 0. By the Woodbury identity, the Schur complement matrix is
-    G = D^{-1} + kappa^T @ A^{-1} @ kappa. We can solve H * x = b in
-    O((p + q) * t + 2 * M * p * (p + 2 * q)) time, where t is the number of flops
-    needed to solve A*y = c, as follows:
-       1. Solve A * xi = kappa. This is p solves with A (at most p * t flops; by passing
-          multiple right hand sides it may be less than p * t flops, since we avoid
-          duplicating calculations unnecessarily). xi is M-by-p.
-       2. Calculate G = D^{-1} + kappa^T * xi (p^2 * M multiplies and p^2 * (M - 1) + p
-          adds, or O(2 * M * p^2) flops). G is p-by-p.
-       3. Compute the Cholesky factorization of G (1/3 * p^3 flops).
-       4. Solve A * x' = b (When there are q right-hand-sides, this is at most q * t
-          flops). x' is M-by-q.
-       5. Calculate z = kappa^T * x' (p * q * M multiplies and p * q * (M - 1) adds or
-          2 * M * p * q flops). z is p-by-q.
-       6. Solve G * y = z, using the Cholesky factorization. It takes 2 * p^2 * q time
-          to solve for y. y is p-by-q.
-       7. Calculate x as x' - xi @ y. This is M * p * q multiplies and M * p * q adds or
-          2 * M * p * q flops.
-    In total that's (p + q) * t + 2 * M * p^2 + 4 * M * p * q + (1/3) * p^3 + 2 * p^2 * q
-    flops, or (p + q) * t + 2 * M * p * (p + 2 * q) + p^2 * ((1/3) * p + 2 * q) or
-    (p + q) * t + 2 * M * p * (p + 2 * q) when p and q << M.
+    Let H = A + kappa @ D @ kappa^T, where kappa is an M-by-p matrix and D = diag(d).
+    By the Woodbury identity, the Schur complement matrix is
+    G = D^{-1} + kappa^T @ A^{-1} @ kappa. The formula is valid whenever G is invertible.
+
+    When A is positive definite, the sign structure of d determines how we check H's
+    positive definiteness via G:
+     - All d > 0 (pure update): G is always PD; H is always PD. Checked via Cholesky(G).
+     - All d < 0 (pure downdate): H is PD iff G is negative definite (ND), i.e. -G is
+       PD. Checked via Cholesky(-G). If -G is not PD, H is indefinite.
+     - Mixed d: PD status requires full eigenvalue analysis; we check only invertibility
+       via LU, and the solve is algebraically correct whenever G is invertible.
+
+    We can solve H * x = b in O((p + q) * t + 2 * M * p * (p + 2 * q)) time, where t is
+    the number of flops needed to solve A*y = c, as follows:
+       1. Solve A * xi = kappa. xi is M-by-p.
+       2. Calculate G = D^{-1} + kappa^T * xi. G is p-by-p.
+       3. Factor G (Cholesky or LU depending on sign of d).
+       4. Solve A * x' = b. x' is M-by-q.
+       5. Calculate z = kappa^T * x'. z is p-by-q.
+       6. Solve G * y = z. y is p-by-q.
+       7. Calculate x = x' - xi @ y.
+    In total that's (p + q) * t + 2 * M * p * (p + 2 * q) when p and q << M.
 
     """
     if b.ndim not in (1, 2):
@@ -232,8 +250,8 @@ def solve_rank_p_update(
     if d is not None:
         if d.shape != (p,):
             raise ValueError("d must be a 1D array of length p (kappa.shape[1]).")
-        if not np.all(d > 0):
-            raise ValueError("d must have strictly positive entries.")
+        if not np.all(d != 0):
+            raise ValueError("All entries of d must be nonzero.")
 
     # xi is M-by-p
     xi = A_solve(kappa, **kwargs)
@@ -243,17 +261,34 @@ def solve_rank_p_update(
         G = np.diag(1.0 / d) + kappa.T @ xi
     else:
         G = np.eye(p) + kappa.T @ xi
-    try:
-        c, lower = linalg.cho_factor(G, lower=True)
-    except np.linalg.LinAlgError:
-        raise NewtonStepError("H is not positive definite") from None
 
     # q RHS -> x_prime is M-by-q
     x_prime = A_solve(b, **kwargs)
     z = kappa.T @ x_prime  # p-by-q
 
-    # y is p-by-q
-    y = linalg.cho_solve((c, lower), z)
+    if d is None or np.all(d > 0):
+        # Pure update: G is always PD when A is PD. Use Cholesky.
+        try:
+            c, lower = linalg.cho_factor(G, lower=True)
+        except np.linalg.LinAlgError:
+            raise NewtonStepError("H is not positive definite") from None
+        y = linalg.cho_solve((c, lower), z)
+    elif np.all(d < 0):
+        # Pure downdate: H is PD iff G is ND, i.e. -G is PD.
+        try:
+            c, lower = linalg.cho_factor(-G, lower=True)
+        except np.linalg.LinAlgError:
+            raise NewtonStepError("H is not positive definite") from None
+        # G^{-1} z = -((-G)^{-1} z)
+        y = -linalg.cho_solve((c, lower), z)
+    else:
+        # Mixed signs: check invertibility only via LU.
+        try:
+            lu, piv = linalg.lu_factor(G)
+            y = linalg.lu_solve((lu, piv), z)
+        except np.linalg.LinAlgError:
+            raise NewtonStepError("H is not positive definite") from None
+
     return x_prime - xi @ y
 
 
@@ -761,8 +796,8 @@ def multiply_rank_one_update(
 
     Computes the matrix-vector (or matrix-matrix) product H @ y where
     H = A + d * kappa * kappa^T, where A has some special structure that makes it easy to
-    compute A @ z, and kappa is a vector. Thus, H is a rank-one update to A. When d is
-    omitted, H = A + kappa * kappa^T.
+    compute A @ z, and kappa is a vector. Thus, H is a rank-one update (d > 0) or downdate
+    (d < 0) to A. When d is omitted, H = A + kappa * kappa^T.
 
     Parameters
     ----------
@@ -776,7 +811,8 @@ def multiply_rank_one_update(
         Additional arguments will be passed via **kwargs. A_multiply should be able to
         accept multiple right-hand-sides.
      d : float, optional
-        Positive scalar weight on the rank-one term. Defaults to 1.0.
+        Scalar weight on the rank-one term. Positive means update, negative means
+        downdate. Defaults to 1.0.
      kwargs
         Extra arguments to pass to A_multiply.
 
@@ -787,9 +823,9 @@ def multiply_rank_one_update(
 
     Notes
     -----
-    Let H = A + d * kappa * kappa^T, where kappa is a vector of length M and d > 0. We
-    compute H @ y = A @ y + d * kappa * (kappa^T @ y) in O(t + 3*M) time, where t is
-    the time needed to compute A @ z:
+    Let H = A + d * kappa * kappa^T, where kappa is a vector of length M. We compute
+    H @ y = A @ y + d * kappa * (kappa^T @ y) in O(t + 3*M) time, where t is the time
+    needed to compute A @ z:
        1. Compute A @ y (t time).
        2. Compute kappa^T @ y (2*M flops).
        3. Add d * kappa * (kappa^T @ y) (2*M flops).
@@ -804,9 +840,6 @@ def multiply_rank_one_update(
             raise ValueError("Number of rows in y must match length of kappa.")
     else:
         raise ValueError("y must be either a 1D or 2D NumPy array.")
-
-    if d is not None and d <= 0:
-        raise ValueError("d must be strictly positive.")
 
     scale = d if d is not None else 1.0
     Ay = A_multiply(y, **kwargs)
@@ -827,8 +860,9 @@ def multiply_rank_p_update(
 
     Computes the matrix-vector (or matrix-matrix) product H @ y where
     H = A + kappa @ D @ kappa^T, where A has some special structure, kappa is an M-by-p
-    matrix, and D = diag(d) with strictly positive d. Thus, H is a rank-p update to A.
-    When d is omitted, D = I and H = A + kappa @ kappa^T.
+    matrix, and D = diag(d). Thus, H is a rank-p update (d > 0) or downdate (d < 0) to A.
+    Mixed signs in d are also permitted. When d is omitted, D = I and H = A + kappa @
+    kappa^T.
 
     Parameters
     ----------
@@ -842,7 +876,8 @@ def multiply_rank_p_update(
         Additional arguments will be passed via **kwargs. A_multiply should be able to
         accept multiple right-hand-sides.
      d : npt.NDArray[np.float64], optional
-        Strictly positive vector of length p defining D = diag(d). Defaults to all ones.
+        Vector of length p defining D = diag(d). Positive entries are updates, negative
+        entries are downdates. Defaults to all ones.
      kwargs
         Extra arguments to pass to A_multiply.
 
@@ -853,9 +888,9 @@ def multiply_rank_p_update(
 
     Notes
     -----
-    Let H = A + kappa @ D @ kappa^T, where kappa is an M-by-p matrix and D = diag(d)
-    with d > 0. We compute H @ y = A @ y + kappa @ (D @ (kappa^T @ y)) in O(t + 4*M*p)
-    time, where t is the time needed to compute A @ z:
+    Let H = A + kappa @ D @ kappa^T, where kappa is an M-by-p matrix and D = diag(d).
+    We compute H @ y = A @ y + kappa @ (D @ (kappa^T @ y)) in O(t + 4*M*p) time, where
+    t is the time needed to compute A @ z:
        1. Compute A @ y (t time).
        2. Compute kappa^T @ y (2*M*p flops for a vector y).
        3. Scale by D: d * (kappa^T @ y) (p flops).
@@ -871,11 +906,8 @@ def multiply_rank_p_update(
 
     p = kappa.shape[1]
 
-    if d is not None:
-        if d.shape != (p,):
-            raise ValueError("d must be a 1D array of length p (kappa.shape[1]).")
-        if not np.all(d > 0):
-            raise ValueError("d must have strictly positive entries.")
+    if d is not None and d.shape != (p,):
+        raise ValueError("d must be a 1D array of length p (kappa.shape[1]).")
 
     kkt = kappa.T @ y  # shape: (p,) or (p, q)
     if d is not None:

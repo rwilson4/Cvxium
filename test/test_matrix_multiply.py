@@ -697,3 +697,118 @@ def test_multiply_arrow_plus_rank_p_with_d_multiple_rhs(
     )
 
     np.testing.assert_allclose(Z, Z_expected, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "seed,M",
+    [
+        (1120, 100),
+        (1220, 200),
+        (1320, 50),
+        (1420, 500),
+        (1520, 13),
+    ],
+)
+def test_multiply_rank_one_downdate(seed: int, M: int) -> None:
+    """Test computing H@y for H = diag(eta) + d*kappa*kappa^T with negative d."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    kappa = np.random.randn(M)
+    # d negative: downdate. Keep |d| small enough that H stays PD.
+    d = -(float(np.random.rand()) * 0.5 / (np.dot(kappa, kappa / eta) + 1e-6))
+    H = np.diag(eta) + d * np.outer(kappa, kappa)
+    y = np.random.randn(M)
+
+    z_expected = H @ y
+    z = multiply_rank_one_update(y, kappa, A_multiply=multiply_diagonal, d=d, eta=eta)
+
+    np.testing.assert_allclose(z, z_expected, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "seed,M,r",
+    [
+        (1121, 100, 3),
+        (1221, 200, 10),
+        (1321, 50, 2),
+        (1421, 500, 10),
+        (1521, 13, 2),
+    ],
+)
+def test_multiply_rank_p_downdate(seed: int, M: int, r: int) -> None:
+    """Test computing H@y for H = arrow + kappa @ D @ kappa^T with negative d."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    zeta = np.random.randn(M)
+    theta = np.dot(zeta / eta, zeta) + 1.0
+    kappa = np.random.randn(M + 1, r)
+    d = -(np.random.rand(r) * 0.5)
+
+    A = np.zeros((M + 1, M + 1))
+    A[0:M, 0:M] = np.diag(eta)
+    A[M, 0:M] = zeta
+    A[0:M, M] = zeta
+    A[M, M] = theta
+
+    H = A + kappa @ np.diag(d) @ kappa.T
+    y = np.random.randn(M + 1)
+
+    z_expected = H @ y
+    z = multiply_rank_p_update(
+        y,
+        kappa,
+        A_multiply=multiply_arrow_sparsity_pattern,
+        d=d,
+        eta=eta,
+        zeta=zeta,
+        theta=theta,
+    )
+
+    np.testing.assert_allclose(z, z_expected, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "seed,M,r",
+    [
+        (1122, 100, 4),
+        (1222, 200, 6),
+        (1322, 50, 3),
+        (1422, 500, 8),
+        (1522, 13, 3),
+    ],
+)
+def test_multiply_rank_p_mixed_d(seed: int, M: int, r: int) -> None:
+    """Test computing H@y for H = arrow + kappa @ D @ kappa^T with mixed-sign d."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    zeta = np.random.randn(M)
+    theta = np.dot(zeta / eta, zeta) + 1.0
+    kappa = np.random.randn(M + 1, r)
+    # Half positive, half negative
+    d = np.where(
+        np.arange(r) % 2 == 0,
+        np.random.rand(r) + 0.5,
+        -(np.random.rand(r) * 0.3),
+    )
+
+    A = np.zeros((M + 1, M + 1))
+    A[0:M, 0:M] = np.diag(eta)
+    A[M, 0:M] = zeta
+    A[0:M, M] = zeta
+    A[M, M] = theta
+
+    H = A + kappa @ np.diag(d) @ kappa.T
+    y = np.random.randn(M + 1)
+
+    z_expected = H @ y
+    z = multiply_rank_p_update(
+        y,
+        kappa,
+        A_multiply=multiply_arrow_sparsity_pattern,
+        d=d,
+        eta=eta,
+        zeta=zeta,
+        theta=theta,
+    )
+
+    np.testing.assert_allclose(z, z_expected, rtol=1e-12, atol=1e-12)
