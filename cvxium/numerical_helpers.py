@@ -127,8 +127,9 @@ def solve_rank_one_update(
     Notes
     -----
     Let H = A + d * kappa * kappa^T, where kappa is a vector of length M. By the
-    Sherman-Morrison formula, the Schur complement is the scalar
-    G = 1/d + kappa^T * A^{-1} * kappa. The formula is valid whenever G != 0.
+    Sherman-Morrison formula, the relevant scalar is:
+       G = 1/d + kappa^T * A^{-1} * kappa.
+    The formula is valid whenever G != 0.
 
     When A is positive definite, the sign of G reveals H's definiteness:
      - d > 0 (update): G > 0 always; H is PD.
@@ -149,7 +150,7 @@ def solve_rank_one_update(
             raise ValueError("b and kappa must have the same length.")
     elif b.ndim == 2:
         if b.shape[0] != kappa.shape[0]:
-            raise ValueError("Number of rows in beta must match length of kappa.")
+            raise ValueError("Number of rows in b must match length of kappa.")
     else:
         raise ValueError("b must be either a 1D or 2D NumPy array.")
 
@@ -160,6 +161,10 @@ def solve_rank_one_update(
     xi = A_solve(kappa, **kwargs)
     schur_diag = 1.0 / d if d is not None else 1.0
     G = schur_diag + np.dot(kappa, xi)
+
+    tol = 1e-12
+    if abs(G) <= tol:
+        raise NewtonStepError("H is singular or nearly singular")
 
     # For a downdate (d < 0), H is PD only when G < 0.
     # G > 0 with d < 0 means the downdate is too large; H is indefinite.
@@ -187,9 +192,9 @@ def solve_rank_p_update(
     """Solve H * x = b.
 
     Solves a linear system of equations where H = A + kappa @ D @ kappa^T, where A has
-    some special structure that makes it easy to solve A * y = c, kappa is rank p, and
-    D = diag(d). Thus, H is a rank-p update (d > 0) or downdate (d < 0) to A, or a mix
-    of both. When d is omitted, D = I and H = A + kappa @ kappa^T.
+    some special structure that makes it easy to solve A * y = c, kappa is M-by-p
+    (p << M), and D = diag(d). Thus, H is a rank-p update (d > 0) or downdate (d < 0) to
+    A, or a mix of both. When d is omitted, D = I and H = A + kappa @ kappa^T.
 
     Parameters
     ----------
@@ -216,16 +221,16 @@ def solve_rank_p_update(
     Notes
     -----
     Let H = A + kappa @ D @ kappa^T, where kappa is an M-by-p matrix and D = diag(d).
-    By the Woodbury identity, the Schur complement matrix is
-    G = D^{-1} + kappa^T @ A^{-1} @ kappa. The formula is valid whenever G is invertible.
+    By the Woodbury identity, the Woodbury matrix is:
+       G = D^{-1} + kappa^T @ A^{-1} @ kappa.
+    The formula is valid whenever G is invertible.
 
     When A is positive definite, the sign structure of d determines how we check H's
     positive definiteness via G:
      - All d > 0 (pure update): G is always PD; H is always PD. Checked via Cholesky(G).
      - All d < 0 (pure downdate): H is PD iff G is negative definite (ND), i.e. -G is
        PD. Checked via Cholesky(-G). If -G is not PD, H is indefinite.
-     - Mixed d: PD status requires full eigenvalue analysis; we check only invertibility
-       via LU, and the solve is algebraically correct whenever G is invertible.
+     - Mixed d: We assess PD status via eigenvalue analysis. We then solve Gy = z via LU.
 
     We can solve H * x = b in O((p + q) * t + 2 * M * p * (p + 2 * q)) time, where t is
     the number of flops needed to solve A*y = c, as follows:
@@ -242,8 +247,11 @@ def solve_rank_p_update(
     if b.ndim not in (1, 2):
         raise ValueError("b must be either a 1D or 2D NumPy array.")
 
+    if kappa.ndim != 2:
+        raise ValueError("kappa must be a 2D array with shape (M, p).")
+
     if b.shape[0] != kappa.shape[0]:
-        raise ValueError("Number of rows in beta must match length of kappa.")
+        raise ValueError("b.shape[0] must equal kappa.shape[0].")
 
     p = kappa.shape[1]
 
@@ -261,6 +269,9 @@ def solve_rank_p_update(
         G = np.diag(1.0 / d) + kappa.T @ xi
     else:
         G = np.eye(p) + kappa.T @ xi
+
+    # Clean up any asymmetries before factoring
+    G = 0.5 * (G + G.T)
 
     # q RHS -> x_prime is M-by-q
     x_prime = A_solve(b, **kwargs)
@@ -283,11 +294,27 @@ def solve_rank_p_update(
         y = -linalg.cho_solve((c, lower), z)
     else:
         # Mixed signs: check invertibility only via LU.
+        evals = np.linalg.eigvalsh(G)
+        tol = 1e-12 * max(1.0, np.max(np.abs(evals)))
+
+        n_pos_G = np.sum(evals > tol)
+        n_neg_G = np.sum(evals < -tol)
+        n_zero_G = len(evals) - n_pos_G - n_neg_G
+
+        n_pos_D = np.sum(d > 0)
+        n_neg_D = np.sum(d < 0)
+
+        if n_zero_G > 0:
+            raise NewtonStepError("H is singular or nearly singular")
+
+        if n_pos_G != n_pos_D or n_neg_G != n_neg_D:
+            raise NewtonStepError("H is not positive definite")
+
         try:
             lu, piv = linalg.lu_factor(G)
             y = linalg.lu_solve((lu, piv), z)
         except np.linalg.LinAlgError:
-            raise NewtonStepError("H is not positive definite") from None
+            raise NewtonStepError("Failed to solve Gy = z") from None
 
     return x_prime - xi @ y
 
@@ -844,9 +871,9 @@ def multiply_rank_one_update(
     scale = d if d is not None else 1.0
     Ay = A_multiply(y, **kwargs)
     if y.ndim == 1:
-        return Ay + scale * kappa * np.dot(kappa, y)
+        return Ay + kappa * (scale * np.dot(kappa, y))
     else:
-        return Ay + scale * np.outer(kappa, kappa.T @ y)
+        return Ay + np.outer(kappa, scale * (kappa.T @ y))
 
 
 def multiply_rank_p_update(
