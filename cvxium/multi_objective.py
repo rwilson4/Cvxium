@@ -23,9 +23,8 @@ class FrontierPoint:
     solution : array
         The decision variable at this point.
     bounds : array of shape (N-1,)
-        The upper bounds on auxiliary objectives that were imposed when solving.
-        Set to ``np.full(N-1, np.inf)`` for corner points where no bounds were
-        imposed.
+        The upper bounds on auxiliary objectives that were imposed when solving. Set to
+        ``np.full(N-1, np.inf)`` for corner points where no bounds were imposed.
     ipm_result : InteriorPointMethodResult
         The raw result from the underlying solver.
 
@@ -43,23 +42,21 @@ class FrontierResults:
     Parameters
     ----------
     points : list[FrontierPoint]
-        All successfully evaluated points, including the corner points,
-        deduplicated by objective vector.
+        All successfully evaluated points, including the corner points, deduplicated by
+        objective vector.
     corners : list[FrontierPoint]
-        The N corner points, one per objective. ``corners[0]`` minimizes the
-        primary objective; ``corners[k]`` minimizes the k-th auxiliary objective
-        (in the order they appear in ``evaluate_objectives``, skipping the
-        primary). If a corner solve failed, fewer than N corners are stored and
-        :meth:`knee` will raise.
+        The N corner points, one per objective. ``corners[0]`` minimizes the primary
+        objective; ``corners[k]`` minimizes the k-th auxiliary objective (in the order
+        they appear in ``evaluate_objectives``, skipping the primary). If a corner solve
+        failed, fewer than N corners are stored and `knee` will raise.
     primary_objective : int
         Index of the primary objective.
     n_attempted : int
-        Number of grid points where :meth:`~MultiObjectiveOptimizer.solve_with_bounds`
-        was called.
+        Number of grid points where `MultiObjectiveOptimizer.solve_with_bounds` was
+        called.
     n_skipped : int
         Number of grid points that were skipped because the solver raised
-        :class:`~cvxium.OptimizationError` or
-        :class:`~cvxium.ProblemInfeasibleError`.
+        `cvxium.OptimizationError` or `cvxium.ProblemInfeasibleError`.
 
     """
 
@@ -80,18 +77,17 @@ class FrontierResults:
     def knee(self) -> FrontierPoint:
         """Return the frontier point maximally distant from the corner hyperplane.
 
-        Identifies the "knee in the curve" by finding the point on the frontier
-        farthest from the hyperplane that passes through the N corner points
-        (where N is the number of objectives). For two objectives this reduces
-        to the standard max-chord-distance method.
+        Identifies the "knee in the curve" by finding the point on the frontier farthest
+        from the hyperplane that passes through the N corner points (where N is the
+        number of objectives). For two objectives this reduces to the standard
+        max-chord-distance method.
 
-        The reference hyperplane is constructed by translating the corner points
-        so that ``corners[0]`` is at the origin, then finding the null-space of
-        the matrix whose rows are the remaining translated corners via SVD. This
-        requires the N corner points to be **affinely independent**: if they are
-        (nearly) coplanar in objective space the normal will be numerically
-        unreliable. The check ``norm == 0`` catches exact degeneracy; near-
-        degeneracy is not currently detected.
+        The reference hyperplane is constructed by translating the corner points so that
+        ``corners[0]`` is at the origin, then finding the null-space of the matrix whose
+        rows are the remaining translated corners via SVD. This requires the N corner
+        points to be **affinely independent**: if they are (nearly) coplanar in
+        objective space the normal will be numerically unreliable. The check ``norm ==
+        0`` catches exact degeneracy; near- degeneracy is not currently detected.
 
         Returns
         -------
@@ -100,9 +96,9 @@ class FrontierResults:
         Raises
         ------
         ValueError
-            If the frontier is empty, if fewer than N corners are available
-            (where N = number of objectives inferred from the first point), or
-            if the corner points are degenerate.
+            If the frontier is empty, if fewer than N corners are available (where N =
+            number of objectives inferred from the first point), or if the corner points
+            are degenerate.
 
         """
         if not self.points:
@@ -153,21 +149,20 @@ class MultiObjectiveOptimizer(ABC):
 
     To use this class, subclass it and implement:
 
-    - :meth:`solve_with_bounds` — minimize the primary objective subject to
-      upper bounds on each auxiliary objective.
-    - :meth:`minimize_objective` — minimize a single objective with no bounds
-      on the others.
-    - :meth:`evaluate_objectives` — return all N objective values at a point.
+    - `solve_with_bounds` — minimize the primary objective subject to upper bounds on
+      each auxiliary objective.
+    - `minimize_objective` — minimize a single objective with no bounds on the others.
+    - `evaluate_objectives` — return all N objective values at a point.
 
-    Then call :meth:`trace` to sweep over a uniform grid of auxiliary bounds
-    and collect the resulting Pareto-optimal points.
+    Then call `trace` to sweep over a uniform grid of auxiliary bounds and collect the
+    resulting Pareto-optimal points.
 
     Parameters
     ----------
     primary_objective : int, default=0
-        Index into the vector returned by :meth:`evaluate_objectives` that
-        identifies the objective to minimize during the frontier sweep. All
-        other objectives become auxiliary and receive parametric upper bounds.
+        Index into the vector returned by `evaluate_objectives` that identifies the
+        objective to minimize during the frontier sweep. All other objectives become
+        auxiliary and receive parametric upper bounds.
 
     """
 
@@ -183,9 +178,8 @@ class MultiObjectiveOptimizer(ABC):
         Parameters
         ----------
         bounds : array of shape (N-1,)
-            ``bounds[j]`` is the upper bound imposed on auxiliary objective
-            ``j`` (in the order objectives appear in :meth:`evaluate_objectives`,
-            skipping the primary).
+            ``bounds[j]`` is the upper bound imposed on auxiliary objective ``j`` (in
+            the order objectives appear in `evaluate_objectives`, skipping the primary).
 
         Returns
         -------
@@ -198,13 +192,13 @@ class MultiObjectiveOptimizer(ABC):
     def minimize_objective(self, objective_index: int) -> InteriorPointMethodResult:
         """Minimize a single objective with no bounds on the others.
 
-        Used by :meth:`trace` to compute the N corner points of the frontier
-        and to auto-detect the sweep range for each auxiliary objective.
+        Used by `trace` to compute the N corner points of the frontier and to
+        auto-detect the sweep range for each auxiliary objective.
 
         Parameters
         ----------
         objective_index : int
-            Index into the vector returned by :meth:`evaluate_objectives`.
+            Index into the vector returned by `evaluate_objectives`.
 
         Returns
         -------
@@ -227,8 +221,8 @@ class MultiObjectiveOptimizer(ABC):
         Returns
         -------
         array of shape (N,)
-            Objective values. The element at index ``self.primary_objective``
-            is the primary objective; all others are auxiliary.
+            Objective values. The element at index ``self.primary_objective`` is the
+            primary objective; all others are auxiliary.
 
         """
         ...
@@ -238,22 +232,20 @@ class MultiObjectiveOptimizer(ABC):
 
         Algorithm
         ---------
-        1. Call :meth:`minimize_objective` for every objective to get N corner
-           points and auto-detect the sweep range for each auxiliary.
+        1. Call `minimize_objective` for every objective to get N corner points and
+           auto-detect the sweep range for each auxiliary.
         2. Build a uniform grid of ``num_points`` values per auxiliary dimension
            spanning ``[bounds_min, bounds_max]``.
-        3. For each grid point, call :meth:`solve_with_bounds`; silently skip
-           any point that raises :class:`~cvxium.OptimizationError` or
-           :class:`~cvxium.ProblemInfeasibleError`.
-        4. Deduplicate by objective vector (within ``1e-8`` absolute tolerance),
-           then return all unique points together with the corners.
+        3. For each grid point, call `solve_with_bounds`; silently skip any point that
+           raises `cvxium.OptimizationError` or `cvxium.ProblemInfeasibleError`.
+        4. Deduplicate by objective vector (within ``1e-8`` absolute tolerance), then
+           return all unique points together with the corners.
 
         Parameters
         ----------
         num_points : int, default=50
-            Number of grid points along each auxiliary-objective dimension.
-            Total solves is at most ``N + num_points^(N-1)`` where ``N`` is
-            the number of objectives.
+            Number of grid points along each auxiliary-objective dimension. Total solves
+            is at most ``N + num_points^(N-1)`` where ``N`` is the number of objectives.
 
         Returns
         -------
