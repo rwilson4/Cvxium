@@ -71,10 +71,10 @@ Optimizer (ABC)
 
 To implement a new solver, pick a base class from this table:
 
-| Constraints           | Optimization                                                             | Feasibility                                                              |
-|-----------------------|--------------------------------------------------------------------------|--------------------------------------------------------------------------|
-| None                  | UnconstrainedNewtonSolver                                                | n/a                                                                      |
-| Equality              | EqualityConstrainedNewtonSolver                                          | EqualitySolver                                                           |
+| Constraints           | Optimization                                                             | Feasibility                                                                   |
+|-----------------------|--------------------------------------------------------------------------|-------------------------------------------------------------------------------|
+| None                  | UnconstrainedNewtonSolver                                                | n/a                                                                           |
+| Equality              | EqualityConstrainedNewtonSolver                                          | EqualitySolver                                                                |
 | Inequality            | InteriorPointMethodSolver                                                | FeasibilityInteriorPointSolver                                                |
 | Equality + Inequality | InteriorPointMethodSolver + EqualityConstrainedInteriorPointMethodSolver | FeasibilityInteriorPointSolver + EqualityConstrainedInteriorPointMethodSolver |
 
