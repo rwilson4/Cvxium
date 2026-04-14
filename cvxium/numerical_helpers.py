@@ -149,7 +149,7 @@ def solve_rank_one_update(
 
     x_prime = A_solve(b, **kwargs)
     xi = A_solve(kappa, **kwargs)
-    schur_diag = (1.0 / d if d is not None else 1.0)
+    schur_diag = 1.0 / d if d is not None else 1.0
     den = 1.0 / (schur_diag + np.dot(kappa, xi))
 
     if b.ndim == 1:

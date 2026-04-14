@@ -1138,7 +1138,13 @@ def test_solve_arrow_plus_rank_p_with_d(seed: int, M: int, p: int) -> None:
 
     x_expected = np.linalg.solve(H, b)
     x = solve_rank_p_update(
-        b, kappa, A_solve=solve_arrow_sparsity_pattern, d=d, eta=eta, zeta=zeta, theta=theta
+        b,
+        kappa,
+        A_solve=solve_arrow_sparsity_pattern,
+        d=d,
+        eta=eta,
+        zeta=zeta,
+        theta=theta,
     )
 
     np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
@@ -1179,7 +1185,13 @@ def test_solve_arrow_plus_rank_p_with_d_multiple_rhs(
 
     x_expected = np.linalg.solve(H, b)
     x = solve_rank_p_update(
-        b, kappa, A_solve=solve_arrow_sparsity_pattern, d=d, eta=eta, zeta=zeta, theta=theta
+        b,
+        kappa,
+        A_solve=solve_arrow_sparsity_pattern,
+        d=d,
+        eta=eta,
+        zeta=zeta,
+        theta=theta,
     )
 
     np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
