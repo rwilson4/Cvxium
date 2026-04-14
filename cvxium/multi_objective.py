@@ -4,8 +4,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from itertools import product as itertools_product
 
+import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
+from matplotlib.axes import Axes
 from scipy import linalg
 
 from .exceptions import OptimizationError, ProblemInfeasibleError
@@ -142,6 +144,107 @@ class FrontierResults:
             [abs(float(np.dot(p.objectives - p0, normal))) for p in self.points]
         )
         return self.points[int(distances.argmax())]
+
+    def plot(
+        self,
+        annotate_knee: bool = True,
+        ax: Axes | None = None,
+        x_label: str = "Primary Objective",
+        y_label: str = "Auxiliary Objective",
+    ) -> Axes:
+        r"""Plot the 2-objective Pareto frontier.
+
+        Parameters
+        ----------
+        annotate_knee : bool, default=True
+            If True, mark the knee point and draw a tangent line estimated numerically
+            from adjacent frontier points.
+        ax : matplotlib Axes, optional
+            If provided, plot onto this Axes; otherwise create a new figure.
+        x_label : str, default="Primary Objective"
+        y_label : str, default="Auxiliary Objective"
+
+        Returns
+        -------
+        Axes
+
+        Raises
+        ------
+        NotImplementedError
+            If there are more than 2 objectives.
+        ValueError
+            If the frontier has no points.
+
+        Notes
+        -----
+        The tangent slope is approximated by the secant between the two nearest frontier
+        points rather than from Lagrange multipliers, so it is correct regardless of how
+        ``solve_with_bounds`` normalizes the auxiliary constraint internally.
+
+        """
+        if not self.points:
+            raise ValueError("No frontier points to plot.")
+        n_obj = len(self.points[0].objectives)
+        if n_obj != 2:
+            raise NotImplementedError(
+                f"plot() supports only 2-objective frontiers; got {n_obj} objectives."
+            )
+
+        if ax is None:
+            _, ax = plt.subplots()
+
+        # Sort by auxiliary objective (f1) ascending so the curve is coherent.
+        pts = sorted(self.points, key=lambda p: float(p.objectives[1]))
+        xs = [float(p.objectives[0]) for p in pts]  # primary (f0), x-axis
+        ys = [float(p.objectives[1]) for p in pts]  # auxiliary (f1), y-axis
+
+        ax.plot(xs, ys)
+        ax.fill_between(xs, ys, max(ys), color="lightblue", alpha=0.5)
+
+        if annotate_knee and len(pts) >= 2:
+            try:
+                knee_pt = self.knee()
+                kx = float(knee_pt.objectives[0])
+                ky = float(knee_pt.objectives[1])
+
+                # Tangent slope from neighboring points (avoids dependence on
+                # Lagrange multiplier normalization inside solve_with_bounds).
+                knee_idx = next(
+                    (
+                        i
+                        for i, p in enumerate(pts)
+                        if np.allclose(p.objectives, knee_pt.objectives, atol=1e-8)
+                    ),
+                    None,
+                )
+                slope: float | None = None
+                if knee_idx is not None and 0 < knee_idx < len(pts) - 1:
+                    dx = xs[knee_idx + 1] - xs[knee_idx - 1]
+                    dy = ys[knee_idx + 1] - ys[knee_idx - 1]
+                    if abs(dx) > 0:
+                        slope = dy / dx
+
+                if slope is not None:
+                    width = max(min(0.5 * (kx - min(xs)), 0.5 * (max(xs) - kx)), 0.0)
+                    x_vals = np.linspace(kx - width, kx + width)
+                    ax.plot(x_vals, ky + slope * (x_vals - kx), color="orange")
+
+                xlim = ax.get_xlim()
+                ylim = ax.get_ylim()
+                ax.hlines(
+                    y=ky, xmin=xlim[0], xmax=kx, colors="orange", linestyles="dashed"
+                )
+                ax.vlines(
+                    x=kx, ymin=ylim[0], ymax=ky, colors="orange", linestyles="dashed"
+                )
+                ax.set_xlim(xlim)
+                ax.set_ylim(ylim)
+            except ValueError:
+                pass  # knee() raised; skip annotation
+
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+        return ax
 
 
 class MultiObjectiveOptimizer(ABC):
@@ -349,6 +452,8 @@ class MultiObjectiveOptimizer(ABC):
                 np.allclose(p.objectives, q.objectives, atol=1e-8) for q in unique
             ):
                 unique.append(p)
+
+        unique.sort(key=lambda p: float(p.objectives[self.primary_objective]))
 
         return FrontierResults(
             points=unique,

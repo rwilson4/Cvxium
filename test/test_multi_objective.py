@@ -449,3 +449,62 @@ class TestThreeObjectiveFrontier:
         knee = results.knee()
         assert isinstance(knee, FrontierPoint)
         assert any(knee is p for p in results.points)
+
+
+class TestPlot:
+    """Tests for FrontierResults.plot()."""
+
+    @staticmethod
+    def test_plot_returns_axes() -> None:
+        import matplotlib
+        import matplotlib.pyplot as plt
+        from matplotlib.axes import Axes
+
+        matplotlib.use("Agg")
+        plt.close("all")
+        d = np.array([1.0, 2.0])
+        solver = BallConstrainedNorm(d)
+        fr = solver.trace(num_points=10)
+        ax = fr.plot()
+        assert isinstance(ax, Axes)
+        plt.close("all")
+
+    @staticmethod
+    def test_plot_no_annotation() -> None:
+        import matplotlib
+        import matplotlib.pyplot as plt
+        from matplotlib.axes import Axes
+
+        matplotlib.use("Agg")
+        plt.close("all")
+        d = np.array([1.0, 2.0])
+        solver = BallConstrainedNorm(d)
+        fr = solver.trace(num_points=10)
+        ax = fr.plot(annotate_knee=False)
+        assert isinstance(ax, Axes)
+        plt.close("all")
+
+    @staticmethod
+    def test_plot_raises_for_3_objectives() -> None:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        solver = SeparableBallConstraints()
+        fr = solver.trace(num_points=3)
+        with pytest.raises(NotImplementedError):
+            fr.plot()
+
+    @staticmethod
+    def test_plot_raises_for_empty_frontier() -> None:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        fr = FrontierResults(
+            points=[],
+            corners=[],
+            primary_objective=0,
+            n_attempted=0,
+            n_skipped=0,
+        )
+        with pytest.raises(ValueError):
+            fr.plot()
