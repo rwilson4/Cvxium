@@ -150,10 +150,9 @@ Cvxium's real power is its framework for new problem types. You
 subclass one of the base classes, implement a handful of methods
 (objective, gradient, Hessian multiply, Newton step, dual), and the
 IPM loop is handled for you. A library of composable structured linear
-system solvers (`solve_diagonal`, `solve_rank_one_update`,
-`solve_rank_p_update`, `solve_kkt_system`, etc.) makes it
-straightforward to go from a mathematical description of the Hessian
-to a fast Newton step.
+algebra operations (e.g. matrix multiplication and solving systems of
+linear equations) makes it straightforward to go from a mathematical
+description of the Hessian to a fast Newton step.
 
 Full guidance — including worked examples, the class hierarchy, and
 the numerical helpers reference — is in USAGE.md and can be retrieved
@@ -205,6 +204,22 @@ settings = OptimizationSettings(
     verbose=False,
 )
 ```
+
+## Pareto frontier tracing for multi-objective problems
+
+When a problem involves two or more competing objectives, Cvxium can
+trace the full **Pareto frontier** — the curve of solutions where no
+objective can be improved without worsening another.
+
+The MultiObjectiveOptimizer (and classes that inherit from it)
+facilitates trading off between competing objectives. For example, we
+might have a tradeoff between speed and cost in some application. We
+can often find a "knee in the curve" that provides most of the speed
+benefit, with only a fraction of the cost, giving an "80/20 rule" kind
+of performance. This framework provides functionality for visualizing
+the tradeoff curve and automatically identifying a good tradeoff.
+
+See USAGE.md for full guidance.
 
 ## References
 
