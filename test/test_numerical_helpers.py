@@ -9,6 +9,7 @@ import numpy.typing as npt
 import pytest
 from scipy import linalg
 
+from cvxium.exceptions import NewtonStepError
 from cvxium.numerical_helpers import (
     multiply_arrow_sparsity_pattern,
     multiply_block_diagonal,
@@ -1047,4 +1048,357 @@ def test_solve_block_diagonal_multiple_rhs(
     np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
 
     # Verify H * x = B
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M",
+    [
+        (123, 100),
+        (223, 200),
+        (323, 50),
+        (423, 500),
+        (523, 13),
+    ],
+)
+def test_solve_diagonal_plus_rank_one_with_d(seed: int, M: int) -> None:
+    """Test solving H*x = b for H = diag(eta) + d*kappa*kappa^T with scalar d."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    kappa = np.random.randn(M)
+    d = float(np.random.rand() + 0.5)
+    H = np.diag(eta) + d * np.outer(kappa, kappa)
+    b = np.random.randn(M)
+
+    x_expected = np.linalg.solve(H, b)
+    x = solve_rank_one_update(b, kappa, A_solve=solve_diagonal, d=d, eta=eta)
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H*x = b
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M,p",
+    [
+        (124, 100, 20),
+        (224, 200, 30),
+        (324, 50, 5),
+        (424, 500, 100),
+        (524, 13, 3),
+    ],
+)
+def test_solve_diagonal_plus_rank_one_with_d_multiple_rhs(
+    seed: int, M: int, p: int
+) -> None:
+    """Test solving H*x = b for H = diag(eta) + d*kappa*kappa^T, multiple RHS."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    kappa = np.random.randn(M)
+    d = float(np.random.rand() + 0.5)
+    H = np.diag(eta) + d * np.outer(kappa, kappa)
+    b = np.random.randn(M, p)
+
+    x_expected = np.linalg.solve(H, b)
+    x = solve_rank_one_update(b, kappa, A_solve=solve_diagonal, d=d, eta=eta)
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H*x = b
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M,p",
+    [
+        (125, 100, 3),
+        (225, 200, 10),
+        (325, 50, 2),
+        (425, 500, 10),
+        (525, 13, 2),
+    ],
+)
+def test_solve_arrow_plus_rank_p_with_d(seed: int, M: int, p: int) -> None:
+    """Test solving H*x = b for H = arrow + kappa @ D @ kappa^T with diagonal D."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    zeta = np.random.randn(M)
+    theta = np.dot(zeta / eta, zeta) + 1.0
+
+    A = np.zeros((M + 1, M + 1))
+    A[0:M, 0:M] = np.diag(eta)
+    A[M, 0:M] = zeta
+    A[0:M, M] = zeta
+    A[M, M] = theta
+
+    kappa = np.random.randn(M + 1, p)
+    d = np.random.rand(p) + 0.5
+    H = A + kappa @ np.diag(d) @ kappa.T
+    b = np.random.randn(M + 1)
+
+    x_expected = np.linalg.solve(H, b)
+    x = solve_rank_p_update(
+        b,
+        kappa,
+        A_solve=solve_arrow_sparsity_pattern,
+        d=d,
+        eta=eta,
+        zeta=zeta,
+        theta=theta,
+    )
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H*x = b
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M,p,q",
+    [
+        (126, 100, 3, 20),
+        (226, 200, 10, 30),
+        (326, 50, 2, 5),
+        (426, 500, 10, 100),
+        (526, 13, 2, 3),
+    ],
+)
+def test_solve_arrow_plus_rank_p_with_d_multiple_rhs(
+    seed: int, M: int, p: int, q: int
+) -> None:
+    """Test solving H*x = b for H = arrow + kappa @ D @ kappa^T, multiple RHS."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    zeta = np.random.randn(M)
+    theta = np.dot(zeta / eta, zeta) + 1.0
+
+    A = np.zeros((M + 1, M + 1))
+    A[0:M, 0:M] = np.diag(eta)
+    A[M, 0:M] = zeta
+    A[0:M, M] = zeta
+    A[M, M] = theta
+
+    kappa = np.random.randn(M + 1, p)
+    d = np.random.rand(p) + 0.5
+    H = A + kappa @ np.diag(d) @ kappa.T
+    b = np.random.randn(M + 1, q)
+
+    x_expected = np.linalg.solve(H, b)
+    x = solve_rank_p_update(
+        b,
+        kappa,
+        A_solve=solve_arrow_sparsity_pattern,
+        d=d,
+        eta=eta,
+        zeta=zeta,
+        theta=theta,
+    )
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+
+    # Verify H*x = b
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# Downdate solve tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "seed,M",
+    [
+        (127, 100),
+        (227, 200),
+        (327, 50),
+        (427, 500),
+        (527, 13),
+    ],
+)
+def test_solve_rank_one_downdate_pd(seed: int, M: int) -> None:
+    """Solve H*x = b for H = diag(eta) + d*kappa*kappa^T, d < 0, H still PD."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    kappa = np.random.randn(M)
+    # Choose |d| < 1 / (kappa^T A^{-1} kappa) so the downdate keeps H PD.
+    max_d = 1.0 / np.dot(kappa, kappa / eta)
+    d = -float(np.random.rand() * 0.5 * max_d)
+    H = np.diag(eta) + d * np.outer(kappa, kappa)
+    b = np.random.randn(M)
+
+    x_expected = np.linalg.solve(H, b)
+    x = solve_rank_one_update(b, kappa, A_solve=solve_diagonal, d=d, eta=eta)
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M",
+    [
+        (128, 100),
+        (228, 200),
+        (328, 50),
+        (428, 500),
+        (528, 13),
+    ],
+)
+def test_solve_rank_one_downdate_indefinite_raises(seed: int, M: int) -> None:
+    """NewtonStepError raised when rank-one downdate makes H indefinite."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    kappa = np.random.randn(M)
+    # Choose |d| > 1 / (kappa^T A^{-1} kappa) so the downdate makes H indefinite.
+    max_d = 1.0 / np.dot(kappa, kappa / eta)
+    d = -float((1.0 + np.random.rand()) * max_d)
+    b = np.random.randn(M)
+
+    with pytest.raises(NewtonStepError):
+        solve_rank_one_update(b, kappa, A_solve=solve_diagonal, d=d, eta=eta)
+
+
+@pytest.mark.parametrize(
+    "seed,M,p",
+    [
+        (129, 100, 3),
+        (229, 200, 10),
+        (329, 50, 2),
+        (429, 500, 10),
+        (529, 13, 2),
+    ],
+)
+def test_solve_rank_p_downdate_pd(seed: int, M: int, p: int) -> None:
+    """Solve H*x = b for H = arrow + kappa @ D @ kappa^T, all d < 0, H still PD."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    zeta = np.random.randn(M)
+    theta = np.dot(zeta / eta, zeta) + 1.0
+
+    A = np.zeros((M + 1, M + 1))
+    A[0:M, 0:M] = np.diag(eta)
+    A[M, 0:M] = zeta
+    A[0:M, M] = zeta
+    A[M, M] = theta
+
+    kappa = np.random.randn(M + 1, p)
+    # Scale kappa down so the downdate is small enough to keep H PD.
+    kappa = kappa / (np.linalg.norm(kappa) * 4)
+    d = -(np.random.rand(p) + 0.5)
+    H = A + kappa @ np.diag(d) @ kappa.T
+
+    # Verify H is actually PD before testing.
+    assert np.all(np.linalg.eigvalsh(H) > 0), "Test setup error: H is not PD"
+
+    b = np.random.randn(M + 1)
+
+    x_expected = np.linalg.solve(H, b)
+    x = solve_rank_p_update(
+        b,
+        kappa,
+        A_solve=solve_arrow_sparsity_pattern,
+        d=d,
+        eta=eta,
+        zeta=zeta,
+        theta=theta,
+    )
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
+    np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    "seed,M,p",
+    [
+        (130, 100, 3),
+        (230, 200, 10),
+        (330, 50, 2),
+        (430, 500, 10),
+        (530, 13, 2),
+    ],
+)
+def test_solve_rank_p_downdate_indefinite_raises(seed: int, M: int, p: int) -> None:
+    """NewtonStepError raised when rank-p downdate makes H indefinite."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    zeta = np.random.randn(M)
+    theta = np.dot(zeta / eta, zeta) + 1.0
+
+    A = np.zeros((M + 1, M + 1))
+    A[0:M, 0:M] = np.diag(eta)
+    A[M, 0:M] = zeta
+    A[0:M, M] = zeta
+    A[M, M] = theta
+
+    # Large kappa so the downdate dominates and H becomes indefinite.
+    kappa = np.random.randn(M + 1, p) * 5.0
+    d = -(np.random.rand(p) + 1.0)
+    H = A + kappa @ np.diag(d) @ kappa.T
+
+    # Verify H is actually indefinite before testing.
+    assert np.any(np.linalg.eigvalsh(H) < 0), "Test setup error: H is not indefinite"
+
+    b = np.random.randn(M + 1)
+
+    with pytest.raises(NewtonStepError):
+        solve_rank_p_update(
+            b,
+            kappa,
+            A_solve=solve_arrow_sparsity_pattern,
+            d=d,
+            eta=eta,
+            zeta=zeta,
+            theta=theta,
+        )
+
+
+@pytest.mark.parametrize(
+    "seed,M,p",
+    [
+        (131, 100, 4),
+        (231, 200, 6),
+        (331, 50, 3),
+        (431, 500, 8),
+        (531, 13, 3),
+    ],
+)
+def test_solve_rank_p_mixed_d(seed: int, M: int, p: int) -> None:
+    """Solve H*x = b for H = arrow + kappa @ D @ kappa^T with mixed-sign d, H PD."""
+    np.random.seed(seed)
+    eta = np.random.rand(M) + 1.0
+    zeta = np.random.randn(M)
+    theta = np.dot(zeta / eta, zeta) + 1.0
+
+    A = np.zeros((M + 1, M + 1))
+    A[0:M, 0:M] = np.diag(eta)
+    A[M, 0:M] = zeta
+    A[0:M, M] = zeta
+    A[M, M] = theta
+
+    # Scale kappa down so mixed d still leaves H PD.
+    kappa = np.random.randn(M + 1, p) / (np.linalg.norm(np.random.randn(M + 1, p)) * 4)
+    d = np.where(
+        np.arange(p) % 2 == 0,
+        np.random.rand(p) + 0.5,
+        -(np.random.rand(p) * 0.1),
+    )
+    H = A + kappa @ np.diag(d) @ kappa.T
+
+    # Verify H is actually PD before testing.
+    assert np.all(np.linalg.eigvalsh(H) > 0), "Test setup error: H is not PD"
+
+    b = np.random.randn(M + 1)
+
+    x_expected = np.linalg.solve(H, b)
+    x = solve_rank_p_update(
+        b,
+        kappa,
+        A_solve=solve_arrow_sparsity_pattern,
+        d=d,
+        eta=eta,
+        zeta=zeta,
+        theta=theta,
+    )
+
+    np.testing.assert_allclose(x, x_expected, rtol=1e-8, atol=1e-8)
     np.testing.assert_allclose(H @ x, b, rtol=1e-8, atol=1e-8)
