@@ -221,14 +221,16 @@ should always be exploited here rather than stored as dense matrices.
 
 Often H = ∇²ft(x) has some special structure that means evaluating
 H @ y is a linear-time operation, rather than quadratic (in fact, if
-this is not true, Cvxium will probably not be useful to you).
+this is not true, Cvxium will probably not be useful to you). The
+numerical_helpers.py file contains helpers for the major patterns.
 
 Here are some examples:
-- H = diag(eta) -> H @ y = eta * y (elementwise multiply)
+- H = diag(eta) -> H @ y = eta * y (handled by `multiply_diagonal`)
 - H = diag(eta) + kappa @ kappa^T, where kappa is a vector
   - Then H is "diagonal plus rank-1), and
     H @ y = eta * y + (kappa^T y) * kappa (elementwise multiply, dot
     product, scalar multiply, vector add).
+  - This case is handled by `multiply_rank_p_update`.
 
 The same small number of patterns (diagonal, diagonal plus low rank,
 block pattern) show up over and over.
@@ -441,17 +443,17 @@ Available `event` values: `ipm_start`, `ipm_done`, `centering_start`,
 
 The structured extra fields available on each record are:
 
-| Field | Events where present |
-|---|---|
-| `solver` | `ipm_start`, `ipm_done`, `phase1_feasible` |
-| `outer_nit` | all outer-loop and inner-loop events |
-| `inner_nit` | `newton_step`, `btls` |
-| `elapsed_ms` | `centering_done`, `ipm_done`, `newton_step`, `svd_done` |
-| `suboptimality` | `newton_step` |
-| `t` | `centering_start` |
-| `btls_s` | `btls` |
-| `improvement` | `btls` |
-| `expected_improvement` | `btls` |
+| Field                  | Events where present                                    |
+|------------------------|---------------------------------------------------------|
+| `solver`               | `ipm_start`, `ipm_done`, `phase1_feasible`              |
+| `outer_nit`            | all outer-loop and inner-loop events                    |
+| `inner_nit`            | `newton_step`, `btls`                                   |
+| `elapsed_ms`           | `centering_done`, `ipm_done`, `newton_step`, `svd_done` |
+| `suboptimality`        | `newton_step`                                           |
+| `t`                    | `centering_start`                                       |
+| `btls_s`               | `btls`                                                  |
+| `improvement`          | `btls`                                                  |
+| `expected_improvement` | `btls`                                                  |
 
 ### 7e. What to look for: debugging tips
 
@@ -509,3 +511,207 @@ tolerances:
 9. **Evaluate full Cvxium implementation against ground truth.** Enjoy
    your orders-of-magnitude speed improvements, especially on large
    problem sizes!
+
+## 9. Multi-objective optimization and Pareto frontier tracing
+
+When a problem has two or more competing objectives, `MultiObjectiveOptimizer` traces the
+Pareto frontier — the set of solutions where no objective can be improved without worsening
+another. The framework handles corner detection, grid sweeping, deduplication, knee finding,
+and plotting. You supply the solvers.
+
+### 9a. Concept
+
+Designate one objective as *primary* (the one you most want to minimize). All others become
+*auxiliary*. The framework sweeps upper bounds on the auxiliary objectives, calling your
+solver at each grid point. This traces the tradeoff curve from the corner that minimizes the
+primary objective alone to the corner that minimizes each auxiliary alone.
+
+For a 2-objective problem (primary f0, auxiliary f1), the frontier answers: "if I allow f1
+up to some budget φ, what is the best f0 I can achieve?" Sweeping φ from its minimum to its
+maximum traces out the full curve.
+
+### 9b. Subclassing MultiObjectiveOptimizer
+
+Subclass `MultiObjectiveOptimizer` and implement three abstract methods:
+
+**`solve_with_bounds(bounds)`** — minimize the primary objective subject to
+`auxiliary_j(x) <= bounds[j]` for each auxiliary j. This is a standard single-objective
+Cvxium solve with one extra inequality constraint per auxiliary. `bounds` is an array of
+shape `(N-1,)` in the order objectives appear in `evaluate_objectives`, skipping the primary.
+Return the `InteriorPointMethodResult` from your solver.
+
+**`minimize_objective(objective_index)`** — minimize objective `objective_index` with no
+bounds on any other. Used to compute the N corner points and auto-detect the sweep range.
+The index matches the position in `evaluate_objectives`. Raise `OptimizationError` or
+`ProblemInfeasibleError` if the solve fails; the framework will omit that corner gracefully.
+
+**`evaluate_objectives(x)`** — return all N objective values at `x` as an array of shape
+`(N,)`. The element at index `self.primary_objective` is the primary; all others are
+auxiliary. Called after every successful solve to record the objective vector.
+
+```python
+from cvxium import MultiObjectiveOptimizer, InteriorPointMethodResult
+import numpy as np
+import numpy.typing as npt
+
+
+class MyFrontier(MultiObjectiveOptimizer):
+    def __init__(self, ...) -> None:
+        super().__init__(primary_objective=0)
+        # Store any solver state here (data, settings, etc.)
+        ...
+
+    def solve_with_bounds(
+        self, bounds: npt.NDArray[np.float64]
+    ) -> InteriorPointMethodResult:
+        phi = float(bounds[0])          # upper bound on auxiliary 0
+        # Reconstruct your solver with the extra constraint f1(x) <= phi,
+        # call .solve(), and return the result.
+        ...
+
+    def minimize_objective(self, objective_index: int) -> InteriorPointMethodResult:
+        if objective_index == 0:
+            # Minimize f0 with no constraint on f1.
+            ...
+        elif objective_index == 1:
+            # Minimize f1 with no constraint on f0.
+            ...
+
+    def evaluate_objectives(
+        self, x: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        f0 = ...  # primary objective value at x
+        f1 = ...  # auxiliary objective value at x
+        return np.array([f0, f1])
+```
+
+Then trace the frontier:
+
+```python
+fr = MyFrontier(...).trace(num_points=50)
+```
+
+### 9c. Algorithm inside trace()
+
+1. Calls `minimize_objective(k)` for each objective k to compute N *corner* points and
+   detect the sweep range for each auxiliary (min value at its own corner, max value at the
+   primary corner).
+2. Builds a uniform grid of `num_points` values per auxiliary dimension spanning that range.
+3. Calls `solve_with_bounds(bounds)` at each grid point; silently skips points that raise
+   `OptimizationError` or `ProblemInfeasibleError` and increments `n_skipped`.
+4. Deduplicates by objective vector (within 1e-8 absolute tolerance) and sorts by primary
+   objective ascending.
+
+Total solves: at most `N + num_points^(N-1)`. For N=2 this is `2 + num_points`.
+
+### 9d. Working with FrontierResults
+
+`trace()` returns a `FrontierResults`. Its key attributes:
+
+**`points`** — all unique frontier points, sorted by primary objective ascending. Each
+`FrontierPoint` carries:
+- `.objectives` — array of N objective values at this point
+- `.solution` — the decision variable (e.g. the weight vector)
+- `.bounds` — the auxiliary bounds used when solving (`inf` for corner points)
+- `.ipm_result` — the raw `InteriorPointMethodResult` from your solver
+
+**`corners`** — the N corner points. `corners[0]` minimizes the primary objective;
+`corners[k]` minimizes the k-th auxiliary (in objective-vector order, skipping the primary).
+
+**`knee()`** — returns the `FrontierPoint` maximally distant from the hyperplane through the
+N corners. For 2 objectives this reduces to the max-chord-distance method (the "elbow" of the
+curve). Raises `ValueError` if corners are unavailable or degenerate.
+
+**`plot()`** — plots the 2-objective frontier (raises `NotImplementedError` for N > 2).
+Sorts points by auxiliary objective ascending for a coherent curve, fills the region above,
+and annotates the knee with dashed reference lines and a numerically estimated tangent.
+Accepts `ax`, `x_label`, and `y_label`. Returns a matplotlib `Axes`.
+
+**`n_attempted`, `n_skipped`** — diagnostic counts of grid solves attempted and skipped.
+
+```python
+fr = MyFrontier(...).trace()
+
+knee = fr.knee()
+print(f"Primary at knee: {knee.objectives[0]:.4f}")
+print(f"Auxiliary at knee: {knee.objectives[1]:.4f}")
+
+best_x = knee.solution
+
+ax = fr.plot(x_label="Cost", y_label="Risk")
+ax.set_title("Cost-Risk Tradeoff")
+```
+
+### 9e. Subclassing FrontierResults for domain-specific convenience
+
+Override `trace()` in your `MultiObjectiveOptimizer` subclass to wrap the result in a
+problem-specific subclass of `FrontierResults`. Add named properties and a `plot()` override
+with sensible defaults:
+
+```python
+from cvxium import FrontierResults, FrontierPoint
+
+
+class MyFrontierResults(FrontierResults):
+    @property
+    def costs(self) -> list[float]:
+        """Primary objective (cost) at each point, sorted ascending."""
+        return [float(p.objectives[0]) for p in self.points]
+
+    @property
+    def risks(self) -> list[float]:
+        """Auxiliary objective (risk) at each point."""
+        return [float(p.objectives[1]) for p in self.points]
+
+    def plot(self, annotate_knee=True, ax=None) -> plt.Axes:
+        ax = super().plot(
+            annotate_knee=annotate_knee,
+            ax=ax,
+            x_label="Cost",
+            y_label="Risk",
+        )
+        ax.set_title("Cost-Risk Tradeoff")
+        return ax
+
+
+class MyFrontier(MultiObjectiveOptimizer):
+    ...
+
+    def trace(self, num_points: int = 50) -> MyFrontierResults:
+        fr = super().trace(num_points=num_points)
+        return MyFrontierResults(
+            points=fr.points,
+            corners=fr.corners,
+            primary_objective=fr.primary_objective,
+            n_attempted=fr.n_attempted,
+            n_skipped=fr.n_skipped,
+        )
+```
+
+### 9f. Practical notes
+
+**Grid density.** `num_points=50` (default) makes 52 solver calls for N=2 (50 grid + 2
+corners). Use 20–30 for exploratory work; 100+ for dense publication-quality curves.
+
+**n_skipped.** If many grid points are skipped, the feasible region for the auxiliary
+constraint may be smaller than expected. Inspect `fr.n_skipped / fr.n_attempted`. The sweep
+range is auto-detected from the corners, so this usually signals a constraint implementation
+issue in `solve_with_bounds`.
+
+**N > 2 objectives.** The framework supports N > 2. `knee()` still works (max distance from
+the corner hyperplane via SVD). `plot()` raises `NotImplementedError` for N > 2 — you must
+write your own visualization. Grid size grows as `num_points^(N-1)`, so keep `num_points`
+small (e.g. 5–10) for N=3.
+
+**Choosing primary_objective.** Defaults to 0. The choice controls which objective is
+minimized during the sweep and which are bounded. The primary corner (`corners[0]`) and the
+`points` sort order follow this choice. If your two objectives are symmetric, either works;
+pick the one whose constraint is easier to add to your solver.
+
+**Lagrange multipliers and tangent slopes.** `FrontierPoint.ipm_result.inequality_multipliers[-1]`
+gives the multiplier for the last added inequality constraint (typically the auxiliary bound).
+The theoretical tangent slope on the frontier is `-1/lambda` for an unnormalized constraint
+`f1(x) <= phi`, or `-phi/lambda` if normalized internally to `f1(x)/phi <= 1`. `plot()` uses
+a numerical secant approximation (slope of the secant between neighboring frontier points) to
+avoid this ambiguity — it is correct regardless of how `solve_with_bounds` normalizes
+internally.
