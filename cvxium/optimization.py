@@ -22,6 +22,7 @@ from .exceptions import (
     ProblemInfeasibleError,
     SevereCurvatureError,
 )
+from .systems import System
 
 logger = logging.getLogger(__name__)
 
@@ -402,44 +403,45 @@ class InteriorPointProblem(Problem):
         """
         return 1.0
 
-    @abstractmethod
+    def centering_system(self, x: npt.NDArray[np.float64], t: float) -> System:
+        r"""Assemble the Newton-step ``System`` for the centering problem.
+
+        Returns the structured linear system whose solution is the Newton step
+        at ``(x, t)``: a :class:`~cvxium.systems.KKTSystem` when the problem has
+        equality constraints, otherwise the bare Hessian ``System`` of the
+        barrier objective ``ft``.
+
+        Subclasses that exploit Hessian structure implement this; the generic
+        :meth:`calculate_newton_step` and :meth:`hessian_multiply` are derived
+        from it.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement centering_system."
+        )
+
     def calculate_newton_step(
         self,
         x: npt.NDArray[np.float64],
         t: float,
     ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        r"""Calculate Newton step.
+        r"""Calculate the Newton step for the centering problem at ``(x, t)``.
 
-        Calculates Newton step for the "inner" problem:
-          minimize   ft(x) := t * f0(x) - \sum_i log(-fi(x))
-          subject to A * x = b.
-
-        Parameters
-        ----------
-         x : vector
-            Current estimate.
-         t : float
-            Barrier parameter.
-
-        Returns
-        -------
-         delta_x : vector
-            Newton step.
-         nu : vector
-            Lagrange multiplier associated with equality constraints.
-
-        Notes
-        -----
-        The Newton step, delta_x, is the solution of the system:
+        The step ``delta_x`` (with equality multipliers ``nu``) solves:
            _       _   _       _     _         _
           | H   A^T | | delta_x |   | - grad_ft |
           | A    0  | |   nu    | = |      0    |
            -       -   -       -     -         -
-        where H is the Hessian of ft evaluated at x, grad_f is the gradient of ft
-        evaluated at x, and nu is the Lagrange multiplier associated with the equality
-        constraints.
-
+        Derived from :meth:`centering_system`; structured solvers implement that
+        rather than overriding this.
         """
+        grad_ft = self.gradient_barrier(x, t)
+        system = self.centering_system(x, t)
+        p = self.num_eq_constraints
+        if p == 0:
+            return system.solve(-grad_ft), np.zeros(0)
+        n = system.dimension - p
+        sol = system.solve(np.concatenate([-grad_ft, np.zeros(p)]))
+        return sol[:n], sol[n:]
 
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
         """Return whether ``x`` is a feasible point.
@@ -503,11 +505,15 @@ class InteriorPointProblem(Problem):
             self.grad_constraints_transpose_multiply(x, 1.0 / self.constraints(x))
         )
 
-    @abstractmethod
     def hessian_multiply(
         self, x: npt.NDArray[np.float64], t: float, y: npt.NDArray[np.float64]
     ) -> npt.NDArray[np.float64]:
-        """Multiply H * y."""
+        """Compute ``H_ft @ y`` for the barrier Hessian, via :meth:`centering_system`."""
+        system = self.centering_system(x, t)
+        p = self.num_eq_constraints
+        if p == 0:
+            return system.multiply(y)
+        return system.multiply(np.concatenate([y, np.zeros(p)]))[: y.shape[0]]
 
     @abstractmethod
     def constraints(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
@@ -704,10 +710,9 @@ class UnconstrainedNewtonProblem(InteriorPointProblem):
     Usage
     -----
     Subclass this and implement:
-    - newton_step: solve H * delta_x = -grad_f0, return delta_x
+    - centering_system: assemble the Hessian ``System`` of f0
     - evaluate_objective: f0(x)
     - gradient: grad f0(x)
-    - hessian_vector_product: H(x) @ y
 
     """
 
@@ -769,33 +774,6 @@ class UnconstrainedNewtonProblem(InteriorPointProblem):
         """No constraints to maintain feasibility for; any step size is valid."""
         return np.inf
 
-    @abstractmethod
-    def newton_step(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """Solve H(x) * delta_x = -grad_f0(x) and return delta_x."""
-
-    @abstractmethod
-    def hessian_vector_product(
-        self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]
-    ) -> npt.NDArray[np.float64]:
-        """Compute H(x) @ y."""
-
-    def calculate_newton_step(
-        self,
-        x: npt.NDArray[np.float64],
-        t: float,
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        """Newton step; t is unused (always 1, no barrier)."""
-        return self.newton_step(x), np.zeros(0)
-
-    def hessian_multiply(
-        self,
-        x: npt.NDArray[np.float64],
-        t: float,
-        y: npt.NDArray[np.float64],
-    ) -> npt.NDArray[np.float64]:
-        """Compute H(x) @ y; t is unused (always 1, no barrier)."""
-        return self.hessian_vector_product(x, y)
-
     def evaluate_dual(
         self,
         lmbda: npt.NDArray[np.float64],
@@ -819,10 +797,9 @@ class EqualityConstrainedNewtonProblem(InteriorPointProblem):
     Subclass this and implement:
     - A: equality constraint matrix (p x n)
     - b: equality constraint right-hand side (p,)
-    - newton_step: solve KKT system, return (delta_x, nu)
+    - centering_system: assemble the KKT ``System`` (Hessian plus A-border)
     - evaluate_objective: f0(x)
     - gradient: grad f0(x)
-    - hessian_vector_product: H(x) @ y
 
     """
 
@@ -891,54 +868,6 @@ class EqualityConstrainedNewtonProblem(InteriorPointProblem):
     ) -> float:
         """No inequality constraints to maintain feasibility for; any step size is valid."""
         return np.inf
-
-    @abstractmethod
-    def newton_step(
-        self, x: npt.NDArray[np.float64]
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        r"""Solve the KKT system and return (delta_x, nu).
-
-        Solves:
-
-           | H(x)   A^T | | delta_x |   | -grad_f0(x) |
-           |  A      0  | |   nu    | = |      0      |
-
-        Parameters
-        ----------
-         x : vector
-            Current iterate.
-
-        Returns
-        -------
-         delta_x : vector
-            Newton step for the primal variable.
-         nu : vector
-            Lagrange multipliers for the equality constraints.
-
-        """
-
-    @abstractmethod
-    def hessian_vector_product(
-        self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]
-    ) -> npt.NDArray[np.float64]:
-        """Compute H(x) @ y."""
-
-    def calculate_newton_step(
-        self,
-        x: npt.NDArray[np.float64],
-        t: float,
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        """Newton step via KKT system; t is unused (always 1, no barrier)."""
-        return self.newton_step(x)
-
-    def hessian_multiply(
-        self,
-        x: npt.NDArray[np.float64],
-        t: float,
-        y: npt.NDArray[np.float64],
-    ) -> npt.NDArray[np.float64]:
-        """Compute H(x) @ y; t is unused (always 1, no barrier)."""
-        return self.hessian_vector_product(x, y)
 
     def evaluate_dual(
         self,

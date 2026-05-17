@@ -24,6 +24,7 @@ from .optimization import (
     OptimizationSettings,
     UnconstrainedNewtonProblem,
 )
+from .systems import DenseSystem, KKTSystem, System
 
 
 class QuadraticNewtonSolver(UnconstrainedNewtonProblem):
@@ -41,22 +42,16 @@ class QuadraticNewtonSolver(UnconstrainedNewtonProblem):
         super().__init__()
         self.Q = Q
         self.c = c
-        self._Q_factor = linalg.cho_factor(Q)
 
-    def newton_step(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """Solve Q * delta_x = -grad_f0 = -(Q*x + c)."""
-        return linalg.cho_solve(self._Q_factor, -(self.Q @ x + self.c))
+    def centering_system(self, x: npt.NDArray[np.float64], t: float) -> System:
+        """The Hessian of the barrier objective is ``t * Q``."""
+        return DenseSystem(t * self.Q)
 
     def evaluate_objective(self, x: npt.NDArray[np.float64]) -> float:
         return float(0.5 * x @ self.Q @ x + self.c @ x)
 
     def gradient(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         return self.Q @ x + self.c
-
-    def hessian_vector_product(
-        self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]
-    ) -> npt.NDArray[np.float64]:
-        return self.Q @ y
 
 
 class QuadraticEqualityConstrainedNewtonSolver(EqualityConstrainedNewtonProblem):
@@ -92,26 +87,15 @@ class QuadraticEqualityConstrainedNewtonSolver(EqualityConstrainedNewtonProblem)
         """Equality constraint right-hand side."""
         return self._b
 
-    def newton_step(
-        self, x: npt.NDArray[np.float64]
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        """Solve the KKT system via the Schur complement."""
-        return solve_kkt_system(
-            A=self._A,
-            g=-(self.Q @ x + self.c),
-            hessian_solve=lambda rhs: linalg.cho_solve(self._Q_factor, rhs),
-        )
+    def centering_system(self, x: npt.NDArray[np.float64], t: float) -> System:
+        """The KKT system: Hessian ``t * Q`` bordered by the equality matrix A."""
+        return KKTSystem(DenseSystem(t * self.Q), self._A)
 
     def evaluate_objective(self, x: npt.NDArray[np.float64]) -> float:
         return float(0.5 * x @ self.Q @ x + self.c @ x)
 
     def gradient(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         return self.Q @ x + self.c
-
-    def hessian_vector_product(
-        self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]
-    ) -> npt.NDArray[np.float64]:
-        return self.Q @ y
 
     def evaluate_dual(
         self,
