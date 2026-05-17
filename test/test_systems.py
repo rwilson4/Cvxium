@@ -6,9 +6,12 @@ import pytest
 
 from cvxium.exceptions import NewtonStepError
 from cvxium.systems import (
+    ArrowSystem,
     BandedSystem,
+    BlockDiagonalSystem,
     DenseSystem,
     DiagonalSystem,
+    KKTSystem,
     LowRankUpdatedSystem,
     System,
 )
@@ -190,3 +193,178 @@ def test_low_rank_update_coalesces_mixed_weights() -> None:
 
     dense = np.diag(eta) + kappa1 @ kappa1.T + kappa2 @ np.diag(d2) @ kappa2.T
     _check_solve_and_multiply(system, dense, rng)
+
+
+def _block_diag(
+    mats: list[npt.NDArray[np.float64]],
+) -> npt.NDArray[np.float64]:
+    """Assemble a dense block-diagonal matrix from square blocks."""
+    N = sum(m.shape[0] for m in mats)
+    H = np.zeros((N, N))
+    i = 0
+    for m in mats:
+        k = m.shape[0]
+        H[i : i + k, i : i + k] = m
+        i += k
+    return H
+
+
+def _bordered_dense(
+    A11: npt.NDArray[np.float64],
+    border: npt.NDArray[np.float64],
+    corner: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    """Assemble the dense matrix ``[[A11, border], [border^T, corner]]``."""
+    border = np.asarray(border, dtype=float)
+    if border.ndim == 1:
+        border = border[:, None]
+    p = border.shape[1]
+    corner = np.asarray(corner, dtype=float).reshape(p, p)
+    return np.block([[A11, border], [border.T, corner]])
+
+
+def _make_pd_corner(
+    A11: npt.NDArray[np.float64], border: npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
+    """Return a corner block making ``[[A11, border], [border^T, corner]]`` PD.
+
+    The Schur complement is set to the identity, so the bordered matrix is
+    positive definite whenever ``A11`` is.
+    """
+    border = np.asarray(border, dtype=float)
+    if border.ndim == 1:
+        border = border[:, None]
+    p = border.shape[1]
+    return border.T @ np.linalg.solve(A11, border) + np.eye(p)
+
+
+@pytest.mark.parametrize("seed", [101, 102, 103])
+def test_block_diagonal_system(seed: int) -> None:
+    """A BlockDiagonalSystem solves and multiplies block by block."""
+    rng = np.random.default_rng(seed)
+    eta = rng.random(7) + 1.0
+    dense_block = _random_spd(5, rng)
+    banded_dense, banded_ab = _banded_spd(9, 2, rng)
+    system = BlockDiagonalSystem(
+        [DiagonalSystem(eta), DenseSystem(dense_block), BandedSystem(banded_ab)]
+    )
+    assert system.dimension == 21
+    dense = _block_diag([np.diag(eta), dense_block, banded_dense])
+    _check_solve_and_multiply(system, dense, rng)
+
+
+@pytest.mark.parametrize("seed,M", [(111, 6), (112, 40)])
+def test_arrow_system_diagonal_upper_left(seed: int, M: int) -> None:
+    """An ArrowSystem with a diagonal upper-left (literal arrow pattern)."""
+    rng = np.random.default_rng(seed)
+    eta = rng.random(M) + 1.0
+    border = rng.standard_normal(M)
+    corner = _make_pd_corner(np.diag(eta), border)
+    system = ArrowSystem(DiagonalSystem(eta), border, corner)
+    assert system.dimension == M + 1
+    _check_solve_and_multiply(
+        system, _bordered_dense(np.diag(eta), border, corner), rng
+    )
+
+
+@pytest.mark.parametrize("seed,M", [(121, 5), (122, 30)])
+def test_arrow_system_scalar_corner_structured_upper_left(seed: int, M: int) -> None:
+    """An ArrowSystem with a scalar corner over a non-diagonal upper-left."""
+    rng = np.random.default_rng(seed)
+    A11 = _random_spd(M, rng)
+    border = rng.standard_normal(M)
+    corner = _make_pd_corner(A11, border)
+    system = ArrowSystem(DenseSystem(A11), border, corner)
+    assert system.dimension == M + 1
+    _check_solve_and_multiply(system, _bordered_dense(A11, border, corner), rng)
+
+
+@pytest.mark.parametrize("seed,M,p", [(131, 8, 3), (132, 35, 4)])
+def test_arrow_system_block_corner(seed: int, M: int, p: int) -> None:
+    """An ArrowSystem with a multi-column border solves via the Schur complement."""
+    rng = np.random.default_rng(seed)
+    A11 = _random_spd(M, rng)
+    border = rng.standard_normal((M, p))
+    corner = _make_pd_corner(A11, border)
+    system = ArrowSystem(DenseSystem(A11), border, corner)
+    assert system.dimension == M + p
+    _check_solve_and_multiply(system, _bordered_dense(A11, border, corner), rng)
+
+
+@pytest.mark.parametrize("seed,M,p", [(141, 6, 2), (142, 40, 5)])
+def test_kkt_system(seed: int, M: int, p: int) -> None:
+    """A KKTSystem solves the saddle system and multiplies the saddle matrix."""
+    rng = np.random.default_rng(seed)
+    hessian = _random_spd(M, rng)
+    A = rng.standard_normal((p, M))
+    system = KKTSystem(DenseSystem(hessian), A)
+    assert system.dimension == M + p
+
+    kkt = np.block([[hessian, A.T], [A, np.zeros((p, p))]])
+
+    # solve: the right-hand side has a zero constraint block.
+    g = rng.standard_normal(M)
+    b = np.concatenate([g, np.zeros(p)])
+    x = system.solve(b)
+    np.testing.assert_allclose(kkt @ x, b, rtol=1e-7, atol=1e-7)
+
+    # solve with multiple right-hand sides.
+    G = rng.standard_normal((M, 3))
+    B = np.vstack([G, np.zeros((p, 3))])
+    X = system.solve(B)
+    np.testing.assert_allclose(kkt @ X, B, rtol=1e-7, atol=1e-7)
+
+    # multiply: the saddle matrix accepts an arbitrary right-hand side.
+    y = rng.standard_normal(M + p)
+    np.testing.assert_allclose(system.multiply(y), kkt @ y, rtol=1e-8, atol=1e-8)
+    Y = rng.standard_normal((M + p, 3))
+    np.testing.assert_allclose(system.multiply(Y), kkt @ Y, rtol=1e-8, atol=1e-8)
+
+
+def test_kkt_system_rejects_nonzero_constraint_rhs() -> None:
+    """KKTSystem.solve requires the trailing constraint-block RHS to vanish."""
+    rng = np.random.default_rng(143)
+    M, p = 5, 2
+    system = KKTSystem(DenseSystem(_random_spd(M, rng)), rng.standard_normal((p, M)))
+    with pytest.raises(ValueError, match="constraint-block"):
+        system.solve(np.ones(M + p))
+
+
+def test_nested_composition() -> None:
+    """A KKT system over a low-rank update over an arrow over a block-diagonal."""
+    rng = np.random.default_rng(151)
+
+    # Block-diagonal upper-left of the arrow.
+    eta_a = rng.random(6) + 1.0
+    eta_b = rng.random(5) + 1.0
+    block_diagonal = BlockDiagonalSystem([DiagonalSystem(eta_a), DiagonalSystem(eta_b)])
+    block_diagonal_dense = _block_diag([np.diag(eta_a), np.diag(eta_b)])
+    M_bd = 11
+
+    # Arrow system with a two-column border.
+    border = rng.standard_normal((M_bd, 2))
+    corner = _make_pd_corner(block_diagonal_dense, border)
+    arrow = ArrowSystem(block_diagonal, border, corner)
+    arrow_dense = _bordered_dense(block_diagonal_dense, border, corner)
+    M_arrow = M_bd + 2
+
+    # Low-rank update -> the Hessian System.
+    kappa = rng.standard_normal((M_arrow, 3))
+    hessian = arrow.low_rank_update(kappa)
+    hessian_dense = arrow_dense + kappa @ kappa.T
+
+    # KKT border with equality constraints.
+    p = 4
+    A = rng.standard_normal((p, M_arrow))
+    system = KKTSystem(hessian, A)
+    assert system.dimension == M_arrow + p
+
+    kkt = np.block([[hessian_dense, A.T], [A, np.zeros((p, p))]])
+
+    g = rng.standard_normal(M_arrow)
+    b = np.concatenate([g, np.zeros(p)])
+    x = system.solve(b)
+    np.testing.assert_allclose(kkt @ x, b, rtol=1e-7, atol=1e-7)
+
+    y = rng.standard_normal(M_arrow + p)
+    np.testing.assert_allclose(system.multiply(y), kkt @ y, rtol=1e-8, atol=1e-8)

@@ -11,6 +11,7 @@ make the composition an ergonomic, type-safe tree.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -19,11 +20,19 @@ from scipy import linalg
 from .exceptions import NewtonStepError
 from .numerical_helpers import (
     multiply_banded,
+    multiply_block,
+    multiply_block_diagonal,
+    multiply_block_plus_one,
     multiply_diagonal,
     multiply_rank_p_update,
+    solve_arrow_sparsity_pattern,
     solve_banded,
+    solve_block_diagonal,
+    solve_block_plus_one,
     solve_diagonal,
+    solve_kkt_system,
     solve_rank_p_update,
+    solve_with_schur,
 )
 
 
@@ -281,3 +290,183 @@ class LowRankUpdatedSystem(System):
             d_new = d if d is not None else np.ones(kappa.shape[1])
             combined_d = np.concatenate([d_self, d_new])
         return LowRankUpdatedSystem(self._base, combined_kappa, combined_d)
+
+
+class BlockDiagonalSystem(System):
+    """A block-diagonal matrix whose diagonal blocks are themselves Systems.
+
+    Solving and multiplying dispatch block by block, so the blocks may exploit
+    entirely different structures.
+    """
+
+    def __init__(self, blocks: Sequence[System]) -> None:
+        """Build a block-diagonal System from its ordered diagonal blocks."""
+        if len(blocks) == 0:
+            raise ValueError("blocks must be non-empty.")
+        self._blocks = list(blocks)
+
+    @property
+    def dimension(self) -> int:
+        """Order of the matrix."""
+        return sum(block.dimension for block in self._blocks)
+
+    def solve(self, b: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Solve ``H @ x = b`` one diagonal block at a time."""
+        return solve_block_diagonal(
+            b,
+            [block.dimension for block in self._blocks],
+            [block.solve for block in self._blocks],
+        )
+
+    def multiply(self, y: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Compute ``H @ y`` one diagonal block at a time."""
+        return multiply_block_diagonal(
+            y,
+            [block.dimension for block in self._blocks],
+            [block.multiply for block in self._blocks],
+        )
+
+
+class ArrowSystem(System):
+    """A bordered (arrow / Schur) matrix ``[[A11, A12], [A12^T, A22]]``.
+
+    The upper-left block ``A11`` is supplied as any :class:`System`; the border
+    ``A12`` and corner ``A22`` are a small dense fringe of ``p`` rows/columns.
+    Solving exploits the Schur complement on ``A11``. When ``A11`` is a
+    :class:`DiagonalSystem` with a scalar corner the matrix has a literal arrow
+    sparsity pattern, and a dedicated numerically-stable kernel is used.
+
+    The whole matrix is assumed positive definite; use :class:`KKTSystem` for
+    the indefinite saddle-point case (a zero corner).
+    """
+
+    def __init__(
+        self,
+        upper_left: System,
+        border: npt.NDArray[np.float64],
+        corner: npt.NDArray[np.float64] | float,
+    ) -> None:
+        """Build a bordered System.
+
+        Parameters
+        ----------
+         upper_left : System
+            The ``A11`` block.
+         border : npt.NDArray[np.float64]
+            The ``A12`` block: a length-M vector (scalar corner) or an
+            ``(M, p)`` matrix.
+         corner : npt.NDArray[np.float64] or float
+            The ``A22`` block: a scalar (vector border) or a ``(p, p)`` matrix.
+
+        """
+        M = upper_left.dimension
+        border = np.asarray(border, dtype=np.float64)
+        if border.ndim == 1:
+            border = border[:, np.newaxis]
+        if border.ndim != 2 or border.shape[0] != M:
+            raise ValueError(
+                f"border must have {M} rows to match the upper-left System."
+            )
+        p = border.shape[1]
+
+        corner = np.asarray(corner, dtype=np.float64)
+        if corner.ndim == 0:
+            corner = corner.reshape(1, 1)
+        if corner.shape != (p, p):
+            raise ValueError(
+                f"corner must be ({p}, {p}) to match the border's {p} column(s)."
+            )
+
+        self._upper_left = upper_left
+        self._border = border
+        self._corner = corner
+        self._p = p
+
+    @property
+    def dimension(self) -> int:
+        """Order of the matrix."""
+        return self._upper_left.dimension + self._p
+
+    def solve(self, b: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Solve ``H @ x = b`` via the Schur complement on the upper-left block."""
+        if self._p == 1:
+            border = self._border[:, 0]
+            corner = float(self._corner[0, 0])
+            if isinstance(self._upper_left, DiagonalSystem):
+                return solve_arrow_sparsity_pattern(
+                    b, self._upper_left.eta, border, corner
+                )
+            return solve_block_plus_one(b, border, corner, self._upper_left.solve)
+        return solve_with_schur(b, self._border, self._corner, self._upper_left.solve)
+
+    def multiply(self, y: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Compute ``H @ y``."""
+        if self._p == 1:
+            return multiply_block_plus_one(
+                y,
+                self._border[:, 0],
+                float(self._corner[0, 0]),
+                self._upper_left.multiply,
+            )
+        return multiply_block(y, self._border, self._corner, self._upper_left.multiply)
+
+
+class KKTSystem(System):
+    """The saddle-point system ``[[H, A^T], [A, 0]]``.
+
+    The Hessian ``H`` is supplied as a :class:`System` and ``A`` is the
+    ``(p, M)`` equality-constraint matrix. This is the bordered system of an
+    equality-constrained Newton step; the corner block is zero, so the matrix
+    is indefinite and :class:`ArrowSystem` does not apply.
+
+    Because the constraint block of the system is zero, :meth:`solve` requires
+    the trailing ``p`` entries of its right-hand side to vanish -- exactly the
+    case for a Newton step taken from an equality-feasible iterate. The leading
+    ``M`` entries are the (negative) gradient and the solution stacks the
+    primal step and the equality multipliers, ``[delta_x; nu]``.
+    """
+
+    def __init__(self, hessian: System, A: npt.NDArray[np.float64]) -> None:
+        """Build a KKT System from a Hessian System and constraint matrix ``A``."""
+        A = np.asarray(A, dtype=np.float64)
+        if A.ndim != 2:
+            raise ValueError("A must be a 2D array.")
+        if A.shape[1] != hessian.dimension:
+            raise ValueError(
+                f"A has {A.shape[1]} columns but the Hessian System has "
+                f"dimension {hessian.dimension}."
+            )
+        self._hessian = hessian
+        self._A = A
+
+    @property
+    def dimension(self) -> int:
+        """Order of the matrix."""
+        return self._hessian.dimension + self._A.shape[0]
+
+    def solve(self, b: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Solve the KKT system, exploiting the Schur complement on ``H``.
+
+        The trailing constraint-block entries of ``b`` must be zero.
+        """
+        M = self._hessian.dimension
+        if not np.allclose(b[M:], 0.0):
+            raise ValueError(
+                "KKTSystem.solve requires the trailing constraint-block entries "
+                "of b to be zero (the equality-constraint residual must vanish)."
+            )
+        delta_x, nu = solve_kkt_system(self._A, b[:M], self._hessian.solve)
+        if b.ndim == 1:
+            return np.concatenate([delta_x, nu])
+        return np.vstack([delta_x, nu])
+
+    def multiply(self, y: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Compute ``[[H, A^T], [A, 0]] @ y`` for an arbitrary ``y``."""
+        M = self._hessian.dimension
+        y1 = y[:M]
+        y2 = y[M:]
+        top = self._hessian.multiply(y1) + self._A.T @ y2
+        bottom = self._A @ y1
+        if y.ndim == 1:
+            return np.concatenate([top, bottom])
+        return np.vstack([top, bottom])
