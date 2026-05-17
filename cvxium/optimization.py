@@ -377,215 +377,14 @@ class BaseInteriorPointMethodSolver(Optimizer):
         fully_optimize: bool = False,
         **kwargs: Any,
     ) -> OptimizationResult:
-        r"""Solve optimization problem.
+        """Solve the optimization problem with an interior point method.
 
-        Uses an interior point method with a logarithmic barrier penalty to
-        solve:
-           minimize    f0(x)
-           subject to  A * x = b
-                       fi(x) <= 0, i=1, ..., M.
-
-        Parameters
-        ----------
-         x0 : vector
-            Initial guess, intended to be feasible for some of the constraints, allowing
-            the Phase I solver to focus on a particular set of constraints. See Notes.
-         fully_optimize : bool
-            Interpretation differs for InteriorPointMethodSolver and
-            FeasibilityInteriorPointSolver instances.
-
-        Returns
-        -------
-         res : InteriorPointMethodResult
-            The results are wrapped in a InteriorPointMethodResult class, which includes
-            a feasible point and other helpful info.
-
+        Convenience wrapper that delegates to :class:`InteriorPointSolver`, which
+        owns the IPM loop. Construct an :class:`InteriorPointSolver` directly for
+        control over the loop settings.
         """
-        if self.phase1_solver is None:
-            raise ValueError("FeasibilitySolver not specified.")
-
-        # The nested Phase I solver should return x such that A * x = b and fi(x) < 0,
-        # i=1, ..., M.
-        phase1_res = self.phase1_solver.solve(x0=x0, **kwargs)
-        x = self.augment_previous_solution(phase1_res)
-
-        # Applicable only for Phase I methods.
-        if not fully_optimize and self.is_feasible(x):
-            logger.info(
-                "  Phase I solution was feasible so we're done (%s)",
-                self.__class__.__name__,
-                extra={
-                    "cvx_event": "phase1_feasible",
-                    "cvx_solver": self.__class__.__name__,
-                },
-            )
-            return phase1_res
-
-        t = self.initialize_barrier_parameter(x0=x)
-        num_steps = (
-            int(
-                np.ceil(
-                    (
-                        np.log(self.num_ineq_constraints)
-                        - np.log(t * self.settings.outer_tolerance)
-                    )
-                    / np.log(self.settings.barrier_multiplier)
-                )
-            )
-            + 1
-        )
-        overall_start_time = time.time()
-        logger.info(
-            "  Starting IPM (%s)",
-            self.__class__.__name__,
-            extra={"cvx_event": "ipm_start", "cvx_solver": self.__class__.__name__},
-        )
-
-        inner_nits = []
-        inner_suboptimalities = []
-        duality_gaps = []
-        status: Literal[0, 1, 2] = 0
-        message = (
-            "Interior Point Method completed successfully to the desired tolerance"
-        )
-        equality_multipliers = np.zeros(1)
-        inequality_multipliers = np.zeros(1)
-        for nit in range(num_steps):
-            step_start_time = time.time()
-            logger.info(
-                "  %02d Beginning centering step with t=%s",
-                nit + 1,
-                t,
-                extra={
-                    "cvx_event": "centering_start",
-                    "cvx_outer_nit": nit + 1,
-                    "cvx_t": t,
-                },
-            )
-
-            try:
-                result = self.centering_step(
-                    x,
-                    t,
-                    last_step=(nit + 1 == num_steps),
-                    outer_nit=nit + 1,
-                    fully_optimize=fully_optimize,
-                )
-            except CenteringStepError as e:
-                suboptimality = (
-                    self.num_ineq_constraints * self.settings.barrier_multiplier / t
-                )
-                if nit > 1 and suboptimality < self.settings.outer_tolerance_soft:
-                    # Convergence was good enough
-                    x = e.last_iterate
-                    status = 1
-                    message = (
-                        "Interior Point Method reached an acceptable precision but "
-                        f"then ran into numerical difficulties -- {e.__str__()}"
-                    )
-                    nu = e.equality_multipliers
-                    lmbda = e.inequality_multipliers
-                    if nu is not None and lmbda is not None:
-                        duality_gaps.append(
-                            self.evaluate_objective(x)
-                            - self.evaluate_dual(
-                                lmbda=lmbda,
-                                nu=nu,
-                                x_star=x,
-                            )
-                        )
-
-                    break
-
-                raise InteriorPointMethodError(
-                    message="Centering step failed",
-                    remaining_steps=num_steps - nit - 1,
-                    suboptimality=self.num_ineq_constraints
-                    * self.settings.barrier_multiplier
-                    / t,
-                    last_iterate=e.last_iterate,
-                ) from e
-
-            step_elapsed = 1000 * (time.time() - step_start_time)
-            logger.info(
-                "  %02d Centering step completed in %.3f ms",
-                nit + 1,
-                step_elapsed,
-                extra={
-                    "cvx_event": "centering_done",
-                    "cvx_outer_nit": nit + 1,
-                    "cvx_elapsed_ms": step_elapsed,
-                },
-            )
-
-            x = result.solution
-            equality_multipliers = result.equality_multipliers
-            inequality_multipliers = result.inequality_multipliers
-            inner_nits.append(result.nits)
-            inner_suboptimalities.append(result.suboptimalities)
-            duality_gaps.append(result.objective_value - result.dual_value)
-
-            # Applicable only for Phase I methods.
-            if not fully_optimize and self.is_feasible(x):
-                status = 2
-                message = "Feasibility method successfully found a feasible point"
-                logger.info(
-                    "  %02d Result was strictly feasible so we're early-stopping.",
-                    nit + 1,
-                    extra={"cvx_event": "early_stop", "cvx_outer_nit": nit + 1},
-                )
-                break
-
-            # Dual can provide certificate of infeasibility, in which case we can quit
-            # faster. Applicable only for Phase I methods.
-            if not fully_optimize:
-                self.check_for_infeasibility(result)
-
-            t *= self.settings.barrier_multiplier
-
-        overall_elapsed = 1000 * (time.time() - overall_start_time)
-        logger.info(
-            "  IPM completed in %.3f ms (%s)",
-            overall_elapsed,
-            self.__class__.__name__,
-            extra={
-                "cvx_event": "ipm_done",
-                "cvx_solver": self.__class__.__name__,
-                "cvx_elapsed_ms": overall_elapsed,
-            },
-        )
-
-        # Applicable only for Phase I methods.
-        if not fully_optimize and not self.is_feasible(x):
-            raise ProblemMarginallyFeasibleError(
-                message=(
-                    "Problem may be infeasible: dual value was "
-                    f"{result.dual_value} < 0, but last centering step resulted in "
-                    f"a point with value {result.objective_value}"
-                ),
-                result=result,
-            )
-
-        return InteriorPointMethodResult(
-            solution=self.finalize_solution(x),
-            objective_value=self.evaluate_objective(x),
-            dual_value=self.evaluate_dual(
-                lmbda=inequality_multipliers,
-                nu=equality_multipliers,
-                x_star=x,
-            ),
-            equality_multipliers=equality_multipliers,
-            inequality_multipliers=inequality_multipliers,
-            suboptimality=self.num_ineq_constraints
-            * self.settings.barrier_multiplier
-            / t,
-            duality_gaps=duality_gaps,
-            nits=nit + 1,
-            inner_nits=inner_nits,
-            inner_suboptimalities=inner_suboptimalities,
-            status=status,
-            message=message,
-            phase1_res=phase1_res,
+        return InteriorPointSolver(self.settings).solve(
+            self, x0=x0, fully_optimize=fully_optimize, **kwargs
         )
 
     def augment_previous_solution(
@@ -618,312 +417,6 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
         """
         return 1.0
-
-    def centering_step(
-        self,
-        x0: npt.NDArray[np.float64],
-        t: float,
-        last_step: bool,
-        outer_nit: int = 0,
-        fully_optimize: bool = False,
-        **kwargs: Any,
-    ) -> NewtonResult:
-        r"""Solve centering step.
-
-        The centering step solves:
-          minimize   ft(x) := t * f0(x) - \sum_i log(-fi(x))
-          subject to A * x = b.
-
-        Parameters
-        ----------
-         x0 : vector
-            Initial guess, [w0; s0]. Must be strictly feasible.
-         t : float
-            Barrier parameter.
-         last_step: bool
-             Indicates whether this is the last centering step. See Notes.
-
-        Returns
-        -------
-         res : NewtonResult
-            The results are wrapped in a NewtonResult class, which includes the optimal
-            weights and other helpful info.
-
-        Notes
-        -----
-        Uses Newton's method with a feasible starting point. It isn't always possible to
-        solve this to high precision, so we use a "soft" threshold as a fallback. If we
-        can solve the problem to high precision, great; otherwise we're content if we
-        have solved it to medium precision.
-
-        The exception is on the very last step, where the overall suboptimality of the
-        interior point method relies on the last centering step being solved to high
-        precision. So this "soft" threshold does not apply in this last step.
-
-        """
-        x = x0.copy()
-        eta = 0.25 * (1.0 - 2 * self.settings.backtracking_alpha)
-        in_quadratic_phase = False
-        suboptimality = np.inf
-        suboptimalities = []
-        for nit in range(self.settings.max_inner_iterations):
-            newton_start = time.time()
-
-            try:
-                delta_x, nu_hat = self.calculate_newton_step(x, t)
-            except NewtonStepError as e:
-                raise CenteringStepError(
-                    message="Failed to calculate Newton step.",
-                    suboptimality=suboptimality,
-                    last_iterate=x,
-                ) from e
-
-            newton_elapsed = 1000 * (time.time() - newton_start)
-
-            # Check for convergence
-            lambda_squared = self.newton_decrement_squared(x, t, delta_x)
-            suboptimality = 0.5 * lambda_squared
-            suboptimalities.append(suboptimality)
-
-            lambda_norm = np.sqrt(lambda_squared)
-            if not in_quadratic_phase and lambda_norm <= eta:
-                in_quadratic_phase = True
-                quadratic_convergence = " (quadratic convergence threshold)"
-            else:
-                quadratic_convergence = ""
-            logger.debug(
-                "    %02d Newton step in %.3f ms; sub-opt %.6g = 0.5 * %.6g^2%s",
-                nit + 1,
-                newton_elapsed,
-                suboptimality,
-                lambda_norm,
-                quadratic_convergence,
-                extra={
-                    "cvx_event": "newton_step",
-                    "cvx_outer_nit": outer_nit,
-                    "cvx_inner_nit": nit + 1,
-                    "cvx_elapsed_ms": newton_elapsed,
-                    "cvx_suboptimality": suboptimality,
-                },
-            )
-
-            if suboptimality < self.settings.inner_tolerance:
-                nu_star = nu_hat / t
-                lambda_star = self.inequality_multipliers(x, t, delta_x)
-                return NewtonResult(
-                    solution=x,
-                    objective_value=self.evaluate_objective(x),
-                    barrier_objective_value=self.evaluate_barrier_objective(x, t),
-                    dual_value=self.evaluate_dual(
-                        lmbda=lambda_star, nu=nu_star, x_star=x
-                    ),
-                    equality_multipliers=nu_star,
-                    inequality_multipliers=lambda_star,
-                    suboptimalities=suboptimalities,
-                    nits=nit + 1,
-                    status=0,
-                    message=(
-                        "Newton's method completed successfully to the desired "
-                        "tolerance."
-                    ),
-                )
-
-            # Update
-            try:
-                btls_s = self.backtracking_line_search(
-                    x=x, delta_x=delta_x, t=t, lambda_squared=lambda_squared
-                )
-            except BacktrackingLineSearchError as e:
-                nu_star = nu_hat / t
-                lambda_star = self.inequality_multipliers(
-                    x, t, delta_x, centering_step_solved_perfectly=False
-                )
-                if not last_step and suboptimality < self.settings.inner_tolerance_soft:
-                    return NewtonResult(
-                        solution=x,
-                        objective_value=self.evaluate_objective(x),
-                        barrier_objective_value=self.evaluate_barrier_objective(x, t),
-                        dual_value=self.evaluate_dual(
-                            lmbda=lambda_star, nu=nu_star, x_star=x
-                        ),
-                        equality_multipliers=nu_star,
-                        inequality_multipliers=lambda_star,
-                        suboptimalities=suboptimalities,
-                        nits=nit + 1,
-                        status=1,
-                        message=(
-                            "Newton's method achieved an acceptable tolerance but then "
-                            f"ran into numerical issues -- {e.__str__()}"
-                        ),
-                    )
-
-                raise CenteringStepError(
-                    message=f"Backtracking line search failed -- {e.__str__()}",
-                    suboptimality=suboptimality,
-                    last_iterate=x,
-                    equality_multipliers=nu_star,
-                    inequality_multipliers=lambda_star,
-                ) from e
-
-            if logger.isEnabledFor(logging.DEBUG):
-                ft = self.evaluate_barrier_objective(x, t)
-                ft_new = self.evaluate_barrier_objective(x + btls_s * delta_x, t)
-                expected_improvement = (
-                    self.settings.backtracking_alpha
-                    * self.settings.backtracking_beta
-                    * lambda_squared
-                    / (1 + lambda_norm)
-                )
-                logger.debug(
-                    "    %02d btls_s=%.4f, improvement=%.6g, expected improvement=%.6g",
-                    nit + 1,
-                    btls_s,
-                    ft - ft_new,
-                    expected_improvement,
-                    extra={
-                        "cvx_event": "btls",
-                        "cvx_outer_nit": outer_nit,
-                        "cvx_inner_nit": nit + 1,
-                        "cvx_btls_s": btls_s,
-                        "cvx_improvement": ft - ft_new,
-                        "cvx_expected_improvement": expected_improvement,
-                    },
-                )
-
-            # Applicable only for Phase I methods.
-            if not fully_optimize and self.is_feasible(x + btls_s * delta_x):
-                nu_star = nu_hat / t
-                lambda_star = self.inequality_multipliers(
-                    x, t, delta_x, centering_step_solved_perfectly=False
-                )
-                return NewtonResult(
-                    solution=x + btls_s * delta_x,
-                    objective_value=self.evaluate_objective(x + btls_s * delta_x),
-                    barrier_objective_value=self.evaluate_barrier_objective(
-                        x + btls_s * delta_x, t
-                    ),
-                    dual_value=self.evaluate_dual(
-                        lmbda=lambda_star, nu=nu_star, x_star=x
-                    ),
-                    equality_multipliers=nu_star,
-                    inequality_multipliers=lambda_star,
-                    suboptimalities=suboptimalities,
-                    nits=nit + 1,
-                    status=1,
-                    message=("Newton's method found a feasible point."),
-                )
-
-            x += btls_s * delta_x
-
-        raise CenteringStepError(
-            "Centering step did not converge.",
-            suboptimality=suboptimality,
-            last_iterate=x,
-        )
-
-    def backtracking_line_search(
-        self,
-        x: npt.NDArray[np.float64],
-        delta_x: npt.NDArray[np.float64],
-        t: float,
-        lambda_squared: float,
-    ) -> float:
-        """Perform backtracking line search.
-
-        Parameters
-        ----------
-         x : npt.NDArray[np.float64]
-            Current estimate.
-         delta_x : npt.NDArray[np.float64]
-            Descent direction.
-         t : float
-            Barrier parameter.
-         lambda_squared : float
-            Square of Newton decrement. As the name suggests, this should be a positive number.
-
-        Returns
-        -------
-         btls_s : float
-            Step modifier.
-
-        """
-        if (grad_ft_dot_delta_x := np.dot(delta_x, self.gradient_barrier(x, t))) > 0:
-            raise InvalidDescentDirectionError(
-                message="Newton step was not a descent direction.",
-                grad_ft_dot_delta_x=grad_ft_dot_delta_x,
-            )
-
-        alpha = self.settings.backtracking_alpha
-        beta = self.settings.backtracking_beta
-        min_step = self.settings.backtracking_min_step
-
-        # Find the largest step size we could take while maintaining feasibility.
-        # Note: for an exact line search, we'd want to minimize ft(x + btls_s * delta_x)
-        # over the interval [0, btls_s_max].
-        btls_s_max = beta * self.btls_keep_feasible(x, delta_x)
-        if btls_s_max < min_step:
-            raise ConstraintBoundaryError(
-                message="Descent step takes us too close to constraint boundaries.",
-            )
-
-        # For backtracking line search, we ignore btls_s_max > 1.0
-        btls_s = min(1.0, btls_s_max)
-
-        # neg_alpha_grad is a positive number when lambda_squared > 0 (which it should
-        # always be).
-        neg_alpha_grad = alpha * lambda_squared
-        ft = self.evaluate_barrier_objective(x, t)
-
-        # btls_s_min = 1.0 / (1.0 + np.sqrt(lambda_squared))
-        # ft_new = self.evaluate_barrier_objective(x + btls_s_min * delta_x, t)
-        # if ft_new + btls_s_min * neg_alpha_grad > ft:
-        #     print("Possible violation of self-concordance assumption detected")
-        #     print(ft_new, ft, btls_s_min, neg_alpha_grad)
-
-        while (
-            ft_new := self.evaluate_barrier_objective(x + btls_s * delta_x, t)
-        ) + btls_s * neg_alpha_grad > ft:
-            if btls_s < min_step:
-                raise SevereCurvatureError(
-                    message="Small step sizes did not adequately decrease objective.",
-                    required_improvement=btls_s * neg_alpha_grad,
-                    actual_improvement=ft - ft_new,
-                )
-            btls_s *= beta
-
-        return btls_s
-
-    def newton_decrement_squared(
-        self,
-        x: npt.NDArray[np.float64],
-        t: float,
-        delta_x: npt.NDArray[np.float64],
-    ) -> float:
-        """Calculate Newton decrement.
-
-        The Newton decrement is the square root of:
-           delta_x * H * delta_x,
-        where H is the Hessian. This also equals the negative dot product of the barrier
-        gradient and delta_x. For equality constrained problems, it does *not* equal:
-           grad_ft * H^{-1} * grad_ft.
-
-        """
-        return max(0.0, np.dot(delta_x, self.hessian_multiply(x, t, delta_x)))
-
-    def inequality_multipliers(
-        self,
-        x: npt.NDArray[np.float64],
-        t: float,
-        delta_x: npt.NDArray[np.float64],
-        centering_step_solved_perfectly: bool = True,
-    ) -> npt.NDArray[np.float64]:
-        """Calculate Lagrange multipliers for inequality constraints."""
-        lmbda = -1.0 / (t * self.constraints(x))
-        if not centering_step_solved_perfectly:
-            lmbda *= 1.0 - (
-                self.grad_constraints_multiply(x, delta_x)
-            ) / self.constraints(x)
-        return lmbda
 
     @abstractmethod
     def calculate_newton_step(
@@ -1379,9 +872,9 @@ class UnconstrainedNewtonSolver(BaseInteriorPointMethodSolver):
          res : NewtonResult
 
         """
-        if x0 is None:
-            raise ValueError("Initial guess x0 is required.")
-        return self.centering_step(x0, t=1.0, last_step=True, fully_optimize=True)
+        res = super().solve(x0, fully_optimize=True, **kwargs)
+        assert isinstance(res, NewtonResult)
+        return res
 
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
         """All points are feasible (no constraints)."""
@@ -1506,9 +999,9 @@ class EqualityConstrainedNewtonSolver(BaseInteriorPointMethodSolver):
          res : NewtonResult
 
         """
-        if x0 is None:
-            raise ValueError("Initial guess x0 is required.")
-        return self.centering_step(x0, t=1.0, last_step=True, fully_optimize=True)
+        res = super().solve(x0, fully_optimize=True, **kwargs)
+        assert isinstance(res, NewtonResult)
+        return res
 
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
         """All points are feasible (no inequality constraints)."""
@@ -1584,3 +1077,527 @@ class EqualityConstrainedNewtonSolver(BaseInteriorPointMethodSolver):
     ) -> float:
         """Dual equals primal at optimality (strong duality, no inequality constraints)."""
         return self.evaluate_objective(x_star)
+
+
+class InteriorPointSolver:
+    r"""Interior point method solver.
+
+    Owns the interior point method loop: the outer barrier loop, the Newton
+    centering step, and the backtracking line search. An ``InteriorPointSolver``
+    is handed a problem (a :class:`BaseInteriorPointMethodSolver`) and drives it
+    to a solution. It holds the :class:`OptimizationSettings` that govern the
+    loop; the problem itself is settings-free.
+
+    A problem with no inequality constraints needs no barrier loop -- a single
+    Newton centering step at ``t = 1`` solves it -- so :meth:`solve` adapts
+    based on what the problem reports.
+    """
+
+    def __init__(self, settings: OptimizationSettings | None = None) -> None:
+        """Initialize the solver with the loop settings."""
+        self.settings: OptimizationSettings = (
+            settings if settings is not None else OptimizationSettings()
+        )
+        if self.settings.verbose:
+            _configure_verbose_logging()
+
+    def solve(
+        self,
+        problem: BaseInteriorPointMethodSolver,
+        x0: npt.NDArray[np.float64] | None = None,
+        fully_optimize: bool = False,
+        **kwargs: Any,
+    ) -> OptimizationResult:
+        r"""Solve ``problem`` with an interior point method.
+
+        Uses an interior point method with a logarithmic barrier penalty to
+        solve:
+           minimize    f0(x)
+           subject to  A * x = b
+                       fi(x) <= 0, i=1, ..., M.
+
+        Parameters
+        ----------
+         problem : BaseInteriorPointMethodSolver
+            The problem to solve.
+         x0 : vector, optional
+            Initial guess. Passed to the Phase I solver, intended to be feasible
+            for some of the constraints.
+         fully_optimize : bool
+            Whether to solve to full optimality, or (for feasibility problems)
+            stop as soon as a feasible point is found.
+
+        Returns
+        -------
+         res : OptimizationResult
+            The solution, wrapped with diagnostic info.
+
+        """
+        # A problem with no inequality constraints needs no barrier loop: a
+        # single Newton centering step at t=1 solves it.
+        if problem.num_ineq_constraints == 0:
+            if x0 is None:
+                raise ValueError("Initial guess x0 is required.")
+            return self.centering_step(
+                problem, x0, t=1.0, last_step=True, fully_optimize=True
+            )
+
+        if problem.phase1_solver is None:
+            raise ValueError("FeasibilitySolver not specified.")
+
+        # The nested Phase I solver should return x such that A * x = b and
+        # fi(x) < 0, i=1, ..., M.
+        phase1_res = problem.phase1_solver.solve(x0=x0, **kwargs)
+        x = problem.augment_previous_solution(phase1_res)
+
+        # Applicable only for Phase I methods.
+        if not fully_optimize and problem.is_feasible(x):
+            logger.info(
+                "  Phase I solution was feasible so we're done (%s)",
+                problem.__class__.__name__,
+                extra={
+                    "cvx_event": "phase1_feasible",
+                    "cvx_solver": problem.__class__.__name__,
+                },
+            )
+            return phase1_res
+
+        t = problem.initialize_barrier_parameter(x0=x)
+        num_steps = (
+            int(
+                np.ceil(
+                    (
+                        np.log(problem.num_ineq_constraints)
+                        - np.log(t * self.settings.outer_tolerance)
+                    )
+                    / np.log(self.settings.barrier_multiplier)
+                )
+            )
+            + 1
+        )
+        overall_start_time = time.time()
+        logger.info(
+            "  Starting IPM (%s)",
+            problem.__class__.__name__,
+            extra={
+                "cvx_event": "ipm_start",
+                "cvx_solver": problem.__class__.__name__,
+            },
+        )
+
+        inner_nits = []
+        inner_suboptimalities = []
+        duality_gaps = []
+        status: Literal[0, 1, 2] = 0
+        message = (
+            "Interior Point Method completed successfully to the desired tolerance"
+        )
+        equality_multipliers = np.zeros(1)
+        inequality_multipliers = np.zeros(1)
+        for nit in range(num_steps):
+            step_start_time = time.time()
+            logger.info(
+                "  %02d Beginning centering step with t=%s",
+                nit + 1,
+                t,
+                extra={
+                    "cvx_event": "centering_start",
+                    "cvx_outer_nit": nit + 1,
+                    "cvx_t": t,
+                },
+            )
+
+            try:
+                result = self.centering_step(
+                    problem,
+                    x,
+                    t,
+                    last_step=(nit + 1 == num_steps),
+                    outer_nit=nit + 1,
+                    fully_optimize=fully_optimize,
+                )
+            except CenteringStepError as e:
+                suboptimality = (
+                    problem.num_ineq_constraints * self.settings.barrier_multiplier / t
+                )
+                if nit > 1 and suboptimality < self.settings.outer_tolerance_soft:
+                    # Convergence was good enough
+                    x = e.last_iterate
+                    status = 1
+                    message = (
+                        "Interior Point Method reached an acceptable precision but "
+                        f"then ran into numerical difficulties -- {e.__str__()}"
+                    )
+                    nu = e.equality_multipliers
+                    lmbda = e.inequality_multipliers
+                    if nu is not None and lmbda is not None:
+                        duality_gaps.append(
+                            problem.evaluate_objective(x)
+                            - problem.evaluate_dual(
+                                lmbda=lmbda,
+                                nu=nu,
+                                x_star=x,
+                            )
+                        )
+
+                    break
+
+                raise InteriorPointMethodError(
+                    message="Centering step failed",
+                    remaining_steps=num_steps - nit - 1,
+                    suboptimality=problem.num_ineq_constraints
+                    * self.settings.barrier_multiplier
+                    / t,
+                    last_iterate=e.last_iterate,
+                ) from e
+
+            step_elapsed = 1000 * (time.time() - step_start_time)
+            logger.info(
+                "  %02d Centering step completed in %.3f ms",
+                nit + 1,
+                step_elapsed,
+                extra={
+                    "cvx_event": "centering_done",
+                    "cvx_outer_nit": nit + 1,
+                    "cvx_elapsed_ms": step_elapsed,
+                },
+            )
+
+            x = result.solution
+            equality_multipliers = result.equality_multipliers
+            inequality_multipliers = result.inequality_multipliers
+            inner_nits.append(result.nits)
+            inner_suboptimalities.append(result.suboptimalities)
+            duality_gaps.append(result.objective_value - result.dual_value)
+
+            # Applicable only for Phase I methods.
+            if not fully_optimize and problem.is_feasible(x):
+                status = 2
+                message = "Feasibility method successfully found a feasible point"
+                logger.info(
+                    "  %02d Result was strictly feasible so we're early-stopping.",
+                    nit + 1,
+                    extra={"cvx_event": "early_stop", "cvx_outer_nit": nit + 1},
+                )
+                break
+
+            # Dual can provide certificate of infeasibility, in which case we can
+            # quit faster. Applicable only for Phase I methods.
+            if not fully_optimize:
+                problem.check_for_infeasibility(result)
+
+            t *= self.settings.barrier_multiplier
+
+        overall_elapsed = 1000 * (time.time() - overall_start_time)
+        logger.info(
+            "  IPM completed in %.3f ms (%s)",
+            overall_elapsed,
+            problem.__class__.__name__,
+            extra={
+                "cvx_event": "ipm_done",
+                "cvx_solver": problem.__class__.__name__,
+                "cvx_elapsed_ms": overall_elapsed,
+            },
+        )
+
+        # Applicable only for Phase I methods.
+        if not fully_optimize and not problem.is_feasible(x):
+            raise ProblemMarginallyFeasibleError(
+                message=(
+                    "Problem may be infeasible: dual value was "
+                    f"{result.dual_value} < 0, but last centering step resulted in "
+                    f"a point with value {result.objective_value}"
+                ),
+                result=result,
+            )
+
+        return InteriorPointMethodResult(
+            solution=problem.finalize_solution(x),
+            objective_value=problem.evaluate_objective(x),
+            dual_value=problem.evaluate_dual(
+                lmbda=inequality_multipliers,
+                nu=equality_multipliers,
+                x_star=x,
+            ),
+            equality_multipliers=equality_multipliers,
+            inequality_multipliers=inequality_multipliers,
+            suboptimality=problem.num_ineq_constraints
+            * self.settings.barrier_multiplier
+            / t,
+            duality_gaps=duality_gaps,
+            nits=nit + 1,
+            inner_nits=inner_nits,
+            inner_suboptimalities=inner_suboptimalities,
+            status=status,
+            message=message,
+            phase1_res=phase1_res,
+        )
+
+    def centering_step(
+        self,
+        problem: BaseInteriorPointMethodSolver,
+        x0: npt.NDArray[np.float64],
+        t: float,
+        last_step: bool,
+        outer_nit: int = 0,
+        fully_optimize: bool = False,
+        **kwargs: Any,
+    ) -> NewtonResult:
+        r"""Solve the centering step.
+
+        The centering step solves, via Newton's method with a feasible starting
+        point:
+          minimize   ft(x) := t * f0(x) - \sum_i log(-fi(x))
+          subject to A * x = b.
+
+        It isn't always possible to solve this to high precision, so we use a
+        "soft" threshold as a fallback -- except on the very last step, where the
+        overall suboptimality of the interior point method relies on a
+        high-precision solve.
+        """
+        x = x0.copy()
+        eta = 0.25 * (1.0 - 2 * self.settings.backtracking_alpha)
+        in_quadratic_phase = False
+        suboptimality = np.inf
+        suboptimalities = []
+        for nit in range(self.settings.max_inner_iterations):
+            newton_start = time.time()
+
+            try:
+                delta_x, nu_hat = problem.calculate_newton_step(x, t)
+            except NewtonStepError as e:
+                raise CenteringStepError(
+                    message="Failed to calculate Newton step.",
+                    suboptimality=suboptimality,
+                    last_iterate=x,
+                ) from e
+
+            newton_elapsed = 1000 * (time.time() - newton_start)
+
+            # Check for convergence
+            lambda_squared = self.newton_decrement_squared(problem, x, t, delta_x)
+            suboptimality = 0.5 * lambda_squared
+            suboptimalities.append(suboptimality)
+
+            lambda_norm = np.sqrt(lambda_squared)
+            if not in_quadratic_phase and lambda_norm <= eta:
+                in_quadratic_phase = True
+                quadratic_convergence = " (quadratic convergence threshold)"
+            else:
+                quadratic_convergence = ""
+            logger.debug(
+                "    %02d Newton step in %.3f ms; sub-opt %.6g = 0.5 * %.6g^2%s",
+                nit + 1,
+                newton_elapsed,
+                suboptimality,
+                lambda_norm,
+                quadratic_convergence,
+                extra={
+                    "cvx_event": "newton_step",
+                    "cvx_outer_nit": outer_nit,
+                    "cvx_inner_nit": nit + 1,
+                    "cvx_elapsed_ms": newton_elapsed,
+                    "cvx_suboptimality": suboptimality,
+                },
+            )
+
+            if suboptimality < self.settings.inner_tolerance:
+                nu_star = nu_hat / t
+                lambda_star = self.inequality_multipliers(problem, x, t, delta_x)
+                return NewtonResult(
+                    solution=x,
+                    objective_value=problem.evaluate_objective(x),
+                    barrier_objective_value=problem.evaluate_barrier_objective(x, t),
+                    dual_value=problem.evaluate_dual(
+                        lmbda=lambda_star, nu=nu_star, x_star=x
+                    ),
+                    equality_multipliers=nu_star,
+                    inequality_multipliers=lambda_star,
+                    suboptimalities=suboptimalities,
+                    nits=nit + 1,
+                    status=0,
+                    message=(
+                        "Newton's method completed successfully to the desired "
+                        "tolerance."
+                    ),
+                )
+
+            # Update
+            try:
+                btls_s = self.backtracking_line_search(
+                    problem, x=x, delta_x=delta_x, t=t, lambda_squared=lambda_squared
+                )
+            except BacktrackingLineSearchError as e:
+                nu_star = nu_hat / t
+                lambda_star = self.inequality_multipliers(
+                    problem, x, t, delta_x, centering_step_solved_perfectly=False
+                )
+                if not last_step and suboptimality < self.settings.inner_tolerance_soft:
+                    return NewtonResult(
+                        solution=x,
+                        objective_value=problem.evaluate_objective(x),
+                        barrier_objective_value=problem.evaluate_barrier_objective(
+                            x, t
+                        ),
+                        dual_value=problem.evaluate_dual(
+                            lmbda=lambda_star, nu=nu_star, x_star=x
+                        ),
+                        equality_multipliers=nu_star,
+                        inequality_multipliers=lambda_star,
+                        suboptimalities=suboptimalities,
+                        nits=nit + 1,
+                        status=1,
+                        message=(
+                            "Newton's method achieved an acceptable tolerance but "
+                            f"then ran into numerical issues -- {e.__str__()}"
+                        ),
+                    )
+
+                raise CenteringStepError(
+                    message=f"Backtracking line search failed -- {e.__str__()}",
+                    suboptimality=suboptimality,
+                    last_iterate=x,
+                    equality_multipliers=nu_star,
+                    inequality_multipliers=lambda_star,
+                ) from e
+
+            if logger.isEnabledFor(logging.DEBUG):
+                ft = problem.evaluate_barrier_objective(x, t)
+                ft_new = problem.evaluate_barrier_objective(x + btls_s * delta_x, t)
+                expected_improvement = (
+                    self.settings.backtracking_alpha
+                    * self.settings.backtracking_beta
+                    * lambda_squared
+                    / (1 + lambda_norm)
+                )
+                logger.debug(
+                    "    %02d btls_s=%.4f, improvement=%.6g, expected improvement=%.6g",
+                    nit + 1,
+                    btls_s,
+                    ft - ft_new,
+                    expected_improvement,
+                    extra={
+                        "cvx_event": "btls",
+                        "cvx_outer_nit": outer_nit,
+                        "cvx_inner_nit": nit + 1,
+                        "cvx_btls_s": btls_s,
+                        "cvx_improvement": ft - ft_new,
+                        "cvx_expected_improvement": expected_improvement,
+                    },
+                )
+
+            # Applicable only for Phase I methods.
+            if not fully_optimize and problem.is_feasible(x + btls_s * delta_x):
+                nu_star = nu_hat / t
+                lambda_star = self.inequality_multipliers(
+                    problem, x, t, delta_x, centering_step_solved_perfectly=False
+                )
+                return NewtonResult(
+                    solution=x + btls_s * delta_x,
+                    objective_value=problem.evaluate_objective(x + btls_s * delta_x),
+                    barrier_objective_value=problem.evaluate_barrier_objective(
+                        x + btls_s * delta_x, t
+                    ),
+                    dual_value=problem.evaluate_dual(
+                        lmbda=lambda_star, nu=nu_star, x_star=x
+                    ),
+                    equality_multipliers=nu_star,
+                    inequality_multipliers=lambda_star,
+                    suboptimalities=suboptimalities,
+                    nits=nit + 1,
+                    status=1,
+                    message=("Newton's method found a feasible point."),
+                )
+
+            x += btls_s * delta_x
+
+        raise CenteringStepError(
+            "Centering step did not converge.",
+            suboptimality=suboptimality,
+            last_iterate=x,
+        )
+
+    def backtracking_line_search(
+        self,
+        problem: BaseInteriorPointMethodSolver,
+        x: npt.NDArray[np.float64],
+        delta_x: npt.NDArray[np.float64],
+        t: float,
+        lambda_squared: float,
+    ) -> float:
+        """Perform backtracking line search.
+
+        Returns the largest step modifier ``btls_s`` (in ``(0, 1]``) such that
+        ``x + btls_s * delta_x`` stays strictly feasible and satisfies the
+        sufficient-decrease condition on the barrier objective.
+        """
+        if (grad_ft_dot_delta_x := np.dot(delta_x, problem.gradient_barrier(x, t))) > 0:
+            raise InvalidDescentDirectionError(
+                message="Newton step was not a descent direction.",
+                grad_ft_dot_delta_x=grad_ft_dot_delta_x,
+            )
+
+        alpha = self.settings.backtracking_alpha
+        beta = self.settings.backtracking_beta
+        min_step = self.settings.backtracking_min_step
+
+        # Find the largest step size we could take while maintaining feasibility.
+        # Note: for an exact line search, we'd want to minimize ft(x + btls_s *
+        # delta_x) over the interval [0, btls_s_max].
+        btls_s_max = beta * problem.btls_keep_feasible(x, delta_x)
+        if btls_s_max < min_step:
+            raise ConstraintBoundaryError(
+                message="Descent step takes us too close to constraint boundaries.",
+            )
+
+        # For backtracking line search, we ignore btls_s_max > 1.0
+        btls_s = min(1.0, btls_s_max)
+
+        # neg_alpha_grad is a positive number when lambda_squared > 0 (which it
+        # should always be).
+        neg_alpha_grad = alpha * lambda_squared
+        ft = problem.evaluate_barrier_objective(x, t)
+
+        while (
+            ft_new := problem.evaluate_barrier_objective(x + btls_s * delta_x, t)
+        ) + btls_s * neg_alpha_grad > ft:
+            if btls_s < min_step:
+                raise SevereCurvatureError(
+                    message="Small step sizes did not adequately decrease objective.",
+                    required_improvement=btls_s * neg_alpha_grad,
+                    actual_improvement=ft - ft_new,
+                )
+            btls_s *= beta
+
+        return btls_s
+
+    def newton_decrement_squared(
+        self,
+        problem: BaseInteriorPointMethodSolver,
+        x: npt.NDArray[np.float64],
+        t: float,
+        delta_x: npt.NDArray[np.float64],
+    ) -> float:
+        """Calculate the squared Newton decrement.
+
+        The Newton decrement is the square root of ``delta_x * H * delta_x``,
+        where H is the Hessian. For equality-constrained problems, it does *not*
+        equal ``grad_ft * H^{-1} * grad_ft``.
+        """
+        return max(0.0, np.dot(delta_x, problem.hessian_multiply(x, t, delta_x)))
+
+    def inequality_multipliers(
+        self,
+        problem: BaseInteriorPointMethodSolver,
+        x: npt.NDArray[np.float64],
+        t: float,
+        delta_x: npt.NDArray[np.float64],
+        centering_step_solved_perfectly: bool = True,
+    ) -> npt.NDArray[np.float64]:
+        """Calculate Lagrange multipliers for the inequality constraints."""
+        lmbda = -1.0 / (t * problem.constraints(x))
+        if not centering_step_solved_perfectly:
+            lmbda *= 1.0 - (
+                problem.grad_constraints_multiply(x, delta_x)
+            ) / problem.constraints(x)
+        return lmbda
