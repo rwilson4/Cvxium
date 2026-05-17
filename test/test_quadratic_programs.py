@@ -26,7 +26,7 @@ from cvxium.quadratic_programs import (
     ],
 )
 def test_unconstrained_newton_quadratic(seed: int, n: int) -> None:
-    """UnconstrainedNewtonSolver finds the exact minimizer of a quadratic in one step."""
+    """UnconstrainedNewtonProblem finds the exact minimizer of a quadratic in one step."""
     rng = np.random.default_rng(seed)
 
     # Q = A^T A + I ensures strict positive definiteness.
@@ -599,7 +599,7 @@ class TestStructuredQCallables:
     ],
 )
 def test_equality_constrained_newton_quadratic(seed: int, n: int, p: int) -> None:
-    """EqualityConstrainedNewtonSolver finds the exact KKT point of a quadratic in one step."""
+    """EqualityConstrainedNewtonProblem finds the exact KKT point of a quadratic in one step."""
     rng = np.random.default_rng(seed)
 
     # Q = B^T B + I ensures strict positive definiteness.

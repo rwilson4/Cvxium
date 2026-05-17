@@ -17,16 +17,16 @@ from .numerical_helpers import (
     solve_rank_p_update,
 )
 from .optimization import (
-    EqualityConstrainedInteriorPointMethodSolver,
-    EqualityConstrainedNewtonSolver,
+    EqualityConstrainedNewtonProblem,
+    EqualityConstrainedProblem,
     InteriorPointMethodResult,
-    InteriorPointMethodSolver,
+    InteriorPointSolver,
     OptimizationSettings,
-    UnconstrainedNewtonSolver,
+    UnconstrainedNewtonProblem,
 )
 
 
-class QuadraticNewtonSolver(UnconstrainedNewtonSolver):
+class QuadraticNewtonSolver(UnconstrainedNewtonProblem):
     r"""Solve min 0.5 * x^T Q x + c^T x, where Q is PSD.
 
     Optimal solution: x* = -Q^{-1} c.
@@ -36,9 +36,9 @@ class QuadraticNewtonSolver(UnconstrainedNewtonSolver):
         self,
         Q: npt.NDArray[np.float64],
         c: npt.NDArray[np.float64],
-        settings: OptimizationSettings | None = None,
     ) -> None:
-        super().__init__(settings=settings)
+        """Build an unconstrained quadratic program."""
+        super().__init__()
         self.Q = Q
         self.c = c
         self._Q_factor = linalg.cho_factor(Q)
@@ -59,7 +59,7 @@ class QuadraticNewtonSolver(UnconstrainedNewtonSolver):
         return self.Q @ y
 
 
-class QuadraticEqualityConstrainedNewtonSolver(EqualityConstrainedNewtonSolver):
+class QuadraticEqualityConstrainedNewtonSolver(EqualityConstrainedNewtonProblem):
     r"""Solve min 0.5 * x^T Q x + c^T x subject to A x = b, where Q is PD.
 
     Optimal solution satisfies the KKT conditions:
@@ -73,9 +73,9 @@ class QuadraticEqualityConstrainedNewtonSolver(EqualityConstrainedNewtonSolver):
         c: npt.NDArray[np.float64],
         A: npt.NDArray[np.float64],
         b: npt.NDArray[np.float64],
-        settings: OptimizationSettings | None = None,
     ) -> None:
-        super().__init__(settings=settings)
+        """Build an equality-constrained quadratic program."""
+        super().__init__()
         self.Q = Q
         self.c = c
         self._A = A
@@ -146,9 +146,7 @@ def _callable_has_structured_params(fn: Callable[..., Any] | None) -> bool:
     return "scale" in sig.parameters and "diag_add" in sig.parameters
 
 
-class QuadraticProgramEqualityBoundsSolver(
-    EqualityConstrainedInteriorPointMethodSolver, InteriorPointMethodSolver
-):
+class QuadraticProgramEqualityBoundsSolver(EqualityConstrainedProblem):
     r"""Solve a quadratic program with equality and bound constraints.
 
     Solves:
@@ -272,7 +270,6 @@ class QuadraticProgramEqualityBoundsSolver(
         A: npt.NDArray[np.float64],
         b: npt.NDArray[np.float64],
         xl: float | list[float] | npt.NDArray[np.float64] = 0.0,
-        settings: OptimizationSettings | None = None,
         Q_vector_multiply: (
             Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]] | None
         ) = None,
@@ -280,8 +277,7 @@ class QuadraticProgramEqualityBoundsSolver(
             Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]] | None
         ) = None,
     ) -> None:
-        phase1_solver = EqualityWithBoundsSolver(A=A, b=b, lb=xl, settings=settings)
-        super().__init__(phase1_solver=phase1_solver, settings=settings)
+        super().__init__(phase1_problem=EqualityWithBoundsSolver(A=A, b=b, lb=xl))
         self.Q = Q
         self.c = c
         self._A = A
@@ -336,7 +332,7 @@ class QuadraticProgramEqualityBoundsSolver(
                 )
 
     # ------------------------------------------------------------------
-    # Properties required by EqualityConstrainedInteriorPointMethodSolver
+    # Properties required by EqualityConstrainedProblem
     # ------------------------------------------------------------------
 
     @property
@@ -350,7 +346,7 @@ class QuadraticProgramEqualityBoundsSolver(
         return self._b
 
     # ------------------------------------------------------------------
-    # Properties required by BaseInteriorPointMethodSolver
+    # Properties required by InteriorPointProblem
     # ------------------------------------------------------------------
 
     @property
@@ -556,7 +552,10 @@ class QuadraticProgramEqualityBoundsSolver(
     # ------------------------------------------------------------------
 
     def btls_keep_feasible(
-        self, x: npt.NDArray[np.float64], delta_x: npt.NDArray[np.float64]
+        self,
+        x: npt.NDArray[np.float64],
+        delta_x: npt.NDArray[np.float64],
+        settings: OptimizationSettings,
     ) -> float:
         r"""Return the largest step s keeping x + s * delta_x strictly feasible.
 
@@ -645,16 +644,19 @@ class QuadraticProgramEqualityBoundsSolver(
         return float(-0.25 * np.dot(v, Q_pinv_v) + base)
 
     # ------------------------------------------------------------------
-    # solve: force fully_optimize=True (inherited from InteriorPointMethodSolver)
+    # solve: narrow the result type to InteriorPointMethodResult
     # ------------------------------------------------------------------
 
     def solve(
         self,
+        solver: InteriorPointSolver | None = None,
         x0: npt.NDArray[np.float64] | None = None,
         fully_optimize: bool = False,
         **kwargs: object,
     ) -> InteriorPointMethodResult:
         """Solve the QP to optimality."""
-        result = super().solve(x0=x0, fully_optimize=True, **kwargs)
+        result = super().solve(
+            solver=solver, x0=x0, fully_optimize=fully_optimize, **kwargs
+        )
         assert isinstance(result, InteriorPointMethodResult)
         return result

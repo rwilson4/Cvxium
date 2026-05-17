@@ -37,17 +37,15 @@ essence of the Interior Point Method.
 Solving such problems typically requires a strictly feasible point, x0, satisfying
 A * x0 = b and fi(x0) < 0, i=1, ..., n. Finding a strictly feasible point is sometimes
 called finding a feasible point, which itself often involves solving a convex optimization
-problem. The code defines an InteriorPointMethodSolver class and a
-FeasibilityInteriorPointSolver class; the main difference is that once a
-FeasibilityInteriorPointSolver finds a feasible point, we can stop without "optimizing
-fully".
+problem. A problem is represented by a Problem subclass; a FeasibilityProblem is one
+that an InteriorPointSolver may stop solving as soon as a feasible point is found,
+rather than optimizing fully.
 
-There is also an EqualityConstrainedInteriorPointMethodSolver intended to be used
-whenever we have equality constraints. The main reason to do so is a custom
-initialization of the barrier penalty, which can result in faster solution. If this
-custom initialization is not desired, it may be better to inherit from
-InteriorPointMethodSolver; that is, not all problems with equality constraints need
-inherit from EqualityConstrainedInteriorPointMethodSolver.
+There is also an EqualityConstrainedProblem intended to be used whenever we have
+equality constraints. The main reason to do so is a custom initialization of the
+barrier penalty, which can result in faster solution. If this custom initialization is
+not desired, it may be better to inherit from InteriorPointProblem directly; that is,
+not all problems with equality constraints need inherit from EqualityConstrainedProblem.
 
 For general information on convex optimization and interior point method solvers, see
 (Boyd and Vandenberghe, 2004).
@@ -163,19 +161,19 @@ from .numerical_helpers import (
     solve_with_schur,
 )
 from .optimization import (
-    EqualityConstrainedInteriorPointMethodSolver,
-    EqualityConstrainedNewtonSolver,
-    FeasibilityInteriorPointSolver,
-    FeasibilitySolver,
+    EqualityConstrainedNewtonProblem,
+    EqualityConstrainedProblem,
+    FeasibilityProblem,
     InteriorPointMethodResult,
-    InteriorPointMethodSolver,
+    InteriorPointProblem,
+    InteriorPointSolver,
     NewtonResult,
     OptimizationResult,
     OptimizationSettings,
-    Optimizer,
+    Problem,
     ProblemCertifiablyInfeasibleError,
     ProblemMarginallyFeasibleError,
-    UnconstrainedNewtonSolver,
+    UnconstrainedNewtonProblem,
 )
 from .quadratic_programs import (
     QuadraticEqualityConstrainedNewtonSolver,
@@ -203,18 +201,18 @@ __all__ = [
     "BacktrackingLineSearchError",
     "CenteringStepError",
     "ConstraintBoundaryError",
-    "EqualityConstrainedInteriorPointMethodSolver",
-    "EqualityConstrainedNewtonSolver",
+    "EqualityConstrainedNewtonProblem",
+    "EqualityConstrainedProblem",
     "EqualitySolver",
     "EqualityWithBoundsAndImbalanceConstraintSolver",
     "EqualityWithBoundsSolver",
-    "FeasibilityInteriorPointSolver",
-    "FeasibilitySolver",
+    "FeasibilityProblem",
     "FrontierPoint",
     "FrontierResults",
     "InteriorPointMethodError",
     "InteriorPointMethodResult",
-    "InteriorPointMethodSolver",
+    "InteriorPointProblem",
+    "InteriorPointSolver",
     "InvalidDescentDirectionError",
     "IterationHandler",
     "MultiObjectiveOptimizer",
@@ -223,7 +221,7 @@ __all__ = [
     "OptimizationError",
     "OptimizationResult",
     "OptimizationSettings",
-    "Optimizer",
+    "Problem",
     "ProblemCertifiablyInfeasibleError",
     "ProblemInfeasibleError",
     "ProblemMarginallyFeasibleError",
@@ -231,7 +229,7 @@ __all__ = [
     "QuadraticNewtonSolver",
     "QuadraticProgramEqualityBoundsSolver",
     "SevereCurvatureError",
-    "UnconstrainedNewtonSolver",
+    "UnconstrainedNewtonProblem",
     "multiply_arrow_sparsity_pattern",
     "multiply_banded",
     "multiply_block",

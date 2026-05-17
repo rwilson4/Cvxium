@@ -17,6 +17,7 @@ from cvxium.linear_programs import (
 )
 from cvxium.optimization import (
     InteriorPointMethodResult,
+    InteriorPointSolver,
     OptimizationSettings,
     ProblemCertifiablyInfeasibleError,
     ProblemMarginallyFeasibleError,
@@ -220,12 +221,7 @@ class TestEqualityWithBoundsSolver:
         w = 2 * lb + np.random.rand(M)
         b = A @ w
 
-        solver = EqualityWithBoundsSolver(
-            A=A,
-            b=b,
-            lb=lb,
-            settings=OptimizationSettings(verbose=True),
-        )
+        solver = EqualityWithBoundsSolver(A=A, b=b, lb=lb)
 
         # Verify we find a feasible point
         res = solver.solve()
@@ -239,12 +235,7 @@ class TestEqualityWithBoundsSolver:
         assert np.all(res.solution > 0.0)
 
         # Solve with a vector of lb
-        solver = EqualityWithBoundsSolver(
-            A=A,
-            b=b,
-            lb=np.full((M,), lb),
-            settings=OptimizationSettings(verbose=True),
-        )
+        solver = EqualityWithBoundsSolver(A=A, b=b, lb=np.full((M,), lb))
 
         # Verify we find a feasible point
         res = solver.solve()
@@ -291,11 +282,7 @@ class TestEqualityWithBoundsSolver:
         w = np.random.rand(M)
         b = A @ w
 
-        solver = EqualityWithBoundsSolver(
-            A=A,
-            b=b,
-            settings=OptimizationSettings(verbose=True),
-        )
+        solver = EqualityWithBoundsSolver(A=A, b=b)
 
         # Verify we find a feasible point
         res = solver.solve()
@@ -354,11 +341,7 @@ class TestEqualityWithBoundsSolver:
         assert abs(np.dot(A @ np.ones((M,)), nu) - 1) <= 1e-6
         assert np.dot(b, nu) < 0
 
-        solver = EqualityWithBoundsSolver(
-            A=A,
-            b=b,
-            settings=OptimizationSettings(verbose=True),
-        )
+        solver = EqualityWithBoundsSolver(A=A, b=b)
 
         with pytest.raises(ProblemCertifiablyInfeasibleError):
             solver.solve()
@@ -402,14 +385,13 @@ class TestEqualityWithBoundsSolver:
         b = A @ w_star
         # w_star is the only solution to A * w = b, but w_star is only marginally feasible.
 
-        solver = EqualityWithBoundsSolver(
-            A=A,
-            b=b,
-            settings=OptimizationSettings(verbose=True, outer_tolerance=1e-4),
+        ip_solver = InteriorPointSolver(
+            settings=OptimizationSettings(verbose=True, outer_tolerance=1e-4)
         )
+        solver = EqualityWithBoundsSolver(A=A, b=b)
 
         with pytest.raises(ProblemMarginallyFeasibleError):
-            solver.solve()
+            solver.solve(solver=ip_solver)
 
     @pytest.mark.parametrize(
         "seed,M,p,atol",
@@ -452,11 +434,7 @@ class TestEqualityWithBoundsSolver:
         w = 0.1 + np.random.rand(M)
         b = A @ w
 
-        solver = EqualityWithBoundsSolver(
-            A=A,
-            b=b,
-            settings=OptimizationSettings(verbose=True),
-        )
+        solver = EqualityWithBoundsSolver(A=A, b=b)
 
         # Verify we find a feasible point
         res = solver.solve()
@@ -522,11 +500,7 @@ class TestEqualityWithBoundsSolver:
         w = 0.1 + np.random.rand(M)
         b = A @ w
 
-        solver = EqualityWithBoundsSolver(
-            A=A,
-            b=b,
-            settings=OptimizationSettings(verbose=True),
-        )
+        solver = EqualityWithBoundsSolver(A=A, b=b)
 
         # Verify we find a feasible point
         res = solver.solve()
@@ -621,6 +595,9 @@ class TestEqualityWithBoundsAndImbalanceConstraintSolver:
         assert scipy_res.success, "Scipy failed to solve the problem"
         s_opt = scipy_res.x[-1]
 
+        ip_solver = InteriorPointSolver(
+            settings=OptimizationSettings(verbose=True, outer_tolerance_soft=0.01)
+        )
         solver = EqualityWithBoundsAndImbalanceConstraintSolver(
             B=B,
             c=c,
@@ -628,11 +605,10 @@ class TestEqualityWithBoundsAndImbalanceConstraintSolver:
             A=A,
             b=b,
             lb=lb,
-            settings=OptimizationSettings(verbose=True, outer_tolerance_soft=0.01),
         )
 
         st = time.time()
-        res = solver.solve()
+        res = solver.solve(solver=ip_solver)
         et = time.time()
         feasibility_time = et - st
 
@@ -643,7 +619,7 @@ class TestEqualityWithBoundsAndImbalanceConstraintSolver:
 
         # Verify we can fully optimize
         st = time.time()
-        res = solver.solve(fully_optimize=True)
+        res = solver.solve(solver=ip_solver, fully_optimize=True)
         et = time.time()
         print(
             f"Feasible point found with Cvxium in {1000 * (feasibility_time):.03f} ms"
@@ -665,11 +641,10 @@ class TestEqualityWithBoundsAndImbalanceConstraintSolver:
             A=A,
             b=b,
             lb=np.full((M,), lb),
-            settings=OptimizationSettings(verbose=True, outer_tolerance_soft=0.01),
         )
 
         st = time.time()
-        res = solver.solve()
+        res = solver.solve(solver=ip_solver)
         et = time.time()
         feasibility_time = et - st
         print(
@@ -766,7 +741,6 @@ class TestEqualityWithBoundsAndImbalanceConstraintSolver:
             psi=psi,
             A=A,
             b=b,
-            settings=OptimizationSettings(verbose=True),
         )
         with pytest.raises(ProblemCertifiablyInfeasibleError):
             solver.solve()

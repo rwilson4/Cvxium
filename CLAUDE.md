@@ -55,28 +55,40 @@ uv run python -m mypy
 
 ## Architecture
 
-### Class Hierarchy (optimization.py)
+### Problem / Solver split (optimization.py)
+
+A **`Problem`** is the thing you solve; an **`InteriorPointSolver`** owns the
+IPM loop and drives a problem to a solution. Construct a problem and call
+`problem.solve(solver=..., x0=...)`; `solver` defaults to a standard
+`InteriorPointSolver()`. Loop settings (`OptimizationSettings`) live on the
+solver, not the problem.
 
 ```
-Optimizer (ABC)
-├── FeasibilitySolver (ABC) — find a feasible point, no objective
-│
-└── BaseInteriorPointMethodSolver — IPM loop, centering, BTLS
-    ├── InteriorPointMethodSolver — inequality-only optimization
-    ├── FeasibilityInteriorPointSolver (+ FeasibilitySolver) — IPM-based feasibility
-    ├── EqualityConstrainedInteriorPointMethodSolver — equality + inequality
-    │     with custom barrier initialization via SVD of A
-    └── UnconstrainedNewtonSolver — no constraints, pure Newton's method
+Problem (ABC) — num_eq/ineq_constraints, solve(solver, x0, fully_optimize)
+├── FeasibilityProblem (ABC) — adds is_feasible; the solver may early-exit
+│       once a feasible point is found
+│   └── EqualitySolver — direct SVD solve of A x = b (not an IPM problem)
+└── InteriorPointProblem — the IPM math: objective, gradients, constraints,
+    │     calculate_newton_step, hessian_multiply, the barrier hooks
+    ├── EqualityConstrainedProblem — adds A, b; custom barrier init via SVD of A
+    ├── UnconstrainedNewtonProblem — no constraints, single Newton step
+    └── EqualityConstrainedNewtonProblem — equality only, single Newton step
+
+InteriorPointSolver — outer barrier loop, centering step, backtracking line
+    search; holds OptimizationSettings; adapts (a problem with no inequality
+    constraints needs only a single Newton step).
 ```
 
-To implement a new solver, pick a base class from this table:
+To implement a new solver, pick base class(es) from this table (feasibility
+problems with inequality constraints inherit from both an `InteriorPointProblem`
+variant and `FeasibilityProblem`):
 
-| Constraints           | Optimization                                                             | Feasibility                                                                   |
-|-----------------------|--------------------------------------------------------------------------|-------------------------------------------------------------------------------|
-| None                  | UnconstrainedNewtonSolver                                                | n/a                                                                           |
-| Equality              | EqualityConstrainedNewtonSolver                                          | EqualitySolver                                                                |
-| Inequality            | InteriorPointMethodSolver                                                | FeasibilityInteriorPointSolver                                                |
-| Equality + Inequality | InteriorPointMethodSolver + EqualityConstrainedInteriorPointMethodSolver | FeasibilityInteriorPointSolver + EqualityConstrainedInteriorPointMethodSolver |
+| Constraints           | Optimization                  | Feasibility                                       |
+|-----------------------|-------------------------------|---------------------------------------------------|
+| None                  | UnconstrainedNewtonProblem    | n/a                                               |
+| Equality              | EqualityConstrainedNewtonProblem | EqualitySolver                                 |
+| Inequality            | InteriorPointProblem          | InteriorPointProblem + FeasibilityProblem         |
+| Equality + Inequality | EqualityConstrainedProblem    | EqualityConstrainedProblem + FeasibilityProblem   |
 
 ### Key abstract methods to implement
 
@@ -90,9 +102,15 @@ To implement a new solver, pick a base class from this table:
 
 ### Modules
 
-- **optimization.py** — Base solver classes, IPM loop, centering step,
-  BTLS, result dataclasses (`OptimizationSettings`, `NewtonResult`,
+- **optimization.py** — `Problem` class hierarchy (the math), the
+  `InteriorPointSolver` (IPM loop, centering step, BTLS), and result
+  dataclasses (`OptimizationSettings`, `NewtonResult`,
   `InteriorPointMethodResult`).
+- **systems.py** — `System`, a composable object-oriented layer over the
+  `numerical_helpers` kernels: `DiagonalSystem`, `BandedSystem`,
+  `DenseSystem`, `LowRankUpdatedSystem`, `BlockDiagonalSystem`,
+  `ArrowSystem`, `KKTSystem`. A `System` knows how to `solve` and
+  `multiply` itself; composites take other Systems as their parts.
 - **numerical_helpers.py** — Structured linear system solvers:
   `solve_diagonal`, `solve_rank_one_update`, `solve_rank_p_update`,
   `solve_with_schur`, `solve_block_plus_one`,

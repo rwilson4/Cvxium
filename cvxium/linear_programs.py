@@ -21,35 +21,28 @@ from .numerical_helpers import (
     solve_rank_p_update,
 )
 from .optimization import (
-    EqualityConstrainedInteriorPointMethodSolver,
-    FeasibilityInteriorPointSolver,
-    FeasibilitySolver,
+    EqualityConstrainedProblem,
+    FeasibilityProblem,
+    InteriorPointProblem,
+    InteriorPointSolver,
     NewtonResult,
     OptimizationResult,
     OptimizationSettings,
     ProblemCertifiablyInfeasibleError,
-    _configure_verbose_logging,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class EqualitySolver(FeasibilitySolver):
+class EqualitySolver(FeasibilityProblem):
     """Find x satisfying A * x = b."""
 
     def __init__(
         self,
         A: npt.NDArray[np.float64],
         b: npt.NDArray[np.float64],
-        settings: OptimizationSettings | None = None,
     ) -> None:
-        if settings is None:
-            self.settings: OptimizationSettings = OptimizationSettings()
-        else:
-            self.settings = settings
-        if self.settings.verbose:
-            _configure_verbose_logging()
-
+        """Build an equality-feasibility problem for ``A x = b``."""
         p, _ = A.shape
         assert len(b.shape) == 1
         assert b.shape[0] == p
@@ -66,8 +59,13 @@ class EqualitySolver(FeasibilitySolver):
         """Count inequality constraints."""
         return 0
 
+    def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
+        """Return whether ``x`` satisfies the equality constraints ``A x = b``."""
+        return bool(np.all(np.abs(self.A @ x - self.b) < 1e-10))
+
     def solve(
         self,
+        solver: InteriorPointSolver | None = None,
         x0: npt.NDArray[np.float64] | None = None,
         fully_optimize: bool = False,
         **kwargs: Any,
@@ -201,10 +199,10 @@ class EqualitySolver(FeasibilitySolver):
         return Vh.T, s, QU.T
 
 
-class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
+class EqualityWithBoundsSolver(InteriorPointProblem, FeasibilityProblem):
     r"""Find x satisfying A * x = b and x > lb.
 
-    phase1_solver is always an EqualitySolver.
+    phase1_problem is always an EqualitySolver.
 
     We do this by solving:
       minimize   s
@@ -225,12 +223,12 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
 
     Parameters
     ----------
-     phase1_solver : EqualitySolver, optional
+     phase1_problem : EqualitySolver, optional
         This class requires a Phase I solver for the equality constraints, and there are
         two ways of generating this. The user can either pass an EqualitySolver, or pass
         A and b and an EqualitySolver will be initialized.
      A, b : npt.NDArray
-        Equality constraints: A * x = b. Required when phase1_solver is None.
+        Equality constraints: A * x = b. Required when phase1_problem is None.
      lb : float or list[float], optional
         Lower bound on elements of x. Defaults to 0.
      settings : OptimizationSettings
@@ -238,22 +236,20 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
 
     """
 
-    phase1_solver: EqualitySolver
+    phase1_problem: EqualitySolver
 
     def __init__(
         self,
-        phase1_solver: EqualitySolver | None = None,
+        phase1_problem: EqualitySolver | None = None,
         A: npt.NDArray[np.float64] | None = None,
         b: npt.NDArray[np.float64] | None = None,
         lb: float | list[float] | npt.NDArray[np.float64] = 0.0,
-        settings: OptimizationSettings | None = None,
     ) -> None:
-        if phase1_solver is not None:
-            super().__init__(phase1_solver=phase1_solver, settings=settings)
+        """Build a bounded-feasibility problem for ``A x = b``, ``x > lb``."""
+        if phase1_problem is not None:
+            super().__init__(phase1_problem=phase1_problem)
         elif A is not None and b is not None:
-            super().__init__(
-                phase1_solver=EqualitySolver(A, b, settings=settings), settings=settings
-            )
+            super().__init__(phase1_problem=EqualitySolver(A, b))
         else:
             raise ValueError("Must specify `A` and `b`.")
 
@@ -278,12 +274,12 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
     @property
     def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
         """Equality constraint matrix."""
-        return self.phase1_solver.A
+        return self.phase1_problem.A
 
     @property
     def b(self) -> npt.NDArray[np.float64]:
         """Equality constraint vector."""
-        return self.phase1_solver.b
+        return self.phase1_problem.b
 
     def svd_A(  # noqa: N802
         self,
@@ -293,7 +289,7 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
         npt.NDArray[np.float32 | np.float64],
     ]:
         """Calculate and cache SVD of A."""
-        return self.phase1_solver.svd_A()
+        return self.phase1_problem.svd_A()
 
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
         """Determine whether a feasible point has been found."""
@@ -327,7 +323,9 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
         """De-augment solution."""
         return x[0 : self.dimension]
 
-    def initialize_barrier_parameter(self, x0: npt.NDArray[np.float64]) -> float:
+    def initialize_barrier_parameter(
+        self, x0: npt.NDArray[np.float64], settings: OptimizationSettings
+    ) -> float:
         r"""Initialize barrier parameter.
 
         We try 2 different approaches to initializing the barrier parameter, based on
@@ -342,7 +340,7 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
 
         """
         M = self.dimension
-        t1 = self.num_ineq_constraints / max(self.settings.outer_tolerance, x0[M])
+        t1 = self.num_ineq_constraints / max(settings.outer_tolerance, x0[M])
         t2 = np.sum(1.0 / (x0[0:M] - self.lb + x0[M])) - M / 1.0
         return max(1.0, t1, t2)
 
@@ -468,7 +466,10 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
         return x
 
     def btls_keep_feasible(
-        self, x: npt.NDArray[np.float64], delta_x: npt.NDArray[np.float64]
+        self,
+        x: npt.NDArray[np.float64],
+        delta_x: npt.NDArray[np.float64],
+        settings: OptimizationSettings,
     ) -> float:
         """Make sure x + btls_s * delta_x stays strictly feasible.
 
@@ -748,7 +749,7 @@ class EqualityWithBoundsSolver(FeasibilityInteriorPointSolver):
 
 
 class EqualityWithBoundsAndImbalanceConstraintSolver(
-    EqualityConstrainedInteriorPointMethodSolver, FeasibilityInteriorPointSolver
+    EqualityConstrainedProblem, FeasibilityProblem
 ):
     r"""Find x satisfying A * x = b, x > lb, and \| B * x - c \|_\infty < psi.
 
@@ -766,13 +767,13 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
         Parameters for imbalance constraints.
      psi : float or list[float], optional
         Parameters for imbalance constraints.
-     phase1_solver : EqualityWithBoundsSolver, optional
+     phase1_problem : EqualityWithBoundsSolver, optional
         This class requires a Phase I solver for the equality and bounds constraints,
         and there are two ways of generating this. The user can either pass an
-        EqualityWithBoundsSolver or pass A, b, and lb, and a FeasibilitySolver will be
+        EqualityWithBoundsSolver or pass A, b, and lb, and a FeasibilityProblem will be
         initialized.
      A, b : npt.NDArray
-        Equality constraints: A * x = b. Required when phase1_solver is None.
+        Equality constraints: A * x = b. Required when phase1_problem is None.
      lb : float or list[float], optional
         Lower bound on elements of x. Defaults to 0.
      settings : OptimizationSettings
@@ -780,31 +781,23 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
 
     """
 
-    phase1_solver: EqualityWithBoundsSolver
+    phase1_problem: EqualityWithBoundsSolver
 
     def __init__(
         self,
         B: npt.NDArray[np.float64],
         c: npt.NDArray[np.float64],
         psi: float | list[float] | npt.NDArray[np.float64],
-        phase1_solver: EqualityWithBoundsSolver | None = None,
+        phase1_problem: EqualityWithBoundsSolver | None = None,
         A: npt.NDArray[np.float64] | None = None,
         b: npt.NDArray[np.float64] | None = None,
         lb: float | list[float] | npt.NDArray[np.float64] = 0.0,
-        settings: OptimizationSettings | None = None,
     ) -> None:
-        if phase1_solver is not None:
-            super().__init__(phase1_solver=phase1_solver, settings=settings)
+        """Build an imbalance-feasibility problem on top of ``A x = b``, ``x > lb``."""
+        if phase1_problem is not None:
+            super().__init__(phase1_problem=phase1_problem)
         elif A is not None and b is not None:
-            super().__init__(
-                phase1_solver=EqualityWithBoundsSolver(
-                    A=A,
-                    b=b,
-                    lb=lb,
-                    settings=settings,
-                ),
-                settings=settings,
-            )
+            super().__init__(phase1_problem=EqualityWithBoundsSolver(A=A, b=b, lb=lb))
         else:
             raise ValueError("Must specify `A` and `b`.")
 
@@ -830,12 +823,12 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
     @property
     def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
         """Equality constraint matrix."""
-        return self.phase1_solver.A
+        return self.phase1_problem.A
 
     @property
     def b(self) -> npt.NDArray[np.float64]:
         """Equality constraint vector."""
-        return self.phase1_solver.b
+        return self.phase1_problem.b
 
     def svd_A(  # noqa: N802
         self,
@@ -845,12 +838,12 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
         npt.NDArray[np.float32 | np.float64],
     ]:
         """Calculate and cache SVD of A."""
-        return self.phase1_solver.svd_A()
+        return self.phase1_problem.svd_A()
 
     @property
     def lb(self) -> float | list[float] | npt.NDArray[np.float64]:
         """Lower bound on x."""
-        return self.phase1_solver.lb
+        return self.phase1_problem.lb
 
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
         """Determine whether a feasible point has been found."""
@@ -889,10 +882,12 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
         """De-augment solution."""
         return x[0 : self.dimension]
 
-    def initialize_barrier_parameter(self, x0: npt.NDArray[np.float64]) -> float:
+    def initialize_barrier_parameter(
+        self, x0: npt.NDArray[np.float64], settings: OptimizationSettings
+    ) -> float:
         """Initialize barrier parameter.
 
-        Modifies the method from EqualityConstrainedInteriorPointMethodSolver to account
+        Modifies the method from EqualityConstrainedProblem to account
         for the augmented variable.
 
         Parameters
@@ -926,7 +921,7 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
         t_star_s = -np.dot(delta_f0, delta_phi) + np.dot(A_delta_f0, z_phi)
 
         return min(
-            self.num_ineq_constraints / self.settings.outer_tolerance,
+            self.num_ineq_constraints / settings.outer_tolerance,
             max(1.0, t_star_s / max(schur_complement, 1e-16)),
         )
 
@@ -1002,7 +997,10 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
         )
 
     def btls_keep_feasible(
-        self, x: npt.NDArray[np.float64], delta_x: npt.NDArray[np.float64]
+        self,
+        x: npt.NDArray[np.float64],
+        delta_x: npt.NDArray[np.float64],
+        settings: OptimizationSettings,
     ) -> float:
         """Make sure x + theta * delta_x stays strictly feasible."""
         M = self.dimension

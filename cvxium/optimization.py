@@ -278,23 +278,28 @@ class ProblemMarginallyFeasibleError(ProblemInfeasibleError):
         return self.message
 
 
-class Optimizer(ABC):
-    """Base class for an optimizer."""
+class Problem(ABC):
+    """Base class for an optimization problem.
+
+    A problem is the thing you solve: the caller constructs it and hands it to
+    :meth:`solve`. Interior point problems delegate solving to an
+    :class:`InteriorPointSolver`, which owns the loop and its settings.
+    """
 
     def __init__(
         self,
-        phase1_solver: "FeasibilitySolver | None" = None,
-        settings: OptimizationSettings | None = None,
+        phase1_problem: "FeasibilityProblem | None" = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize optimizer."""
-        self.phase1_solver = phase1_solver
-        if settings is None:
-            self.settings: OptimizationSettings = OptimizationSettings()
-        else:
-            self.settings = settings
-        if self.settings.verbose:
-            _configure_verbose_logging()
+        """Initialize the problem.
+
+        Parameters
+        ----------
+         phase1_problem : FeasibilityProblem, optional
+            A Phase I problem that finds a strictly feasible starting point.
+
+        """
+        self.phase1_problem = phase1_problem
 
     @abstractproperty
     def num_eq_constraints(self) -> int:
@@ -307,43 +312,22 @@ class Optimizer(ABC):
     @abstractmethod
     def solve(
         self,
-        x0: npt.NDArray[np.float64] | None = None,
-        **kwargs: Any,
-    ) -> OptimizationResult:
-        """Solve optimization problem.
-
-        Parameters
-        ----------
-         x0 : vector, optional
-            Initial guess.
-
-        Returns
-        -------
-         res : OptimizationResult
-            The solution.
-
-        """
-
-
-class FeasibilitySolver(Optimizer):
-    """Base class for a FeasibilitySolver."""
-
-    @abstractmethod
-    def solve(
-        self,
+        solver: "InteriorPointSolver | None" = None,
         x0: npt.NDArray[np.float64] | None = None,
         fully_optimize: bool = False,
         **kwargs: Any,
     ) -> OptimizationResult:
-        """Solve optimization problem.
+        """Solve the optimization problem.
 
         Parameters
         ----------
+         solver : InteriorPointSolver, optional
+            The solver to use. Defaults to a standard :class:`InteriorPointSolver`.
          x0 : vector, optional
             Initial guess.
          fully_optimize : bool, optional
-            If True, solve the problem to the full optimal point. Otherwise, return as
-            soon as we have a feasible point. Defaults to False.
+            For feasibility problems, whether to solve to full optimality rather
+            than stopping as soon as a feasible point is found.
 
         Returns
         -------
@@ -353,39 +337,37 @@ class FeasibilitySolver(Optimizer):
         """
 
 
-class BaseInteriorPointMethodSolver(Optimizer):
-    """Base class for Interior Point Methods."""
+class FeasibilityProblem(Problem):
+    """A problem that may be solved only until a feasible point is found.
 
-    def __init__(
-        self,
-        phase1_solver: "FeasibilitySolver | None" = None,
-        settings: OptimizationSettings | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Initialize optimizer."""
-        self.phase1_solver = phase1_solver
-        if settings is None:
-            self.settings: OptimizationSettings = OptimizationSettings()
-        else:
-            self.settings = settings
-        if self.settings.verbose:
-            _configure_verbose_logging()
+    When an :class:`InteriorPointSolver` solves a ``FeasibilityProblem`` it may
+    stop as soon as a feasible point is found, rather than optimizing fully,
+    unless ``fully_optimize`` is set.
+    """
+
+    @abstractmethod
+    def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
+        """Return whether ``x`` is a feasible point."""
+
+
+class InteriorPointProblem(Problem):
+    """Base class for problems solved by an interior point method."""
 
     def solve(
         self,
+        solver: "InteriorPointSolver | None" = None,
         x0: npt.NDArray[np.float64] | None = None,
         fully_optimize: bool = False,
         **kwargs: Any,
     ) -> OptimizationResult:
-        """Solve the optimization problem with an interior point method.
+        """Solve the problem with an interior point method.
 
-        Convenience wrapper that delegates to :class:`InteriorPointSolver`, which
-        owns the IPM loop. Construct an :class:`InteriorPointSolver` directly for
-        control over the loop settings.
+        Hands the problem to ``solver`` -- a standard :class:`InteriorPointSolver`
+        when none is given -- which owns the IPM loop and its settings.
         """
-        return InteriorPointSolver(self.settings).solve(
-            self, x0=x0, fully_optimize=fully_optimize, **kwargs
-        )
+        if solver is None:
+            solver = InteriorPointSolver()
+        return solver.solve(self, x0=x0, fully_optimize=fully_optimize, **kwargs)
 
     def augment_previous_solution(
         self,
@@ -399,7 +381,9 @@ class BaseInteriorPointMethodSolver(Optimizer):
         """De-augment solution."""
         return x
 
-    def initialize_barrier_parameter(self, x0: npt.NDArray[np.float64]) -> float:
+    def initialize_barrier_parameter(
+        self, x0: npt.NDArray[np.float64], settings: OptimizationSettings
+    ) -> float:
         """Initialize barrier parameter.
 
         We can often skip early centering steps by initializing the barrier parameter to
@@ -457,9 +441,13 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
         """
 
-    @abstractmethod
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
-        """Determine whether a feasible point has been found."""
+        """Return whether ``x`` is a feasible point.
+
+        Non-feasibility problems are always optimized fully, so the default is
+        ``False``; feasibility problems override this with a real test.
+        """
+        return False
 
     def check_for_infeasibility(self, result: NewtonResult) -> None:
         """Check if infeasible.
@@ -474,7 +462,10 @@ class BaseInteriorPointMethodSolver(Optimizer):
         pass
 
     def btls_keep_feasible(
-        self, x: npt.NDArray[np.float64], delta_x: npt.NDArray[np.float64]
+        self,
+        x: npt.NDArray[np.float64],
+        delta_x: npt.NDArray[np.float64],
+        settings: OptimizationSettings,
     ) -> float:
         """Make sure x + btls_s * delta_x stays strictly feasible.
 
@@ -484,8 +475,8 @@ class BaseInteriorPointMethodSolver(Optimizer):
         """
         btls_s = 1.0
         while np.any(self.constraints(x + btls_s * delta_x) >= 0):
-            btls_s *= self.settings.backtracking_beta
-            if btls_s < self.settings.backtracking_min_step:
+            btls_s *= settings.backtracking_beta
+            if btls_s < settings.backtracking_min_step:
                 raise ConstraintBoundaryError(
                     message="Descent step takes us too close to constraint boundaries.",
                 )
@@ -581,121 +572,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
         """
 
 
-class InteriorPointMethodSolver(BaseInteriorPointMethodSolver):
-    """Solve an optimization problem using an Interior Point Method."""
-
-    def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
-        """Determine whether a feasible point has been found."""
-        return False
-
-    def solve(
-        self,
-        x0: npt.NDArray[np.float64] | None = None,
-        fully_optimize: bool = False,
-        **kwargs: Any,
-    ) -> InteriorPointMethodResult:
-        r"""Solve optimization problem.
-
-        Uses an interior point method with a logarithmic barrier penalty to
-        solve:
-           minimize    f0(x)
-           subject to  A * x = b
-                       fi(x) <= 0, i=1, ..., M.
-
-        Parameters
-        ----------
-         x0 : vector
-            Initial guess. If infeasible, a Phase I solver will be used to find a
-            feasible point.
-         fully_optimize : bool
-            Placeholder for Phase I methods. Doesn't do anything here.
-
-        Returns
-        -------
-         res : InteriorPointMethodResult
-            The results are wrapped in a InteriorPointMethodResult class, which includes
-            the solution and other helpful info.
-
-        """
-        res = super().solve(x0, fully_optimize=True, **kwargs)
-
-        # This is just a hack to tell the type checker that res has the desired type. By
-        # construction, it always will.
-        assert isinstance(res, InteriorPointMethodResult)
-        return res
-
-
-class FeasibilityInteriorPointSolver(BaseInteriorPointMethodSolver, FeasibilitySolver):
-    """Base class for a feasibility solver that uses an Interior Point Method.
-
-    The main distinction is that a feasibility solver can terminate as soon as a feasible
-    point is found.
-
-    """
-
-    def __init__(
-        self,
-        phase1_solver: "FeasibilitySolver | None" = None,
-        settings: OptimizationSettings | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Initialize optimizer."""
-        super().__init__(phase1_solver=phase1_solver, settings=settings, **kwargs)
-
-    def solve(
-        self,
-        x0: npt.NDArray[np.float64] | None = None,
-        fully_optimize: bool = False,
-        **kwargs: Any,
-    ) -> OptimizationResult:
-        r"""Solve optimization problem.
-
-        Uses an interior point method with a logarithmic barrier penalty to
-        solve:
-           minimize    0
-           subject to  A * x = b
-                       fi(x) <= 0, i=1, ..., M.
-                       fj(x) <= 0, j=1, ..., N.
-
-        Parameters
-        ----------
-         x0 : vector
-            Initial guess, intended to be feasible for some of the constraints, allowing
-            the Phase I solver to focus on a particular set of constraints. See Notes.
-         fully_optimize : bool
-            If True, solve the underlying problem to full precision. Otherwise, return a
-            feasible point as soon as we find one. See Notes.
-
-        Returns
-        -------
-         res : InteriorPointMethodResult
-            The results are wrapped in a InteriorPointMethodResult class, which includes
-            a feasible point and other helpful info.
-
-        Raises
-        ------
-         ProblemInfeasibleError: if a feasible point does not exist.
-
-        Notes
-        -----
-        Given a point x0 satisfying A * x0 = b and fi(x0) < 0 for i=1, ..., M, solves:
-           minimize    s
-           subject to  A * x = b
-                       fi(x) <= 0, i=1, ..., M.
-                       fj(x) <= s, j=1, ..., N.
-
-        If the solution, s^\star, is > 0, the problem is infeasible, and the Lagrange
-        multipliers provide a certificate of this infeasibility. Otherwise, the solution
-        x^\star is feasible for all constraints.
-
-        We do not have to solve this problem to high precision. If we find feasible (x,
-        s) with s < 0, we can quit.
-
-        """
-        return super().solve(x0, fully_optimize=fully_optimize, **kwargs)
-
-
-class EqualityConstrainedInteriorPointMethodSolver(BaseInteriorPointMethodSolver):
+class EqualityConstrainedProblem(InteriorPointProblem):
     """Class for problems with equality constraints, A * x = b."""
 
     @abstractproperty
@@ -716,7 +593,9 @@ class EqualityConstrainedInteriorPointMethodSolver(BaseInteriorPointMethodSolver
         """Calculate and cache SVD of A."""
         return linalg.svd(self.A, full_matrices=False)
 
-    def initialize_barrier_parameter(self, x0: npt.NDArray[np.float64]) -> float:
+    def initialize_barrier_parameter(
+        self, x0: npt.NDArray[np.float64], settings: OptimizationSettings
+    ) -> float:
         r"""Initialize barrier penalty.
 
         Parameters
@@ -807,15 +686,15 @@ class EqualityConstrainedInteriorPointMethodSolver(BaseInteriorPointMethodSolver
         t_star_s = -np.dot(delta_f0, delta_phi) + np.dot(A_delta_f0, z_phi)
 
         return min(
-            self.num_ineq_constraints / self.settings.outer_tolerance,
+            self.num_ineq_constraints / settings.outer_tolerance,
             max(
-                super().initialize_barrier_parameter(x0),
+                super().initialize_barrier_parameter(x0, settings),
                 t_star_s / max(schur_complement, 1e-16),
             ),
         )
 
 
-class UnconstrainedNewtonSolver(BaseInteriorPointMethodSolver):
+class UnconstrainedNewtonProblem(InteriorPointProblem):
     """Newton's method for unconstrained problems (no equality or inequality constraints).
 
     The barrier parameter is irrelevant without inequality constraints, so the outer IPM
@@ -832,14 +711,6 @@ class UnconstrainedNewtonSolver(BaseInteriorPointMethodSolver):
 
     """
 
-    def __init__(
-        self,
-        settings: OptimizationSettings | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Initialize solver."""
-        super().__init__(phase1_solver=None, settings=settings, **kwargs)
-
     @property
     def num_eq_constraints(self) -> int:
         """No equality constraints."""
@@ -852,27 +723,28 @@ class UnconstrainedNewtonSolver(BaseInteriorPointMethodSolver):
 
     def solve(
         self,
+        solver: "InteriorPointSolver | None" = None,
         x0: npt.NDArray[np.float64] | None = None,
         fully_optimize: bool = False,
         **kwargs: Any,
     ) -> NewtonResult:
-        """Solve unconstrained problem using Newton's method.
-
-        Skips the outer barrier loop entirely and runs Newton's method once.
+        """Solve the unconstrained problem with a single Newton step.
 
         Parameters
         ----------
+         solver : InteriorPointSolver, optional
+            The solver to use. Defaults to a standard :class:`InteriorPointSolver`.
          x0 : vector
             Initial guess.
          fully_optimize : bool
-            Unused; present for API compatibility with base class.
+            Unused; present for API compatibility with the base class.
 
         Returns
         -------
          res : NewtonResult
 
         """
-        res = super().solve(x0, fully_optimize=True, **kwargs)
+        res = super().solve(solver=solver, x0=x0, fully_optimize=True, **kwargs)
         assert isinstance(res, NewtonResult)
         return res
 
@@ -889,7 +761,10 @@ class UnconstrainedNewtonSolver(BaseInteriorPointMethodSolver):
         return np.zeros((0, x.size))
 
     def btls_keep_feasible(
-        self, x: npt.NDArray[np.float64], delta_x: npt.NDArray[np.float64]
+        self,
+        x: npt.NDArray[np.float64],
+        delta_x: npt.NDArray[np.float64],
+        settings: OptimizationSettings,
     ) -> float:
         """No constraints to maintain feasibility for; any step size is valid."""
         return np.inf
@@ -931,7 +806,7 @@ class UnconstrainedNewtonSolver(BaseInteriorPointMethodSolver):
         return self.evaluate_objective(x_star)
 
 
-class EqualityConstrainedNewtonSolver(BaseInteriorPointMethodSolver):
+class EqualityConstrainedNewtonProblem(InteriorPointProblem):
     """Newton's method for equality-constrained problems (A x = b, no inequality constraints).
 
     The barrier parameter is irrelevant without inequality constraints, so the outer IPM
@@ -950,14 +825,6 @@ class EqualityConstrainedNewtonSolver(BaseInteriorPointMethodSolver):
     - hessian_vector_product: H(x) @ y
 
     """
-
-    def __init__(
-        self,
-        settings: OptimizationSettings | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Initialize solver."""
-        super().__init__(phase1_solver=None, settings=settings, **kwargs)
 
     @abstractproperty
     def A(self) -> npt.NDArray[np.float64]:  # noqa: N802
@@ -979,27 +846,28 @@ class EqualityConstrainedNewtonSolver(BaseInteriorPointMethodSolver):
 
     def solve(
         self,
+        solver: "InteriorPointSolver | None" = None,
         x0: npt.NDArray[np.float64] | None = None,
         fully_optimize: bool = False,
         **kwargs: Any,
     ) -> NewtonResult:
-        """Solve equality-constrained problem using Newton's method.
-
-        Skips the outer barrier loop entirely and runs Newton's method once.
+        """Solve the equality-constrained problem with a single Newton step.
 
         Parameters
         ----------
+         solver : InteriorPointSolver, optional
+            The solver to use. Defaults to a standard :class:`InteriorPointSolver`.
          x0 : vector
             Initial guess. Should satisfy A x0 = b.
          fully_optimize : bool
-            Unused; present for API compatibility with base class.
+            Unused; present for API compatibility with the base class.
 
         Returns
         -------
          res : NewtonResult
 
         """
-        res = super().solve(x0, fully_optimize=True, **kwargs)
+        res = super().solve(solver=solver, x0=x0, fully_optimize=True, **kwargs)
         assert isinstance(res, NewtonResult)
         return res
 
@@ -1016,7 +884,10 @@ class EqualityConstrainedNewtonSolver(BaseInteriorPointMethodSolver):
         return np.zeros((0, x.size))
 
     def btls_keep_feasible(
-        self, x: npt.NDArray[np.float64], delta_x: npt.NDArray[np.float64]
+        self,
+        x: npt.NDArray[np.float64],
+        delta_x: npt.NDArray[np.float64],
+        settings: OptimizationSettings,
     ) -> float:
         """No inequality constraints to maintain feasibility for; any step size is valid."""
         return np.inf
@@ -1084,7 +955,7 @@ class InteriorPointSolver:
 
     Owns the interior point method loop: the outer barrier loop, the Newton
     centering step, and the backtracking line search. An ``InteriorPointSolver``
-    is handed a problem (a :class:`BaseInteriorPointMethodSolver`) and drives it
+    is handed a problem (a :class:`InteriorPointProblem`) and drives it
     to a solution. It holds the :class:`OptimizationSettings` that govern the
     loop; the problem itself is settings-free.
 
@@ -1103,7 +974,7 @@ class InteriorPointSolver:
 
     def solve(
         self,
-        problem: BaseInteriorPointMethodSolver,
+        problem: InteriorPointProblem,
         x0: npt.NDArray[np.float64] | None = None,
         fully_optimize: bool = False,
         **kwargs: Any,
@@ -1118,7 +989,7 @@ class InteriorPointSolver:
 
         Parameters
         ----------
-         problem : BaseInteriorPointMethodSolver
+         problem : InteriorPointProblem
             The problem to solve.
          x0 : vector, optional
             Initial guess. Passed to the Phase I solver, intended to be feasible
@@ -1142,12 +1013,16 @@ class InteriorPointSolver:
                 problem, x0, t=1.0, last_step=True, fully_optimize=True
             )
 
-        if problem.phase1_solver is None:
-            raise ValueError("FeasibilitySolver not specified.")
+        # Only feasibility problems early-exit; every other problem is solved to
+        # full optimality regardless of the fully_optimize flag.
+        fully_optimize = fully_optimize or not isinstance(problem, FeasibilityProblem)
+
+        if problem.phase1_problem is None:
+            raise ValueError("Phase I problem not specified.")
 
         # The nested Phase I solver should return x such that A * x = b and
         # fi(x) < 0, i=1, ..., M.
-        phase1_res = problem.phase1_solver.solve(x0=x0, **kwargs)
+        phase1_res = problem.phase1_problem.solve(solver=self, x0=x0, **kwargs)
         x = problem.augment_previous_solution(phase1_res)
 
         # Applicable only for Phase I methods.
@@ -1162,7 +1037,7 @@ class InteriorPointSolver:
             )
             return phase1_res
 
-        t = problem.initialize_barrier_parameter(x0=x)
+        t = problem.initialize_barrier_parameter(x0=x, settings=self.settings)
         num_steps = (
             int(
                 np.ceil(
@@ -1335,7 +1210,7 @@ class InteriorPointSolver:
 
     def centering_step(
         self,
-        problem: BaseInteriorPointMethodSolver,
+        problem: InteriorPointProblem,
         x0: npt.NDArray[np.float64],
         t: float,
         last_step: bool,
@@ -1519,7 +1394,7 @@ class InteriorPointSolver:
 
     def backtracking_line_search(
         self,
-        problem: BaseInteriorPointMethodSolver,
+        problem: InteriorPointProblem,
         x: npt.NDArray[np.float64],
         delta_x: npt.NDArray[np.float64],
         t: float,
@@ -1544,7 +1419,7 @@ class InteriorPointSolver:
         # Find the largest step size we could take while maintaining feasibility.
         # Note: for an exact line search, we'd want to minimize ft(x + btls_s *
         # delta_x) over the interval [0, btls_s_max].
-        btls_s_max = beta * problem.btls_keep_feasible(x, delta_x)
+        btls_s_max = beta * problem.btls_keep_feasible(x, delta_x, self.settings)
         if btls_s_max < min_step:
             raise ConstraintBoundaryError(
                 message="Descent step takes us too close to constraint boundaries.",
@@ -1573,7 +1448,7 @@ class InteriorPointSolver:
 
     def newton_decrement_squared(
         self,
-        problem: BaseInteriorPointMethodSolver,
+        problem: InteriorPointProblem,
         x: npt.NDArray[np.float64],
         t: float,
         delta_x: npt.NDArray[np.float64],
@@ -1588,7 +1463,7 @@ class InteriorPointSolver:
 
     def inequality_multipliers(
         self,
-        problem: BaseInteriorPointMethodSolver,
+        problem: InteriorPointProblem,
         x: npt.NDArray[np.float64],
         t: float,
         delta_x: npt.NDArray[np.float64],
