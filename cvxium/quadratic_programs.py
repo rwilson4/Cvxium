@@ -13,7 +13,6 @@ from .numerical_helpers import (
     multiply_diagonal,
     multiply_rank_p_update,
     solve_diagonal_eta_inverse,
-    solve_kkt_system,
     solve_rank_p_update,
 )
 from .optimization import (
@@ -128,6 +127,88 @@ def _callable_has_structured_params(fn: Callable[..., Any] | None) -> bool:
         return False
     sig = inspect.signature(fn)
     return "scale" in sig.parameters and "diag_add" in sig.parameters
+
+
+class _QPBarrierHessian(System):
+    """The barrier Hessian ``H_ft = 2t Q + D`` of a bound-constrained QP.
+
+    ``Q`` is reached only through whatever representation the solver holds -- a
+    dense matrix, a low-rank SVD factor, or opaque ``Q_solve`` /
+    ``Q_vector_multiply`` callables -- so this bespoke System dispatches over
+    those representations rather than composing generic System primitives.
+    """
+
+    def __init__(
+        self,
+        solver: "QuadraticProgramEqualityBoundsSolver",
+        x: npt.NDArray[np.float64],
+        t: float,
+    ) -> None:
+        """Build the barrier Hessian System at ``(x, t)``."""
+        self._solver = solver
+        self._t = t
+        d = 1.0 / np.square(x - solver.xl)
+        self._d = d
+        two_t = 2.0 * t
+        q_solve = solver._Q_solve
+
+        if q_solve is not None and solver._Q_solve_has_structured_params:
+
+            def hessian_solve(rhs: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+                return q_solve(rhs, scale=two_t, diag_add=d)  # type: ignore[call-arg]
+
+        elif q_solve is not None and solver._Q_solve_is_diagonal:
+            inv_2t_plus_m = 1.0 / (two_t + q_solve(d))
+
+            def hessian_solve(rhs: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+                q_solved = q_solve(rhs)
+                if q_solved.ndim == 1:
+                    return q_solved * inv_2t_plus_m
+                return q_solved * inv_2t_plus_m[:, np.newaxis]
+
+        elif (
+            solver._kappa_cache is not None and solver._kappa_cache.shape[1] < solver._n
+        ):
+            eta_inverse = 1.0 / d
+            kappa = np.sqrt(two_t) * solver._kappa_cache
+
+            def hessian_solve(rhs: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+                return solve_rank_p_update(
+                    rhs, kappa, solve_diagonal_eta_inverse, eta_inverse=eta_inverse
+                )
+
+        else:
+            factor = linalg.cho_factor(two_t * solver.Q + np.diag(d))
+
+            def hessian_solve(rhs: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+                solved: npt.NDArray[np.float64] = linalg.cho_solve(factor, rhs)
+                return solved
+
+        self._hessian_solve = hessian_solve
+
+    @property
+    def dimension(self) -> int:
+        """Order of the matrix."""
+        return self._solver._n
+
+    def solve(self, b: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Solve ``H_ft @ x = b``."""
+        return self._hessian_solve(b)
+
+    def multiply(self, y: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Compute ``H_ft @ y = (2t Q + D) y``."""
+        solver = self._solver
+        t = self._t
+        d = self._d
+        q_multiply = solver._Q_vector_multiply
+        if q_multiply is not None:
+            if solver._Q_vector_multiply_has_structured_params:
+                return q_multiply(y, scale=2.0 * t, diag_add=d)  # type: ignore[call-arg]
+            return 2.0 * t * q_multiply(y) + multiply_diagonal(y, d)
+        if solver._kappa_cache is not None:
+            kappa = np.sqrt(2.0 * t) * solver._kappa_cache
+            return multiply_rank_p_update(y, kappa, multiply_diagonal, eta=d)
+        return multiply_diagonal(y, d) + 2.0 * t * (solver.Q @ y)
 
 
 class QuadraticProgramEqualityBoundsSolver(EqualityConstrainedProblem):
@@ -399,137 +480,13 @@ class QuadraticProgramEqualityBoundsSolver(EqualityConstrainedProblem):
         """
         return -y
 
-    # ------------------------------------------------------------------
-    # Hessian
-    # ------------------------------------------------------------------
+    def centering_system(self, x: npt.NDArray[np.float64], t: float) -> System:
+        """Assemble the KKT System for the Newton step.
 
-    def hessian_multiply(
-        self, x: npt.NDArray[np.float64], t: float, y: npt.NDArray[np.float64]
-    ) -> npt.NDArray[np.float64]:
-        r"""Multiply H_ft * y = (2t Q + D) y.
-
-        Three paths, in priority order:
-
-        1. ``Q_vector_multiply`` provided → ``2t * Q_vector_multiply(y) + d * y``.
-           O(n) when Q_vector_multiply is O(n) (e.g. diagonal Q).
-        2. kappa_cache available → ``2t * kappa_cache @ (kappa_cache^T @ y) + d * y``.
-           O(rn) for rank-r Q.
-        3. Fallback → ``2t * Q @ y + d * y``.  O(n^2).
+        The barrier Hessian ``H_ft = 2t Q + D`` is wrapped in a bespoke System
+        (:class:`_QPBarrierHessian`) and bordered by the equality matrix A.
         """
-        d = 1.0 / np.square(x - self.xl)
-        if self._Q_vector_multiply is not None:
-            if self._Q_vector_multiply_has_structured_params:
-                # Q_vector_multiply handles (scale * Q + diag(diag_add)) directly.
-                # scale=2t > 0 and diag_add=d >= 0 are guaranteed by the barrier.
-                return self._Q_vector_multiply(y, scale=2.0 * t, diag_add=d)  # type: ignore[call-arg]
-            return 2.0 * t * self._Q_vector_multiply(y) + multiply_diagonal(y, d)
-        if self._kappa_cache is not None:
-            kappa = np.sqrt(2.0 * t) * self._kappa_cache
-            return multiply_rank_p_update(y, kappa, multiply_diagonal, eta=d)
-        return multiply_diagonal(y, d) + 2.0 * t * (self.Q @ y)
-
-    # ------------------------------------------------------------------
-    # Newton step
-    # ------------------------------------------------------------------
-
-    def calculate_newton_step(
-        self,
-        x: npt.NDArray[np.float64],
-        t: float,
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        r"""Calculate Newton step for the barrier sub-problem.
-
-        Solves the KKT system:
-
-           | H_ft   A^T | | delta_x |   | -grad_ft |
-           |  A      0  | |   nu    | = |    0     |
-
-        where H_ft = 2t Q + D, D = diag(1 / (x - xl)^2).
-
-        Five solve paths, in priority order:
-
-        **Q_solve supports scale + diag_add (highest priority)**
-            Solves H_ft x = b as Q_solve(b, scale=2t, diag_add=d) where
-            ``Q_solve(v, scale=s, diag_add=e)`` solves ``(s Q + diag(e)) x = v``.
-            ``scale`` is guaranteed positive; ``diag_add`` entries are guaranteed
-            non-negative.  Implementing methods may assert these preconditions.
-            Q's internal structure is entirely opaque to the solver.
-
-        **Q_solve provided AND diagonal Q**
-            H_ft = 2t Q + D = diag(2t q + d), so the Hessian system reduces to
-            elementwise division.  Using the identity
-
-                H_ft^{-1} z = (I + M)^{-1} Q^{-1}(z) / (2t),
-                M = Q^{-1} D / (2t),
-
-            and the fact that M = diag(Q_solve(d) / (2t)) when Q is diagonal,
-            (I + M)^{-1} is also diagonal → O(n) solve.
-
-            For non-diagonal Q, Q^{-1}D is non-symmetric so (I+M) cannot be
-            Cholesky-factored.  Those cases fall through to the existing paths.
-
-        **Low-rank Q (r < n)**
-            Woodbury identity with kappa_cache.  O(r^2 n + r^3) per step.
-
-        **Full-rank Q (r = n) or non-diagonal Q_solve**
-            Form H_ft explicitly and Cholesky-factor.  O(n^3) per step.
-
-        """
-        d = 1.0 / np.square(x - self.xl)
-
-        _q_solve = self._Q_solve  # local alias so mypy can narrow the type
-        if _q_solve is not None and self._Q_solve_has_structured_params:
-            # Q_solve handles (scale * Q + diag(diag_add)) directly.
-            # scale=2t > 0 and diag_add=d >= 0 are guaranteed by the barrier.
-            two_t = 2.0 * t
-
-            def hessian_solve(
-                rhs: npt.NDArray[np.float64],
-            ) -> npt.NDArray[np.float64]:
-                return _q_solve(rhs, scale=two_t, diag_add=d)  # type: ignore[call-arg]
-
-        elif _q_solve is not None and self._Q_solve_is_diagonal:
-            # Q is diagonal → H_ft = diag(2tq + d).  O(n) solve.
-            # From H_ft^{-1} z = (I+M)^{-1} Q_solve(z)/(2t) with M diagonal:
-            #   (I+M)^{-1}_{ii} = 1 / (1 + Q_solve(d)_i / (2t))
-            #   H_ft^{-1} z = Q_solve(z) / (2t + Q_solve(d))  (elementwise)
-            inv_2t_plus_m = 1.0 / (2.0 * t + _q_solve(d))
-
-            def hessian_solve(
-                rhs: npt.NDArray[np.float64],
-            ) -> npt.NDArray[np.float64]:
-                q_solved = _q_solve(rhs)
-                if q_solved.ndim == 1:
-                    return q_solved * inv_2t_plus_m
-                return q_solved * inv_2t_plus_m[:, np.newaxis]
-
-        elif self._kappa_cache is not None and self._kappa_cache.shape[1] < self._n:
-            # Low-rank Q (r < n): Woodbury identity.  O(r^2 n + r^3) per step.
-            eta_inverse = 1.0 / d  # (x_j - xl_j)^2; diagonal D^{-1}
-            kappa = np.sqrt(2.0 * t) * self._kappa_cache  # n-by-r
-
-            def hessian_solve(
-                rhs: npt.NDArray[np.float64],
-            ) -> npt.NDArray[np.float64]:
-                return solve_rank_p_update(
-                    rhs, kappa, solve_diagonal_eta_inverse, eta_inverse=eta_inverse
-                )
-
-        else:
-            # Full-rank Q: form H_ft explicitly and Cholesky-factor.  O(n^3).
-            H = 2.0 * t * self.Q + np.diag(d)
-            H_factor = linalg.cho_factor(H)
-
-            def hessian_solve(
-                rhs: npt.NDArray[np.float64],
-            ) -> npt.NDArray[np.float64]:
-                return linalg.cho_solve(H_factor, rhs)
-
-        return solve_kkt_system(
-            A=self.A,
-            g=-self.gradient_barrier(x, t),
-            hessian_solve=hessian_solve,
-        )
+        return KKTSystem(_QPBarrierHessian(self, x, t), self.A)
 
     # ------------------------------------------------------------------
     # Backtracking line search feasibility
