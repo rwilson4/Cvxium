@@ -69,7 +69,7 @@ Problem (ABC) — num_eq/ineq_constraints, solve(solver, x0, fully_optimize)
 │       once a feasible point is found
 │   └── EqualitySolver — direct SVD solve of A x = b (not an IPM problem)
 └── InteriorPointProblem — the IPM math: objective, gradients, constraints,
-    │     calculate_newton_step, hessian_multiply, the barrier hooks
+    │     centering_system, the barrier hooks
     ├── EqualityConstrainedProblem — adds A, b; custom barrier init via SVD of A
     ├── UnconstrainedNewtonProblem — no constraints, single Newton step
     └── EqualityConstrainedNewtonProblem — equality only, single Newton step
@@ -96,8 +96,9 @@ variant and `FeasibilityProblem`):
 - `gradient(x)` — nabla f0(x)
 - `constraints(x)` — vector of fi(x) values
 - `grad_constraints(x)` — Jacobian of constraints
-- `hessian_multiply(x, y, t)` — nabla^2 ft(x) @ y (exploit structure here)
-- `calculate_newton_step(x, t)` — solve KKT system (exploit structure here)
+- `centering_system(x, t)` — assemble the Newton-step `System` (a `KKTSystem`
+  when equality-constrained, else the bare Hessian `System`); this is where
+  Hessian structure is exploited, by composing `systems.py` primitives
 - `evaluate_dual(x, t)` — Lagrangian dual for convergence certification
 
 ### Modules

@@ -403,45 +403,17 @@ class InteriorPointProblem(Problem):
         """
         return 1.0
 
+    @abstractmethod
     def centering_system(self, x: npt.NDArray[np.float64], t: float) -> System:
         r"""Assemble the Newton-step ``System`` for the centering problem.
 
         Returns the structured linear system whose solution is the Newton step
         at ``(x, t)``: a :class:`~cvxium.systems.KKTSystem` when the problem has
         equality constraints, otherwise the bare Hessian ``System`` of the
-        barrier objective ``ft``.
-
-        Subclasses that exploit Hessian structure implement this; the generic
-        :meth:`calculate_newton_step` and :meth:`hessian_multiply` are derived
-        from it.
+        barrier objective ``ft``. The solver uses it for both the step and the
+        Newton decrement -- this is the one method a structured solver must
+        implement to exploit Hessian structure.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement centering_system."
-        )
-
-    def calculate_newton_step(
-        self,
-        x: npt.NDArray[np.float64],
-        t: float,
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        r"""Calculate the Newton step for the centering problem at ``(x, t)``.
-
-        The step ``delta_x`` (with equality multipliers ``nu``) solves:
-           _       _   _       _     _         _
-          | H   A^T | | delta_x |   | - grad_ft |
-          | A    0  | |   nu    | = |      0    |
-           -       -   -       -     -         -
-        Derived from :meth:`centering_system`; structured solvers implement that
-        rather than overriding this.
-        """
-        grad_ft = self.gradient_barrier(x, t)
-        system = self.centering_system(x, t)
-        p = self.num_eq_constraints
-        if p == 0:
-            return system.solve(-grad_ft), np.zeros(0)
-        n = system.dimension - p
-        sol = system.solve(np.concatenate([-grad_ft, np.zeros(p)]))
-        return sol[:n], sol[n:]
 
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
         """Return whether ``x`` is a feasible point.
@@ -504,16 +476,6 @@ class InteriorPointProblem(Problem):
         return t * self.gradient(x) - (
             self.grad_constraints_transpose_multiply(x, 1.0 / self.constraints(x))
         )
-
-    def hessian_multiply(
-        self, x: npt.NDArray[np.float64], t: float, y: npt.NDArray[np.float64]
-    ) -> npt.NDArray[np.float64]:
-        """Compute ``H_ft @ y`` for the barrier Hessian, via :meth:`centering_system`."""
-        system = self.centering_system(x, t)
-        p = self.num_eq_constraints
-        if p == 0:
-            return system.multiply(y)
-        return system.multiply(np.concatenate([y, np.zeros(p)]))[: y.shape[0]]
 
     @abstractmethod
     def constraints(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
@@ -1168,7 +1130,8 @@ class InteriorPointSolver:
             newton_start = time.time()
 
             try:
-                delta_x, nu_hat = problem.calculate_newton_step(x, t)
+                system = problem.centering_system(x, t)
+                delta_x, nu_hat = self._newton_step(problem, system, x, t)
             except NewtonStepError as e:
                 raise CenteringStepError(
                     message="Failed to calculate Newton step.",
@@ -1179,7 +1142,7 @@ class InteriorPointSolver:
             newton_elapsed = 1000 * (time.time() - newton_start)
 
             # Check for convergence
-            lambda_squared = self.newton_decrement_squared(problem, x, t, delta_x)
+            lambda_squared = self.newton_decrement_squared(problem, system, delta_x)
             suboptimality = 0.5 * lambda_squared
             suboptimalities.append(suboptimality)
 
@@ -1375,20 +1338,47 @@ class InteriorPointSolver:
 
         return btls_s
 
+    def _newton_step(
+        self,
+        problem: InteriorPointProblem,
+        system: System,
+        x: npt.NDArray[np.float64],
+        t: float,
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        r"""Solve the centering Newton step from the assembled ``system``.
+
+        The step ``delta_x`` (with equality multipliers ``nu``) solves:
+           _       _   _       _     _         _
+          | H   A^T | | delta_x |   | - grad_ft |
+          | A    0  | |   nu    | = |      0    |
+           -       -   -       -     -         -
+        """
+        grad_ft = problem.gradient_barrier(x, t)
+        p = problem.num_eq_constraints
+        if p == 0:
+            return system.solve(-grad_ft), np.zeros(0)
+        n = system.dimension - p
+        sol = system.solve(np.concatenate([-grad_ft, np.zeros(p)]))
+        return sol[:n], sol[n:]
+
     def newton_decrement_squared(
         self,
         problem: InteriorPointProblem,
-        x: npt.NDArray[np.float64],
-        t: float,
+        system: System,
         delta_x: npt.NDArray[np.float64],
     ) -> float:
-        """Calculate the squared Newton decrement.
+        """Calculate the squared Newton decrement ``delta_x^T H delta_x``.
 
-        The Newton decrement is the square root of ``delta_x * H * delta_x``,
-        where H is the Hessian. For equality-constrained problems, it does *not*
-        equal ``grad_ft * H^{-1} * grad_ft``.
+        For equality-constrained problems this does *not* equal
+        ``grad_ft^T H^{-1} grad_ft``.
         """
-        return max(0.0, np.dot(delta_x, problem.hessian_multiply(x, t, delta_x)))
+        p = problem.num_eq_constraints
+        if p == 0:
+            h_delta_x = system.multiply(delta_x)
+        else:
+            n = delta_x.shape[0]
+            h_delta_x = system.multiply(np.concatenate([delta_x, np.zeros(p)]))[:n]
+        return max(0.0, np.dot(delta_x, h_delta_x))
 
     def inequality_multipliers(
         self,
