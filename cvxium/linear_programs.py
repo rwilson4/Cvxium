@@ -10,16 +10,7 @@ import numpy.typing as npt
 from scipy import linalg
 
 from .exceptions import NewtonStepError, ProblemInfeasibleError
-from .numerical_helpers import (
-    multiply_arrow_sparsity_pattern,
-    multiply_block_plus_one,
-    multiply_diagonal,
-    multiply_rank_p_update,
-    solve_block_plus_one,
-    solve_diagonal_eta_inverse,
-    solve_kkt_system,
-    solve_rank_p_update,
-)
+from .numerical_helpers import multiply_arrow_sparsity_pattern
 from .optimization import (
     EqualityConstrainedProblem,
     FeasibilityProblem,
@@ -30,7 +21,7 @@ from .optimization import (
     OptimizationSettings,
     ProblemCertifiablyInfeasibleError,
 )
-from .systems import KKTSystem, System
+from .systems import ArrowSystem, DiagonalSystem, KKTSystem, System
 
 logger = logging.getLogger(__name__)
 
@@ -868,76 +859,27 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
             max(1.0, t_star_s / max(schur_complement, 1e-16)),
         )
 
-    def calculate_newton_step(
-        self,
-        x: npt.NDArray[np.float64],
-        t: float,
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        r"""Calculate Newton step.
+    def centering_system(self, x: npt.NDArray[np.float64], t: float) -> System:
+        """Assemble the KKT System for the Newton step.
 
-        Calculates Newton step for the "inner" problem:
-          minimize   ft(x) := t * f0(x) - \sum_i log(-fi(x))
-          subject to A * x = b.
-
-        Parameters
-        ----------
-         x : vector
-            Current estimate.
-         t : float
-            Barrier parameter.
-
-        Returns
-        -------
-         delta_x : vector
-            Newton step.
-         nu : vector
-            Lagrange multiplier associated with equality constraints.
-
-        Notes
-        -----
-        The Newton step, delta_x, is the solution of the system:
-           _       _   _       _     _         _
-          | H   A^T | | delta_x |   | - grad_ft |
-          | A    0  | |   nu    | = |      0    |
-           -       -   -       -     -         -
-        where H is the Hessian of ft evaluated at x, grad_f is the gradient of ft
-        evaluated at x, and nu is the Lagrange multiplier associated with the equality
-        constraints.
-
-        Our Hessian has a block structure, so we use the `solve_block_plus_one` helper
-        function. The upper left block, A11, itself has a special structure: it's
-        diagonal plus 2, rank-p updates. So we use two nested calls to
-        `solve_rank_p_update` in its solution.
-
+        The barrier Hessian has a block structure: a diagonal-plus-low-rank
+        upper-left block (two rank-q updates, coalesced into a single wider
+        one), bordered by the imbalance-slack row/column, and then by the
+        equality constraints A x = b.
         """
-        Bx_minus_c = self.B @ x[: self.dimension] - self.c  # shape (q,)
-        eta_inverse: npt.NDArray[np.float64] = self._hessian_ft_diagonal_inverse(x)
-        kappa_pos: npt.NDArray[np.float64] = self._hessian_ft_kappa_pos(x, Bx_minus_c)
-        kappa_neg: npt.NDArray[np.float64] = self._hessian_ft_kappa_neg(x, Bx_minus_c)
-
-        def A_solve(  # noqa: N802
-            b: npt.NDArray[np.float64],
-        ) -> npt.NDArray[np.float64]:
-            return solve_rank_p_update(
-                b,
-                kappa=kappa_pos,
-                A_solve=solve_diagonal_eta_inverse,
-                eta_inverse=eta_inverse,
-            )
-
-        def A_solve_nested(  # noqa: N802
-            b: npt.NDArray[np.float64],
-        ) -> npt.NDArray[np.float64]:
-            return solve_rank_p_update(b, kappa=kappa_neg, A_solve=A_solve)
-
-        return solve_kkt_system(
-            A=np.hstack((self.A, np.zeros((self.num_eq_constraints, 1)))),
-            g=-self.gradient_barrier(x, t),
-            hessian_solve=solve_block_plus_one,
-            A12=self._hessian_ft_edge(x, Bx_minus_c),
-            A22=self._hessian_ft_corner(x, Bx_minus_c),
-            A11_solve=A_solve_nested,
+        Bx_minus_c = self.B @ x[: self.dimension] - self.c
+        hessian = (
+            DiagonalSystem(self._hessian_ft_diagonal(x))
+            .low_rank_update(self._hessian_ft_kappa_pos(x, Bx_minus_c))
+            .low_rank_update(self._hessian_ft_kappa_neg(x, Bx_minus_c))
         )
+        arrow = ArrowSystem(
+            hessian,
+            self._hessian_ft_edge(x, Bx_minus_c),
+            self._hessian_ft_corner(x, Bx_minus_c),
+        )
+        A_augmented = np.hstack((self.A, np.zeros((self.num_eq_constraints, 1))))
+        return KKTSystem(arrow, A_augmented)
 
     def btls_keep_feasible(
         self,
@@ -1011,60 +953,11 @@ class EqualityWithBoundsAndImbalanceConstraintSolver(
         grad[self.dimension] = 1.0
         return grad
 
-    def hessian_multiply(
-        self, x: npt.NDArray[np.float64], t: float, y: npt.NDArray[np.float64]
-    ) -> npt.NDArray[np.float64]:
-        """Multiply H * y.
-
-        Parameters
-        ----------
-         x : npt.NDArray
-            Current point.
-         t : float
-            The barrier objective parameter.
-         y : npt.NDArray
-            Multiplicand.
-
-        Returns
-        -------
-         Hy : npt.NDArray
-            H * y
-
-        Notes
-        -----
-        Exploits the special structure of the Hessian to compute H * y faster than
-        O(M^2).
-
-        """
-        M = self.dimension
-        Bx_minus_c = self.B @ x[:M] - self.c  # shape (q,)
-
-        eta = self._hessian_ft_diagonal(x)  # shape (M,)
-        kappa_pos = self._hessian_ft_kappa_pos(x, Bx_minus_c)  # shape (M, q)
-        kappa_neg = self._hessian_ft_kappa_neg(x, Bx_minus_c)  # shape (M, q)
-        hxs = self._hessian_ft_edge(x, Bx_minus_c)  # shape (M,)
-        hss = self._hessian_ft_corner(x, Bx_minus_c)  # scalar
-
-        # Hxx = diag(eta) + kappa_pos @ kappa_pos^T + kappa_neg @ kappa_neg^T
-        def diag_plus_neg(z: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-            return multiply_rank_p_update(z, kappa_neg, multiply_diagonal, eta=eta)
-
-        def hxx_multiply(z: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-            return multiply_rank_p_update(z, kappa_pos, diag_plus_neg)
-
-        return multiply_block_plus_one(y, hxs, hss, hxx_multiply)
-
     def _hessian_ft_diagonal(
         self, x: npt.NDArray[np.float64]
     ) -> npt.NDArray[np.float64]:
         """Calculate diagonal component of Hessian of ft at x."""
         return np.square(1.0 / (x[0 : self.dimension] - self.lb))
-
-    def _hessian_ft_diagonal_inverse(
-        self, x: npt.NDArray[np.float64]
-    ) -> npt.NDArray[np.float64]:
-        """Calculate inverse of diagonal component of Hessian of ft at x."""
-        return np.square(x[0 : self.dimension] - self.lb)
 
     def _hessian_ft_kappa_pos(
         self, x: npt.NDArray[np.float64], Bx_minus_c: npt.NDArray[np.float64]
