@@ -30,6 +30,7 @@ from .optimization import (
     OptimizationSettings,
     ProblemCertifiablyInfeasibleError,
 )
+from .systems import KKTSystem, System
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,80 @@ class EqualitySolver(FeasibilityProblem):
         return Vh.T, s, QU.T
 
 
+def _solve_bounds_arrow(
+    b: npt.NDArray[np.float64],
+    eta_inverse: npt.NDArray[np.float64],
+    one_over_psi_squared: float,
+) -> npt.NDArray[np.float64]:
+    r"""Solve the bounds-problem arrow system ``H @ x = b``.
+
+    ``H = [[diag(eta), eta], [eta^T, theta]]`` -- the border equals the
+    diagonal. Handed ``eta^{-1}`` and ``1 / psi^2`` (with ``psi^2 = theta -
+    sum(eta)``) directly, this avoids the catastrophic cancellation in forming
+    ``psi^2`` that the generic arrow solver would suffer as iterates approach
+    the boundary (``eta -> infinity``).
+    """
+    if not np.all(eta_inverse > 0) or one_over_psi_squared <= 0:
+        raise NewtonStepError("Hessian is not strictly positive definite.")
+
+    M = eta_inverse.shape[0]
+    x = np.zeros_like(b)
+    if b.ndim == 1:
+        if b.shape[0] != M + 1:
+            raise ValueError(
+                "Dimension mismatch: b must have M + 1 entries, where M = len(eta)."
+            )
+        x[M] = (b[M] - np.sum(b[0:M])) * one_over_psi_squared
+        x[0:M] = b[0:M] * eta_inverse - x[M]
+    elif b.ndim == 2:
+        if b.shape[0] != M + 1:
+            raise ValueError(
+                "Dimension mismatch: b must have M + 1 rows, where M = len(eta)."
+            )
+        x[M, :] = (b[M, :] - np.sum(b[0:M, :], axis=0)) * one_over_psi_squared
+        x[0:M, :] = b[0:M, :] * eta_inverse[:, np.newaxis] - x[M, :]
+    else:
+        raise ValueError("b must be either a 1D or 2D NumPy array.")
+
+    return x
+
+
+class _BoundsArrowSystem(System):
+    """The arrow Hessian of :class:`EqualityWithBoundsSolver`'s barrier objective.
+
+    ``H = [[diag(eta), eta], [eta^T, theta]]``: the border equals the diagonal,
+    and the corner's Schur complement is known cleanly, so the solve uses a
+    stable hand-rolled kernel (:func:`_solve_bounds_arrow`) rather than the
+    generic arrow solver.
+    """
+
+    def __init__(
+        self,
+        eta: npt.NDArray[np.float64],
+        eta_inverse: npt.NDArray[np.float64],
+        theta: float,
+        one_over_psi_squared: float,
+    ) -> None:
+        """Build the arrow System from its precomputed pieces."""
+        self._eta = eta
+        self._eta_inverse = eta_inverse
+        self._theta = theta
+        self._one_over_psi_squared = one_over_psi_squared
+
+    @property
+    def dimension(self) -> int:
+        """Order of the matrix."""
+        return self._eta.shape[0] + 1
+
+    def solve(self, b: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Solve ``H @ x = b`` via the stable bounds-arrow kernel."""
+        return _solve_bounds_arrow(b, self._eta_inverse, self._one_over_psi_squared)
+
+    def multiply(self, y: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Compute ``H @ y``, exploiting the arrow structure."""
+        return multiply_arrow_sparsity_pattern(y, self._eta, self._eta, self._theta)
+
+
 class EqualityWithBoundsSolver(InteriorPointProblem, FeasibilityProblem):
     r"""Find x satisfying A * x = b and x > lb.
 
@@ -344,126 +419,21 @@ class EqualityWithBoundsSolver(InteriorPointProblem, FeasibilityProblem):
         t2 = np.sum(1.0 / (x0[0:M] - self.lb + x0[M])) - M / 1.0
         return max(1.0, t1, t2)
 
-    def calculate_newton_step(
-        self,
-        x: npt.NDArray[np.float64],
-        t: float,
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        r"""Calculate Newton step.
+    def centering_system(self, x: npt.NDArray[np.float64], t: float) -> System:
+        """Assemble the KKT System for the Newton step.
 
-        Calculates Newton step for the "inner" problem:
-          minimize   ft(w) := t * -s - \sum_i log(w_i - s)
-          subject to A * w = b.
-
-        Parameters
-        ----------
-         x : vector
-            Current estimate, [w; s].
-         t : float
-            Barrier parameter.
-
-        Returns
-        -------
-         delta_x : vector
-            Newton step.
-         nu : vector
-            Lagrange multiplier associated with equality constraints.
-
-        Notes
-        -----
-        The Newton step, delta_x, is the solution of the system:
-           _       _   _       _     _         _
-          | H   A^T | | delta_x |   | - grad_ft |
-          | A    0  | |   nu    | = |      0    |
-           -       -   -       -     -         -
-        where H is the Hessian of ft evaluated at x, grad_f is the gradient of ft
-        evaluated at x, and nu is the Lagrange multiplier associated with the equality
-        constraints. We use `solve_kkt_system` to solve this system in O(p^3 + p^2 * M)
-        time.
-
+        The barrier Hessian is an arrow matrix whose border equals its diagonal
+        (:class:`_BoundsArrowSystem`); the equality constraints A x = b border
+        the augmented variable.
         """
-        return solve_kkt_system(
-            A=np.hstack((self.A, np.zeros((self.num_eq_constraints, 1)))),
-            g=-self.gradient_barrier(x, t),
-            hessian_solve=EqualityWithBoundsSolver._solve_arrow_sparsity_pattern,
+        arrow = _BoundsArrowSystem(
+            eta=self._hessian_ft_diagonal(x, t),
             eta_inverse=self._hessian_ft_diagonal_inverse(x, t),
+            theta=self._hessian_ft_corner(x),
             one_over_psi_squared=self._hessian_one_over_psi_squared(x),
         )
-
-    @staticmethod
-    def _solve_arrow_sparsity_pattern(
-        b: npt.NDArray[np.float64],
-        eta_inverse: npt.NDArray[np.float64],
-        one_over_psi_squared: float,
-    ) -> npt.NDArray[np.float64]:
-        """Solve H * x = b.
-
-        Solves a linear system of equations where H has an arrow sparsity pattern:
-             _                 _
-            |  diag(eta)   eta  |
-        H = |                   |
-            |_   eta^T   theta _|
-
-        Because of this structure, we can solve the system in linear time. See Notes for
-        more details.
-
-        Parameters
-        ----------
-         b : npt.NDArray[np.float64]
-            Right hand side. Can be either a vector or a matrix, in which case we solve the
-            system for each column of b.
-         eta_inverse : npt.NDArray[np.float64]
-            One divided by the diagonal elements of the upper left block of H.
-         one_over_psi_squared : float
-            1.0 / (theta - np.sum(eta))
-
-        Returns
-        -------
-         x : npt.NDArray[np.float64]
-            The solution.
-
-        Notes
-        -----
-        Like `solve_arrow_sparsity_pattern`, but for the specific instance used to solve:
-          minimize    s
-          subject to  A * x = b
-                      -x <= s.
-
-        In this case, eta[i]^{-1} = (x_i + s)^2, diag_eta_inverse_dot_zeta[i] = 1.0, and
-        1 / psi_squared = (s0 + eps - s)^2 / M. Thus, we can solve the system both faster
-        and with more numerical stability.
-
-        `solve_arrow_sparsity_pattern` uses 2*M + 1 divides, 3*M multiplies, and 3*M adds,
-        or 8*M + 1 flops. `solve_arrow_sparsity_pattern_phase1` uses 0 divides, M + 1
-        multiplies, and 2 * M + 1 adds, or 3*M + 2 flops.
-
-        """
-        if not np.all(eta_inverse > 0) or one_over_psi_squared <= 0:
-            raise NewtonStepError("Hessian is not strictly positive definite.")
-
-        M = eta_inverse.shape[0]
-        # Calculate x
-        x = np.zeros_like(b)
-        if b.ndim == 1:
-            if b.shape[0] != M + 1:
-                raise ValueError(
-                    "Dimension mismatch: b must have M + 1 entries, where M = len(eta)."
-                )
-            x[M] = (b[M] - np.sum(b[0:M])) * one_over_psi_squared
-            x[0:M] = b[0:M] * eta_inverse - x[M]
-        elif b.ndim == 2:
-            if b.shape[0] != M + 1:
-                raise ValueError(
-                    "Dimension mismatch: b must have M + 1 rows, where M = len(eta)."
-                )
-            x[M, :] = (b[M, :] - np.sum(b[0:M, :], axis=0)) * one_over_psi_squared
-            x[0:M, :] = b[0:M, :] * eta_inverse[:, np.newaxis] - x[M, :]
-        else:
-            raise ValueError(
-                "Dimension mismatch: b must be either a 1D or 2D NumPy array."
-            )
-
-        return x
+        A_augmented = np.hstack((self.A, np.zeros((self.num_eq_constraints, 1))))
+        return KKTSystem(arrow, A_augmented)
 
     def btls_keep_feasible(
         self,
@@ -568,26 +538,6 @@ class EqualityWithBoundsSolver(InteriorPointProblem, FeasibilityProblem):
         g[M] = t - np.sum(1.0 / (w - self.lb + s)) + M / (self.s0_plus_eps - s)
         return g
 
-    def hessian_multiply(
-        self, x: npt.NDArray[np.float64], t: float, y: npt.NDArray[np.float64]
-    ) -> npt.NDArray[np.float64]:
-        """Multiply H * y.
-
-        Our Hessian has an arrow sparsity pattern,
-                 _                 _
-                |  diag(eta)  zeta  |
-            H = |                   |,
-                |_  zeta^T   theta _|
-        so the ith entry of H * y is eta[i] * y[i] + zeta[i] * y[-1], for all but the
-        last entry of H * y, and the last entry is np.dot(zeta, y[0:-1]) + theta * y[-1].
-
-
-        """
-        eta = self._hessian_ft_diagonal(x, t)
-        zeta = self._hessian_ft_edge(x)
-        theta = self._hessian_ft_corner(x)
-        return multiply_arrow_sparsity_pattern(y, eta, zeta, theta)
-
     def _hessian_ft_diagonal(
         self, x: npt.NDArray[np.float64], t: float
     ) -> npt.NDArray[np.float64]:
@@ -620,13 +570,6 @@ class EqualityWithBoundsSolver(InteriorPointProblem, FeasibilityProblem):
         w = x[0:M]
         s = x[M]
         return np.square(w - self.lb + s)
-
-    def _hessian_ft_edge(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """Calculate last row/column of Hessian of ft at x."""
-        M = self.dimension
-        w = x[0:M]
-        s = x[M]
-        return np.square(1.0 / (w - self.lb + s))
 
     def _hessian_ft_corner(self, x: npt.NDArray[np.float64]) -> float:
         """Calculate bottom right corner of Hessian of ft at x."""
