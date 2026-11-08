@@ -49,6 +49,25 @@ from `cvxium/__init__.py` and its `__all__`; update both when adding a public cl
 Each subpackage `__init__.py` holds only a docstring. `cvxium._typing.none_throws`
 narrows optionals in expressions where an `assert` would not fit.
 
+### Documentation
+
+The Sphinx site lives in `docs/` (pydata theme, autodoc, napoleon); the usage guide
+page includes USAGE.md rather than copying it, and the API pages list public names
+explicitly, so a new public class must be added to the right `docs/api/*.rst` page.
+
+```bash
+cd docs && uv run make html SPHINXOPTS="-W --keep-going"   # warnings are errors
+cd docs && uv run make doctest                             # the index quickstart
+```
+
+Docstrings stay in plain-text style (display equations and lists directly under the
+prose, no blank lines); a hook in `docs/conf.py` translates them to reStructuredText
+at build time. If a docstring breaks the `-W` build, fix the hook's case before
+reformatting the docstring. `test/test_documentation.py` runs every `python` block in
+README.md and USAGE.md, so keep those blocks runnable in order.
+`.github/workflows/deploy_docs.yml` builds on every change and deploys over rsync once
+the `DOCS_HOST`, `DOCS_USER`, and `DOCS_DEPLOY_KEY` secrets exist.
+
 ### Performance guard
 
 `cvxium/diagnostics/perf_guard.py` fails a test whose solver iteration counts move

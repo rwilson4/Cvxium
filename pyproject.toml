@@ -33,6 +33,10 @@ dev = [
     "parameterized>=0.9.0",
     "pandas>=2.2.3,<3",
     "pandas-stubs>=2.2.3",
+    # Documentation (docs/).
+    "sphinx>=7.0",
+    "pydata-sphinx-theme>=0.17.1",
+    "myst-parser>=3.0",
 ]
 
 [tool.hatch.build.targets.wheel]

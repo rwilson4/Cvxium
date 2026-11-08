@@ -1,1 +1,3 @@
 __pycache__
+# Sphinx build output
+docs/_build/
