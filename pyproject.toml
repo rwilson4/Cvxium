@@ -1,6 +1,6 @@
 [project]
 name = "cvxium"
-version = "0.4.2"
+version = "1.0.0"
 description = "Efficient Interior Point Method solvers for convex optimization"
 authors = [{ name = "Bob Wilson", email = "bob.wilson@convexanalytics.com" }]
 requires-python = ">=3.11,<4"
@@ -17,7 +17,12 @@ dependencies = [
     "numpy>=2.2.5,<3",
     "scipy>=1.15.2,<2",
     "matplotlib>=3.10.1,<4",
+    "typing-extensions>=4.12.0",
 ]
+
+[project.optional-dependencies]
+# DataFrameTrace and IterationHandler.to_dataframe import pandas lazily.
+pandas = ["pandas>=2.2.3,<3"]
 
 [dependency-groups]
 dev = [
@@ -25,6 +30,9 @@ dev = [
     "black>=25.1.0,<26",
     "ruff>=0.11.6,<0.12",
     "mypy>=1.14.0,<2",
+    "parameterized>=0.9.0",
+    "pandas>=2.2.3,<3",
+    "pandas-stubs>=2.2.3",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -78,7 +86,6 @@ exclude = [
     ".venv",
     "__pypackages__",
     "_build",
-    "buck-out",
     "build",
     "dist",
     "node_modules",
@@ -104,6 +111,7 @@ select = [
 ignore = [
     "E501",   # Line too long (handled by black)
     "E741",   # Ambiguous variable name (common in math: l, I, O)
+    "N802",   # Function name should be lowercase (allows math names like A, _Ax)
     "N803",   # Argument name should be lowercase (allows single-letter math vars)
     "N806",   # Variable in function should be lowercase (allows math notation like M, N, X)
     "NPY002", # Allow numpy.random.Generator for newer code
@@ -113,7 +121,10 @@ ignore = [
 fixable = ["ALL"]
 unfixable = []
 
-dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+# Math notation in docstrings and comments, not look-alike Latin letters.
+allowed-confusables = ["α", "γ", "ν", "ρ", "σ", "×"]
+
+dummy-variable-rgx ="^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [tool.ruff.lint.per-file-ignores]
 "test/**/*.py" = [
@@ -171,7 +182,7 @@ warn_no_return = true
 
 [[tool.mypy.overrides]]
 module = [
-    "pandas",
+    "parameterized",
     "scipy.*",
     "matplotlib.*",
 ]

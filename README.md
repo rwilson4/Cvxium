@@ -65,93 +65,109 @@ Or with [uv](https://docs.astral.sh/uv/):
 uv add cvxium
 ```
 
-## Quick start: ready-made solvers
+## Quick start: compose a problem, pick a solver
 
-For the most common problem types, Cvxium ships concrete solvers that
-require no subclassing.
+A `Problem` states the mathematics: an `Objective` (or none, for a
+feasibility problem), a list of inequality constraint layers, and an
+optional equality constraint `A x = b`. A `Solver` runs the algorithm.
+Each layer and objective reports its Hessian as a structured
+`MatrixSystem`, and the solver sums those contributions while keeping
+their structure, so the Newton step stays fast without any
+subclassing.
 
-### Find x satisfying Ax = b, x ≥ lb
-
-`EqualityWithBoundsSolver` finds a feasible point and, if requested,
-minimizes `‖x‖₂²` subject to the constraints:
+### Find x satisfying Ax = b, x ≥ lb, then minimize ‖x‖₂²
 
 ```python
 import numpy as np
-from cvxium import EqualityWithBoundsSolver, OptimizationSettings
+from cvxium import (
+    BarrierSolver,
+    BoundsConstraintLayer,
+    DiagonalSystem,
+    EqualityConstraintLayer,
+    Problem,
+    QuadraticObjective,
+)
 
-A = np.random.randn(20, 100)   # p=20 equality constraints, M=100 variables
-w_true = np.random.rand(100) + 0.1
-b = A @ w_true
+rng = np.random.default_rng(0)
+A = rng.standard_normal((20, 100))  # p = 20 equality constraints, M = 100 variables
+b = A @ (rng.random(100) + 0.1)
 lb = 0.01
 
-solver = EqualityWithBoundsSolver(A=A, b=b, lb=lb)
+eq = EqualityConstraintLayer(A=A, b=b)
+bounds = BoundsConstraintLayer(lb=lb, dimension=100)
 
-# Feasibility: find any strictly feasible point
-result = solver.solve()
-assert np.all(result.solution > lb)
-assert np.allclose(A @ result.solution, b)
+# Feasibility: with no objective, the solver stops at a strictly feasible point.
+feasible = BarrierSolver().solve(Problem(eq=eq, ineq=[bounds]))
+assert np.all(feasible.solution > lb)
+assert np.allclose(A @ feasible.solution, b)
 
-# Optimize: minimize ‖x‖₂²
-result = solver.solve(fully_optimize=True)
-```
-
-The solver detects infeasibility via the dual certificate and raises
-`ProblemCertifiablyInfeasibleError` when the problem has no solution.
-
-### Find x satisfying Ax = b, x ≥ lb, ‖Bx − c‖∞ ≤ ψ
-
-`EqualityWithBoundsAndImbalanceConstraintSolver` adds an L∞ imbalance
-constraint, useful when exact balance on a subset of covariates is
-required alongside a bound on a larger set:
-
-```python
-from cvxium import EqualityWithBoundsAndImbalanceConstraintSolver
-
-solver = EqualityWithBoundsAndImbalanceConstraintSolver(
-    A=A, b=b, lb=lb,
-    B=B, c=c, psi=0.05,  # ‖Bx − c‖∞ ≤ 0.05
+# Optimization: minimize (1/2) ‖x‖₂² subject to the same constraints.
+objective = QuadraticObjective(
+    c=np.zeros(100), hessian_contribution=DiagonalSystem(np.ones(100))
 )
-result = solver.solve()
+problem = Problem.minimize(objective).subject_to(eq=eq, ineq=[bounds])
+result = BarrierSolver().solve(problem)
+
+print(result.status)           # SolveStatus.OPTIMAL
+print(result.objective_value)  # primal objective
+print(result.suboptimality)    # duality gap bound
 ```
 
-### Solve a quadratic program with equality and bound constraints
+When no strictly feasible `x0` is supplied, the solver builds and
+solves a Phase I problem to find one. An infeasible problem raises
+`ProblemCertifiablyInfeasibleError` when the dual certificate proves
+infeasibility; pass `on_infeasible=...` to change that policy.
 
-`QuadraticProgramEqualityBoundsSolver` solves:
+### Add an imbalance constraint ‖Bx − c‖∞ ≤ ψ
 
-```
-minimize    x^T Q x + c^T x
-subject to  A x = b
-            x >= xl
-```
-
-It accepts optional `Q_vector_multiply` and `Q_solve` callables to
-exploit structure in Q:
+Layers stack. `ImbalanceConstraintLayer` bounds the imbalance on a set
+of covariates, useful when exact balance on a few covariates (the
+equality) is required alongside approximate balance on many more:
 
 ```python
-from cvxium import QuadraticProgramEqualityBoundsSolver
+from cvxium import ImbalanceConstraintLayer
 
-solver = QuadraticProgramEqualityBoundsSolver(Q=Q, c=c, A=A, b=b, xl=xl)
-result = solver.solve()
+B = rng.standard_normal((5, 100))
+c = B @ feasible.solution
+imbalance = ImbalanceConstraintLayer(B=B, c=c, psi=0.05)
 
-print(result.solution)        # optimal x
-print(result.objective_value) # primal objective
-print(result.dual_value)      # dual lower bound (duality gap = objective - dual)
-print(result.nits)            # outer IPM iterations
-print(result.inner_nits)      # Newton iterations per centering step
+problem = Problem.minimize(objective).subject_to(eq=eq, ineq=[bounds, imbalance])
+result = BarrierSolver().solve(problem, x0=feasible.solution)
 ```
 
-When Q has structure (e.g., diagonal plus rank-one), passing
-`Q_vector_multiply` and `Q_solve` callables can yield a further ~12×
-speedup over the dense path. See USAGE.md for the full pattern.
+### Choose an algorithm
+
+The same `Problem` can go to different solvers:
+
+- `BarrierSolver`: the barrier method (Boyd and Vandenberghe, 2004,
+  section 11.3), with nested centering steps.
+- `PrimalDualSolver`: the primal-dual interior-point method (section
+  11.7), carrying the inequality duals explicitly.
+- `NewtonSolver`: Newton's method, for problems with no inequality
+  constraints.
+- `HsdSolver`: a homogeneous self-dual method for linear conic
+  programs over products of symmetric cones; needs no Phase I.
+
+```python
+from cvxium import PrimalDualSolver
+
+result = PrimalDualSolver().solve(problem)
+nu = result.equality_multipliers      # shape (p,)
+lmbda = result.inequality_multipliers  # stacked across layers, in order
+```
+
+A `SolveResult` round-trips through JSON with `serialize()` and
+`SolveResult.deserialize(...)`.
 
 ## Building a custom solver
 
 Cvxium's real power is its framework for new problem types. You
-subclass one of the base classes, implement a handful of methods
-(objective, gradient, Hessian multiply, Newton step, dual), and the
-IPM loop is handled for you. A library of composable structured linear
-algebra operations (e.g. matrix multiplication and solving systems of
-linear equations) makes it straightforward to go from a mathematical
+implement a new `Objective` or `ConstraintLayer` (values, gradients,
+and a structured Hessian contribution), and the solvers handle the
+interior-point loop. A library of composable structured linear algebra
+(`DiagonalSystem`, `BandedSystem`, `ArrowSystem`, low-rank updates,
+block-diagonal and permuted systems, and saddle systems for equality
+constraints) makes it straightforward to go from a mathematical
 description of the Hessian to a fast Newton step.
 
 Full guidance — including worked examples, the class hierarchy, and
@@ -168,41 +184,53 @@ with a prompt like:
 
 > Look at the optimization problem being solved in `<function>`. Learn
 > how to use Cvxium by running `python -c 'import cvxium;
-> print(cvxium.usage())'`. Make a plan to refactor `<function>` using
-> Cvxium.
+> cvxium.usage()'`. Make a plan to refactor `<function>` using Cvxium.
 
 ## Exception hierarchy
 
 ```
+OptimizationError                  — solve stopped before reaching its tolerance
+├── CenteringStepError             — inner Newton loop failed
+├── InteriorPointMethodError       — outer loop failed
+└── StationarityConvergenceError   — two-block saddle solve failed
+
+ProblemInfeasibleError             — no feasible point (or none found)
+├── ProblemCertifiablyInfeasibleError — dual certificate proves infeasibility
+└── ProblemMarginallyFeasibleError    — may be infeasible; cannot certify
+
 BacktrackingLineSearchError
-├── ConstraintBoundaryError       — step would violate a constraint
-├── InvalidDescentDirectionError  — Newton step is not a descent direction
-└── SevereCurvatureError          — backtracking condition never satisfied
+├── ConstraintBoundaryError        — even tiny steps leave the feasible region
+├── InvalidDescentDirectionError   — Newton step is not a descent direction
+└── SevereCurvatureError           — sufficient decrease never satisfied
 
-OptimizationError
-├── CenteringStepError            — inner Newton loop failed
-└── InteriorPointMethodError      — outer IPM loop failed
-
-ProblemInfeasibleError            — no feasible point exists
-ProblemCertifiablyInfeasibleError — dual certificate proves infeasibility
-ProblemMarginallyFeasibleError    — feasible set is non-empty but has no interior
+NewtonStepError                    — Newton step could not be computed
 ```
+
+Exceptions carry diagnostic data (the last iterate, suboptimality), so
+a caller can recover a partial solution.
 
 ## Optimization settings
 
-`OptimizationSettings` controls the IPM:
+`OptimizationSettings` groups the knobs by phase:
 
 ```python
-from cvxium import OptimizationSettings
+from cvxium import (
+    InnerSettings,
+    ObservabilitySettings,
+    OptimizationSettings,
+    OuterSettings,
+)
 
 settings = OptimizationSettings(
-    barrier_multiplier=10.0,    # factor by which t increases each outer iteration
-    outer_tolerance=1e-8,       # duality gap threshold for convergence
-    outer_tolerance_soft=None,  # looser threshold for feasibility-only problems
-    max_outer_iterations=100,
-    max_inner_iterations=100,
-    verbose=False,
+    outer=OuterSettings(
+        tolerance=1e-8,           # duality gap threshold for convergence
+        barrier_multiplier=10.0,  # factor by which t increases each outer iteration
+        max_outer_iterations=30,
+    ),
+    inner=InnerSettings(max_iterations=1_000),
+    observability=ObservabilitySettings(verbose=True),
 )
+result = BarrierSolver(settings=settings).solve(problem, x0=feasible.solution)
 ```
 
 ## Pareto frontier tracing for multi-objective problems

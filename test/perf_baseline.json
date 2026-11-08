@@ -1,0 +1,487 @@
+{
+  "__ignore__": [
+    "test.solvers.test_hsd_solver.HsdSolverTest.test_status_one_on_soft_tolerance"
+  ],
+  "test.diagnostics.test_trace.DataFrameTraceTest.test_dataframe_has_sparse_columns": [
+    23
+  ],
+  "test.diagnostics.test_trace.DataFrameTraceTest.test_to_dataframe_raises_without_pandas": [
+    23
+  ],
+  "test.diagnostics.test_trace.DataFrameTraceTest.test_to_dataframe_returns_one_row_per_event": [
+    23
+  ],
+  "test.diagnostics.test_trace.DualEvalEventsTest.test_dual_eval_brackets_each_centering_step": [
+    23
+  ],
+  "test.diagnostics.test_trace.DualEvalEventsTest.test_dual_eval_done_precedes_its_centering_done": [
+    23
+  ],
+  "test.diagnostics.test_trace.DualEvalEventsTest.test_dual_eval_schema_and_timing": [
+    23
+  ],
+  "test.diagnostics.test_trace.DualEvalEventsTest.test_dual_newton_steps_logged": [
+    23
+  ],
+  "test.diagnostics.test_trace.DualEvalEventsTest.test_dual_newton_steps_nested_in_dual_eval": [
+    23
+  ],
+  "test.diagnostics.test_trace.HsdEventsTest.test_brackets_run_exactly_once": [
+    7
+  ],
+  "test.diagnostics.test_trace.HsdEventsTest.test_done_carries_solver_status_nits_elapsed": [
+    7
+  ],
+  "test.diagnostics.test_trace.HsdEventsTest.test_emits_at_least_one_iteration": [
+    7
+  ],
+  "test.diagnostics.test_trace.HsdEventsTest.test_iteration_schema": [
+    7
+  ],
+  "test.diagnostics.test_trace.HsdEventsTest.test_start_carries_solver_class": [
+    7
+  ],
+  "test.diagnostics.test_trace.ListTraceTest.test_btls_schema": [
+    23
+  ],
+  "test.diagnostics.test_trace.ListTraceTest.test_centering_done_carries_duality_gap": [
+    23
+  ],
+  "test.diagnostics.test_trace.ListTraceTest.test_clear_resets_records": [
+    23
+  ],
+  "test.diagnostics.test_trace.ListTraceTest.test_collects_expected_events": [
+    23
+  ],
+  "test.diagnostics.test_trace.ListTraceTest.test_ipm_start_and_done_carry_solver_class": [
+    23
+  ],
+  "test.diagnostics.test_trace.ListTraceTest.test_newton_step_schema": [
+    23
+  ],
+  "test.diagnostics.test_trace.ListTraceTest.test_records_have_time_and_event_keys": [
+    23
+  ],
+  "test.diagnostics.test_trace.ListTraceTest.test_records_returns_defensive_copy": [
+    23
+  ],
+  "test.diagnostics.test_trace.PdEventsTest.test_equality_pd_emits_full_event_set": [
+    11
+  ],
+  "test.diagnostics.test_trace.PdEventsTest.test_pd_brackets_run_exactly_once": [
+    7
+  ],
+  "test.diagnostics.test_trace.PdEventsTest.test_pd_done_carries_reason": [
+    7
+  ],
+  "test.diagnostics.test_trace.PdEventsTest.test_pd_done_carries_solver_status_nits_elapsed": [
+    7
+  ],
+  "test.diagnostics.test_trace.PdEventsTest.test_pd_done_carries_true_duality_gap": [
+    7
+  ],
+  "test.diagnostics.test_trace.PdEventsTest.test_pd_emits_at_least_one_iteration": [
+    7
+  ],
+  "test.diagnostics.test_trace.PdEventsTest.test_pd_iteration_carries_mpc_diagnostics": [
+    7
+  ],
+  "test.diagnostics.test_trace.PdEventsTest.test_pd_iteration_carries_residual_breakdown_and_timing": [
+    7
+  ],
+  "test.diagnostics.test_trace.PdEventsTest.test_pd_iteration_schema": [
+    7
+  ],
+  "test.diagnostics.test_trace.PdEventsTest.test_pd_no_equality_has_zero_pri_norm": [
+    7
+  ],
+  "test.diagnostics.test_trace.PdEventsTest.test_pd_start_carries_dims_and_tol": [
+    7
+  ],
+  "test.diagnostics.test_trace.SolverLabelTest.test_default_name_when_no_label": [
+    23
+  ],
+  "test.diagnostics.test_trace.SolverLabelTest.test_label_overrides_barrier_solver_name": [
+    23
+  ],
+  "test.diagnostics.test_trace.SolverLabelTest.test_label_overrides_equality_pd_solver_name": [
+    11
+  ],
+  "test.diagnostics.test_trace.SolverLabelTest.test_label_overrides_hsd_solver_name": [
+    7
+  ],
+  "test.diagnostics.test_trace.SolverLabelTest.test_label_overrides_pd_solver_name": [
+    7
+  ],
+  "test.diagnostics.test_trace.TraceBaseTest.test_base_trace_collects_nothing_but_solves": [
+    23
+  ],
+  "test.problems.test_objective.LiftedObjectiveTest.test_epigraph_solve": [
+    53
+  ],
+  "test.problems.test_problem.ProblemMaximizeTest.test_solve_maximization_leaves_the_solution_point_untouched": [
+    1
+  ],
+  "test.problems.test_problem.ProblemMaximizeTest.test_solve_maximization_with_none_objective_passes_through": [
+    1
+  ],
+  "test.problems.test_problem.ProblemMaximizeTest.test_solve_minimization_value_passes_through_unchanged": [
+    1
+  ],
+  "test.problems.test_problem.ProblemMaximizeTest.test_solve_reports_the_maximization_value_and_dual_bound": [
+    1
+  ],
+  "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_failed_recentering_reraises_the_original_diagnosis": [
+    2
+  ],
+  "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_phase1_feasibilizes_infeasible_start": [
+    7
+  ],
+  "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_phase_i_start_is_not_retried": [
+    2,
+    2
+  ],
+  "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_recentering_failure_outside_the_optimization_family_is_absorbed": [
+    2,
+    2,
+    2,
+    2
+  ],
+  "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_recentering_rescues_a_lone_ellipsoid_y_block": [
+    2,
+    0
+  ],
+  "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_resolve_block_flags_only_a_seed_it_took_verbatim": [
+    8,
+    6
+  ],
+  "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_seed_hugging_a_face_is_recentered_and_retried": [
+    2,
+    2
+  ],
+  "test.saddle.test_stationarity_solver.StationaritySolverTest.test_phase1_feasibilizes_infeasible_start": [
+    7
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverEqualityInfeasibleX0Test.test_equality_feasible_x0_short_circuits": [
+    8
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverEqualityInfeasibleX0Test.test_equality_infeasible_x0_is_projected": [
+    8,
+    8
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverEqualityInfeasibleX0Test.test_marginal_equality_residual_passes": [
+    8
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverFeasibilityModeTest.test_equality_threshold_stops_at_negative_objective": [
+    1
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverFeasibilityModeTest.test_feasibility_recovers_infeasible_x0_0": [
+    1
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverFeasibilityModeTest.test_feasibility_recovers_infeasible_x0_1": [
+    1
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverFeasibilityModeTest.test_threshold_stops_at_negative_objective": [
+    2,
+    50
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverSparsePhase1Test.test_sparse_equality_solve_through_phase1": [
+    53
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_accepts_problem_with_equality": [
+    7
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_an_infinite_upper_bound_is_no_bound": [
+    60
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_one_solver_handles_inequality_and_equality_problems": [
+    20,
+    8
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_phase1_with_linear_inequality_active_layer": [
+    54,
+    52
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_runs_phase1_when_x0_infeasible_0": [
+    22
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_runs_phase1_when_x0_infeasible_1": [
+    29
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_solve_without_x0_constructs_phase1_0": [
+    25
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_solve_without_x0_constructs_phase1_1": [
+    31
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_solves_bound_constrained_quadratic_unconstrained_optimum_0": [
+    24
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_solves_bound_constrained_quadratic_unconstrained_optimum_1": [
+    26
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_solves_bound_constrained_quadratic_unconstrained_optimum_2": [
+    27
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverTest.test_solves_corner_case_lp": [
+    60
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityStructuredTest.test_equality_end_to_end_matches_optimum_0": [
+    16
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityStructuredTest.test_equality_end_to_end_matches_optimum_1": [
+    18
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_accepts_problem_without_equality": [
+    36
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_direct_form_feasible_via_structured_phase1_0": [
+    55
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_direct_form_feasible_via_structured_phase1_1": [
+    63
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_direct_form_solves_over_rank_update_background": [
+    0,
+    7
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_dual_value_matches_primal_at_convergence": [
+    9
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_slack_form_solves_over_rank_update_background": [
+    8
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_slack_form_stages_background_infeasible_seed": [
+    9
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_solve_without_x0_constructs_phase1_0": [
+    16
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_solve_without_x0_constructs_phase1_1": [
+    18
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_solves_bound_constrained_quadratic_with_equality_0": [
+    16
+  ],
+  "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_solves_bound_constrained_quadratic_with_equality_1": [
+    18
+  ],
+  "test.solvers.test_barrier_solver.FeasibilityThresholdEarlyStopTest.test_stops_at_threshold_above_the_optimum": [
+    57,
+    2
+  ],
+  "test.solvers.test_barrier_solver.OnInfeasibleContinueTest.test_feasible_problem_returns_normally": [
+    2
+  ],
+  "test.solvers.test_barrier_solver.StructuredBarrierSolveTest.test_end_to_end_diagonal_qp_0": [
+    21
+  ],
+  "test.solvers.test_barrier_solver.StructuredBarrierSolveTest.test_end_to_end_diagonal_qp_1": [
+    24
+  ],
+  "test.solvers.test_barrier_solver.StructuredBarrierSolveTest.test_end_to_end_diagonal_qp_2": [
+    24
+  ],
+  "test.solvers.test_hsd_solver.HsdSolverTest.test_apex_pinned_socp_recovers_optimum": [
+    7
+  ],
+  "test.solvers.test_hsd_solver.HsdSolverTest.test_feasible_problem_no_cert_through_solve": [
+    7
+  ],
+  "test.solvers.test_hsd_solver.HsdSolverTest.test_pin_apex_socp": [
+    7
+  ],
+  "test.solvers.test_hsd_solver.HsdSolverTest.test_primal_value_matches_at_optimum": [
+    7
+  ],
+  "test.solvers.test_hsd_solver.HsdSolverTest.test_product_cone_returns_without_raising": [
+    7
+  ],
+  "test.solvers.test_hsd_solver.HsdSolverTest.test_radial_boundary_terminates_gracefully_or_converges": [
+    14
+  ],
+  "test.solvers.test_hsd_solver.HsdSolverTest.test_result_fields_populated": [
+    7
+  ],
+  "test.solvers.test_hsd_solver.HsdSolverTest.test_solve_returns_hsd_result": [
+    7
+  ],
+  "test.solvers.test_hsd_solver.HsdSolverTest.test_status_zero_on_hard_tolerance": [
+    7
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverTest.test_gradient_called_once_per_newton_iteration_0": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverTest.test_gradient_called_once_per_newton_iteration_1": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverTest.test_gradient_called_once_per_newton_iteration_2": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverTest.test_one_solver_handles_both_unconstrained_and_equality": [
+    2,
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverTest.test_quadratic_converges_in_one_iteration_0": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverTest.test_quadratic_converges_in_one_iteration_1": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverTest.test_solves_quadratic_to_optimum_0": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverTest.test_solves_quadratic_to_optimum_1": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverTest.test_solves_quadratic_to_optimum_2": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverWithEqualityTest.test_gradient_called_once_per_newton_iteration_0": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverWithEqualityTest.test_gradient_called_once_per_newton_iteration_1": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverWithEqualityTest.test_quadratic_converges_quickly_0": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverWithEqualityTest.test_quadratic_converges_quickly_1": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverWithEqualityTest.test_solves_equality_quadratic_0": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverWithEqualityTest.test_solves_equality_quadratic_1": [
+    2
+  ],
+  "test.solvers.test_newton_solver.NewtonSolverWithEqualityTest.test_solves_equality_quadratic_2": [
+    2
+  ],
+  "test.solvers.test_primal_dual_solver.ClampDualAfterUpdateTest.test_solve_accepts_linear_inequality_and_matches_barrier": [
+    5,
+    22
+  ],
+  "test.solvers.test_primal_dual_solver.PdResultDiagnosticsAndPlotsTest.test_equality_residual_histories_populated": [
+    10
+  ],
+  "test.solvers.test_primal_dual_solver.PdResultDiagnosticsAndPlotsTest.test_residual_norm_histories_populated_no_equality": [
+    7
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualFeasibilityThresholdEarlyStopTest.test_stops_at_threshold_above_the_optimum": [
+    5,
+    1
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_converges_on_near_singular_hessian_via_damping": [
+    8
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_dual_value_is_sound_and_matches_barrier_0": [
+    6,
+    21
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_dual_value_is_sound_and_matches_barrier_1": [
+    6,
+    25
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_matches_barrier_solver_0": [
+    6,
+    21
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_matches_barrier_solver_1": [
+    6,
+    25
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_returns_pd_specific_diagnostics": [
+    7
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_solves_bound_constrained_quadratic_unconstrained_optimum_0": [
+    7
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_solves_bound_constrained_quadratic_unconstrained_optimum_1": [
+    7
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_solves_lp_corner": [
+    6
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_solves_problem_with_equality": [
+    8
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_converges_on_near_singular_hessian_via_damping": [
+    15
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_dual_value_is_sound_and_matches_barrier_0": [
+    12,
+    55
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_dual_value_is_sound_and_matches_barrier_1": [
+    15,
+    66
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_infeasible_start_drives_equality_to_zero": [
+    15
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_matches_equality_barrier_solver_0": [
+    12,
+    55
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_matches_equality_barrier_solver_1": [
+    14,
+    56
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_matches_equality_barrier_solver_2": [
+    16,
+    59
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_matches_equality_barrier_solver_3": [
+    14,
+    65
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_matches_equality_barrier_solver_4": [
+    12,
+    53
+  ],
+  "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_returns_pd_specific_diagnostics": [
+    17
+  ],
+  "test.solvers.test_solve_second_order_cone_program.SolveSecondOrderConeProgramTest.test_a_soc_diag_hint_agrees_with_runtime_detection": [
+    15,
+    15
+  ],
+  "test.solvers.test_solve_second_order_cone_program.SolveSecondOrderConeProgramTest.test_converges_and_satisfies_constraints_0": [
+    15
+  ],
+  "test.solvers.test_solve_second_order_cone_program.SolveSecondOrderConeProgramTest.test_converges_and_satisfies_constraints_1": [
+    15
+  ],
+  "test.solvers.test_solve_second_order_cone_program.SolveSecondOrderConeProgramTest.test_converges_and_satisfies_constraints_2": [
+    17
+  ],
+  "test.solvers.test_solve_second_order_cone_program.SolveSecondOrderConeProgramTest.test_hsd_embedding_returns_feasible_solution_0": [
+    15
+  ],
+  "test.solvers.test_solve_second_order_cone_program.SolveSecondOrderConeProgramTest.test_hsd_embedding_returns_feasible_solution_1": [
+    15
+  ],
+  "test.solvers.test_solve_second_order_cone_program.SolveSecondOrderConeProgramTest.test_settings_are_forwarded": [
+    16,
+    7
+  ],
+  "test.solvers.test_solver.SolveFeasibilityTest.test_ellipsoid_with_background_does_not_short_circuit": [
+    7
+  ],
+  "test.solvers.test_solver.SolveFeasibilityTest.test_inequality_problem_returns_feasible_result": [
+    1
+  ],
+  "test.solvers.test_solver.SolveObjNoneRoutesToFeasibilityTest.test_barrier_routes_obj_none": [
+    1
+  ],
+  "test.solvers.test_solver.SolveObjNoneRoutesToFeasibilityTest.test_equality_barrier_routes_obj_none": [
+    2
+  ],
+  "test.solvers.test_solver.SolveObjNoneRoutesToFeasibilityTest.test_equality_obj_none_off_manifold_x0_is_not_short_circuited": [
+    2
+  ],
+  "test.solvers.test_solver.SolveObjNoneRoutesToFeasibilityTest.test_primal_dual_routes_obj_none": [
+    2
+  ]
+}
