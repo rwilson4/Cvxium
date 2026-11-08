@@ -19,6 +19,9 @@ encoding the Hessian's structure (diagonal, low-rank update, arrow
 sparsity pattern, etc.), the same iteration can run in O(n). This
 allows problems to scale to dimensions in the thousands or even higher.
 
+The documentation, at https://convexanalytics.com/cvxium/, includes
+the usage guide and the API reference.
+
 ## Why Cvxium?
 
 Most convex optimization needs are well-served by existing tools. Here

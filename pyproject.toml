@@ -24,6 +24,10 @@ dependencies = [
 # DataFrameTrace and IterationHandler.to_dataframe import pandas lazily.
 pandas = ["pandas>=2.2.3,<3"]
 
+[project.urls]
+Documentation = "https://convexanalytics.com/cvxium/"
+Source = "https://github.com/rwilson4/Cvxium"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3.5,<9",

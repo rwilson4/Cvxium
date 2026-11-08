@@ -51,7 +51,8 @@ narrows optionals in expressions where an `assert` would not fit.
 
 ### Documentation
 
-The Sphinx site lives in `docs/` (pydata theme, autodoc, napoleon); the usage guide
+The Sphinx site lives in `docs/` (pydata theme, autodoc, napoleon) and is served at
+https://convexanalytics.com/cvxium/. The usage guide
 page includes USAGE.md rather than copying it, and the API pages list public names
 explicitly, so a new public class must be added to the right `docs/api/*.rst` page.
 
@@ -66,7 +67,9 @@ at build time. If a docstring breaks the `-W` build, fix the hook's case before
 reformatting the docstring. `test/test_documentation.py` runs every `python` block in
 README.md and USAGE.md, so keep those blocks runnable in order.
 `.github/workflows/deploy_docs.yml` builds on every change and deploys over rsync once
-the `DOCS_HOST`, `DOCS_USER`, and `DOCS_DEPLOY_KEY` secrets exist.
+the `DOCS_HOST`, `DOCS_USER`, and `DOCS_DEPLOY_KEY` secrets exist; the key's `rrsync`
+forced command on the server fixes the destination,
+`/srv/docs/convexanalytics/cvxium`.
 
 ### Performance guard
 
