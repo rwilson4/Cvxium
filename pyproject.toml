@@ -41,6 +41,9 @@ dev = [
     "sphinx>=7.0",
     "pydata-sphinx-theme>=0.17.1",
     "myst-parser>=3.0",
+    "cvxpy>=1.9.3",
+    "piqp>=0.7.0",
+    "qoco>=0.3.2",
 ]
 
 [tool.hatch.build.targets.wheel]

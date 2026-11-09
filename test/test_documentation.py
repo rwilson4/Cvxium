@@ -40,6 +40,9 @@ class DocumentationExamplesTest(unittest.TestCase):
     def test_linear_programs_guide_examples_run(self) -> None:
         self._run("docs/user_guides/linear_programs.md")
 
+    def test_banded_quadratic_programs_guide_examples_run(self) -> None:
+        self._run("docs/user_guides/banded_quadratic_programs.md")
+
 
 if __name__ == "__main__":
     unittest.main()

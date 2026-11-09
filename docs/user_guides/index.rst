@@ -12,8 +12,14 @@ The guide to large linear programs solves a media plan with 20,000
 variables and 50 constraints, compares Cvxium with scipy's ``linprog``,
 and explains the structure and the settings behind the speedup.
 
+The guide to banded quadratic programs smooths 100,000 nonnegative
+power readings with a tridiagonal quadratic, compares Cvxium with a
+steel-manned cvxpy across five solvers, and shows how a band structure
+carries through every Newton step.
+
 .. toctree::
    :maxdepth: 1
 
    usage
    linear_programs
+   banded_quadratic_programs
