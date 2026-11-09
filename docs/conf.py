@@ -51,6 +51,9 @@ autodoc_default_options = {"show-inheritance": True}
 # (ndarray[tuple[Any, ...], dtype[float64]]) only obscure them.
 autodoc_typehints = "none"
 
+# The user guides write display math as $$...$$ (MyST's dollarmath).
+myst_enable_extensions = ["dollarmath"]
+
 # Dataclass docstrings document their fields under "Fields".
 napoleon_custom_sections = [("Fields", "params_style")]
 

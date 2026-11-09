@@ -1,4 +1,4 @@
-"""Run the code examples in README.md and USAGE.md."""
+"""Run the code examples in README.md, USAGE.md, and the user guides."""
 
 import contextlib
 import io
@@ -36,6 +36,9 @@ class DocumentationExamplesTest(unittest.TestCase):
 
     def test_usage_guide_examples_run(self) -> None:
         self._run("USAGE.md")
+
+    def test_linear_programs_guide_examples_run(self) -> None:
+        self._run("docs/user_guides/linear_programs.md")
 
 
 if __name__ == "__main__":

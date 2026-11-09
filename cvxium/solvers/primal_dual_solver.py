@@ -975,7 +975,10 @@ class PrimalDualSolver(Solver):
         dual_value = _BarrierAdapter(problem, settings).evaluate_dual(
             lmbda, np.zeros(0), x
         )
-        if dual_value > 0.0:
+        # A positive dual value certifies infeasibility only for a Phase I problem,
+        # whose objective is the slack (marked by a feasibility threshold); for any
+        # other problem it is just a positive lower bound on the optimal value.
+        if feasibility_threshold is not None and dual_value > 0.0:
             trace.on_pd_done(
                 solver=solver_name,
                 nits=nit + 1,

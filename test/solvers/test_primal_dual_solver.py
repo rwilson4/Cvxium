@@ -283,6 +283,34 @@ class PrimalDualSolverTest(unittest.TestCase):
             pd_result.dual_value, barrier_result.dual_value, delta=1e-3
         )
 
+    def test_positive_optimal_value_is_not_infeasibility(self) -> None:
+        """An LP with a positive optimum solves rather than raising infeasible.
+
+        Outside Phase I a positive dual value is only a lower bound on the optimal
+        value; it once raised ``ProblemCertifiablyInfeasibleError`` on every problem
+        without equalities whose optimal value was positive.
+        """
+        rng = np.random.default_rng(1291)
+        M, p = 40, 3
+        R = rng.uniform(0.0, 1.0, (p, M))
+        u = np.full(M, 10.0)
+        c = rng.uniform(0.01, 0.02, M)  # optimum O(1), within the 1e-6 gap
+        r = 0.3 * (R @ u)
+        problem = Problem(
+            obj=LinearObjective(c=c),
+            ineq=[
+                BoundsConstraintLayer(lb=0.0, ub=u),
+                LinearInequalityConstraintLayer(A=R, cl=r),
+            ],
+        )
+        result = PrimalDualSolver().solve(problem=problem, x0=0.5 * u)
+        self.assertEqual(result.status, SolveStatus.OPTIMAL)
+        self.assertGreater(result.dual_value, 0.0)
+        barrier = BarrierSolver().solve(problem=problem, x0=0.5 * u)
+        self.assertAlmostEqual(
+            result.objective_value, barrier.objective_value, delta=1e-5
+        )
+
     def test_solves_lp_corner(self) -> None:
         """LP `min c^T w  s.t. lb <= w <= ub` finds the lower-bound corner."""
         M = 5
