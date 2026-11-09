@@ -44,6 +44,7 @@ from ..linalg.numerical_helpers import (
     _RankOneUpdatePrep,
     _RankPUpdatePrep,
     _solve_schur_complement,
+    _TridiagonalFactor,
     factor_banded,
     multiply_banded,
     multiply_block,
@@ -948,7 +949,7 @@ class BandedSystem(MatrixSystem):
         # transform returns a new instance), so the factor cannot go stale; it
         # is computed on the first solve and reused across the remaining solves
         # of the same instance -- the three solves of one KKT/Newton step.
-        self._factor: npt.NDArray[np.float64] | None = None
+        self._factor: npt.NDArray[np.float64] | _TridiagonalFactor | None = None
 
     @property
     def dimension(self) -> int:

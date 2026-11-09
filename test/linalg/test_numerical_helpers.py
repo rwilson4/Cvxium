@@ -988,6 +988,8 @@ class NumericalHelpersTest(unittest.TestCase):
             (317, 50, 2),
             (417, 500, 10),
             (517, 13, 2),
+            (617, 1_000, 1),  # tridiagonal: the dpttrf/dpttrs path
+            (717, 2, 1),
         ]
     )
     def test_solve_banded(self, seed: int, M: int, p: int) -> None:
@@ -1021,6 +1023,7 @@ class NumericalHelpersTest(unittest.TestCase):
             (318, 50, 2, 5),
             (418, 500, 10, 100),
             (518, 13, 2, 3),
+            (618, 300, 1, 4),  # tridiagonal: the dpttrf/dpttrs path
         ]
     )
     def test_solve_banded_multiple_rhs(self, seed: int, M: int, p: int, q: int) -> None:
@@ -1046,6 +1049,27 @@ class NumericalHelpersTest(unittest.TestCase):
 
         # Verify H*x = b
         np.testing.assert_allclose(H @ x_upper, b, rtol=1e-8, atol=1e-8)
+
+    def test_solve_banded_tridiagonal_not_positive_definite_raises(self) -> None:
+        """An indefinite tridiagonal matrix raises ``NewtonStepError``."""
+        ab_upper = np.array([[0.0, 2.0, 0.5], [1.0, 1.0, 1.0]])  # minor [[1,2],[2,1]]
+        with self.assertRaises(NewtonStepError):
+            solve_banded(np.ones(3), ab_upper, lower=False)
+
+    @parameterized.expand([(np.nan,), (np.inf,), (-np.inf,)])
+    def test_solve_banded_tridiagonal_nonfinite_raises(self, bad_value: float) -> None:
+        """A non-finite tridiagonal Hessian raises ``NewtonStepError``; a non-finite
+        right-hand side raises ``ValueError``, as on the general banded path."""
+        rng = np.random.RandomState(632)
+        _, _, ab_lower = _make_spd_banded(20, 1, rng)
+        b = rng.randn(20)
+        corrupted = ab_lower.copy()
+        corrupted[0, 5] = bad_value
+        with self.assertRaises(NewtonStepError):
+            solve_banded(b, corrupted, lower=True)
+        b[3] = bad_value
+        with self.assertRaises(ValueError):
+            solve_banded(b, ab_lower, lower=True)
 
     @parameterized.expand([(np.nan,), (np.inf,), (-np.inf,)])
     def test_solve_banded_nonfinite_hessian_raises_newton_step_error(
