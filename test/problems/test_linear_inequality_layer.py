@@ -38,6 +38,14 @@ class LinearInequalityConstraintLayerCuOnlyTest(unittest.TestCase):
         w = np.array([0.0, 0.0])
         np.testing.assert_allclose(self.layer.grad_constraints(w), self.A)
 
+    def test_grad_constraints_is_cached_and_read_only(self) -> None:
+        """The constant Jacobian is formed once and cannot be mutated in place."""
+        G = self.layer.grad_constraints(np.array([0.5, 0.5]))
+        self.assertIs(self.layer.grad_constraints(np.array([1.0, -1.0])), G)
+        with self.assertRaises(ValueError):
+            G[0, 0] = 7.0
+        np.testing.assert_array_equal(G, self.A)
+
     def test_grad_multiplies_match_default(self) -> None:
         w = np.array([0.5, 0.7])
         v = np.array([0.3, -0.2])

@@ -11,8 +11,8 @@ iteration cost O(p² M).
 This guide works one example from start to finish. We state a media
 plan as a linear program, solve it with scipy's `linprog` (HiGHS) to
 establish ground truth and a time to beat, explain the structure
-Cvxium exploits, and then solve it with Cvxium: about 20 times faster
-than `linprog`'s default method, and about 4 times faster than the
+Cvxium exploits, and then solve it with Cvxium: about 28 times faster
+than `linprog`'s default method, and about 6 times faster than the
 fastest method HiGHS offers. Three settings decide whether that
 speedup appears at all: the choice of solver, the scale of the
 objective, and the starting point. We cover each, read the shadow
@@ -87,9 +87,10 @@ print(
 ```
 
 The cheapest plan costs about $1.74 million. The default method finds
-it in about 4.3 seconds, the interior-point method in about 0.9. (All timings in this guide come from an Apple M2 Pro
-with scipy 1.17 and NumPy 2.4; expect different absolute numbers
-elsewhere, but similar ratios.)
+it in about 4.3 seconds, the interior-point method in about 0.9. (All
+timings in this guide come from an Apple M2 Pro with scipy 1.17 and
+NumPy 2.4; expect different absolute numbers elsewhere, but similar
+ratios.)
 
 ## The structure Cvxium exploits
 
@@ -171,8 +172,8 @@ print(
 )
 ```
 
-Cvxium takes 19 iterations and about 0.2 seconds: roughly 20 times
-faster than `linprog`'s default and 4 times faster than HiGHS's
+Cvxium takes 19 iterations and about 0.15 seconds: roughly 28 times
+faster than `linprog`'s default and 6 times faster than HiGHS's
 interior-point method, and it agrees with both on the optimal cost to
 better than one part in a million. The solution reports a duality-gap bound,
 `result.suboptimality`, of about 6 × 10⁻⁷: the plan costs at most
@@ -241,9 +242,9 @@ print(f"Barrier: {newton_steps} Newton steps in {barrier_seconds:.2f} s")
 ```
 
 The barrier method takes 88 Newton steps over 11 centering problems,
-about 1.1 seconds: faster than `linprog`'s default, slower than
-HiGHS's interior-point method, and five times slower than the
-primal-dual method. For an LP, start with `PrimalDualSolver`.
+about 0.7 seconds: faster than either HiGHS method, but four to five
+times slower than the primal-dual method. For an LP, start with
+`PrimalDualSolver`.
 
 ### Scale the objective
 
@@ -305,13 +306,13 @@ two columns are Cvxium's speedups.
 
 |      M |   p | default (s) | HiGHS IPM (s) | Cvxium (s) | iterations | vs. default | vs. IPM |
 |-------:|----:|------------:|--------------:|-----------:|-----------:|------------:|--------:|
-|  2,000 |  50 |       0.094 |         0.076 |      0.023 |         18 |          4× |    3.3× |
-|  5,000 |  50 |        0.43 |          0.19 |      0.045 |         19 |         10× |    4.3× |
-| 20,000 |  50 |         4.2 |          0.92 |       0.21 |         19 |         20× |    4.4× |
-| 50,000 |  50 |        19.2 |          2.44 |       0.57 |         20 |         34× |    4.3× |
-| 20,000 |  10 |        0.17 |          0.19 |      0.091 |         17 |          2× |    2.1× |
-| 20,000 | 100 |        28.1 |          2.14 |       0.43 |         22 |         65× |    5.0× |
-| 20,000 | 200 |         265 |          4.43 |       1.14 |         28 |        233× |    3.9× |
+|  2,000 |  50 |       0.094 |         0.076 |      0.019 |         18 |          5× |    4.0× |
+|  5,000 |  50 |        0.43 |          0.19 |      0.036 |         19 |         12× |    5.4× |
+| 20,000 |  50 |         4.2 |          0.92 |       0.15 |         19 |         28× |    6.0× |
+| 50,000 |  50 |        19.2 |          2.44 |       0.43 |         20 |         45× |    5.6× |
+| 20,000 |  10 |        0.17 |          0.19 |      0.084 |         17 |          2× |    2.2× |
+| 20,000 | 100 |        28.1 |          2.14 |       0.31 |         22 |         89× |    6.8× |
+| 20,000 | 200 |         265 |          4.43 |       0.88 |         28 |        300× |    5.0× |
 
 Cvxium's iteration count stays between 17 and 28 across every size,
 and its time grows linearly in M, as the analysis above predicts. The
@@ -319,7 +320,7 @@ default simplex grows much faster, in both M and p, because the number
 of pivots grows with the problem as well as the cost of each one; at
 p = 200 it takes over four minutes. HiGHS's interior-point method
 scales like Cvxium's, so against it the advantage holds steady at a
-factor of about 4, less when p is small and fixed costs dominate.
+factor of 4 to 7, less when p is small and fixed costs dominate.
 
 The default deserves the attention because it is what `linprog` runs
 unless told otherwise, and nothing about this problem warns that the
@@ -340,8 +341,8 @@ has a barrier Hessian that is a diagonal plus a rank-p update, so each
 interior-point iteration costs O(p² M). Cvxium assembles that
 structure from library components, `LinearObjective`,
 `BoundsConstraintLayer`, and `LinearInequalityConstraintLayer`, with no
-code of our own, and on the media plan solves the problem about 20
-times faster than `linprog`'s default and 4 times faster than HiGHS's
+code of our own, and on the media plan solves the problem about 28
+times faster than `linprog`'s default and 6 times faster than HiGHS's
 interior-point method, while reporting the same optimal cost and the
 same shadow prices.
 

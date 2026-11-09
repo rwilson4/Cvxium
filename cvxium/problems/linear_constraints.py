@@ -1212,6 +1212,8 @@ class LinearInequalityConstraintLayer(SlackConstraintLayer):
         self._cl_idx: npt.NDArray[np.intp] = np.flatnonzero(cl_finite_mask)
         self._cu_finite: npt.NDArray[np.float64] = cu_arr[self._cu_idx]
         self._cl_finite: npt.NDArray[np.float64] = cl_arr[self._cl_idx]
+        # The Jacobian is constant, so grad_constraints forms it once, on first use.
+        self._G: npt.NDArray[np.float64] | None = None
 
     @property
     def dimension(self) -> int:
@@ -1323,11 +1325,13 @@ class LinearInequalityConstraintLayer(SlackConstraintLayer):
         self,
         w: npt.NDArray[np.float64],
     ) -> npt.NDArray[np.float64]:
-        """Form the dense constraint Jacobian G = [A_cu; -A_cl].
+        """Return the dense constraint Jacobian G = [A_cu; -A_cl].
 
         A_cu holds the rows of A with a finite upper bound and A_cl those with a finite
-        lower bound. A sparse A is densified, so avoid this in hot loops;
-        ``hessian_contribution`` nevertheless calls it once per Newton step.
+        lower bound. The layer is affine, so G is formed (and a sparse A densified) once,
+        on the first call, and cached; ``hessian_contribution`` asks for it at every
+        Newton step. The cached array is read-only, so a caller that needs to modify G
+        must copy it, and the layer treats A as immutable after construction.
 
         Parameters
         ----------
@@ -1337,14 +1341,18 @@ class LinearInequalityConstraintLayer(SlackConstraintLayer):
         Returns
         -------
          G : npt.NDArray[np.float64]
-            The constraint Jacobian, of shape (``num_cu`` + ``num_cl``, M).
+            The constraint Jacobian, of shape (``num_cu`` + ``num_cl``, M); read-only.
 
         """
-        if self._is_sparse:
-            A_dense = np.asarray(self._A.toarray(), dtype=np.float64)
-        else:
-            A_dense = np.asarray(self._A, dtype=np.float64)
-        return np.vstack([A_dense[self._cu_idx], -A_dense[self._cl_idx]])
+        if self._G is None:
+            if self._is_sparse:
+                A_dense = np.asarray(self._A.toarray(), dtype=np.float64)
+            else:
+                A_dense = np.asarray(self._A, dtype=np.float64)
+            G = np.vstack([A_dense[self._cu_idx], -A_dense[self._cl_idx]])
+            G.setflags(write=False)  # Shared across calls; guard against mutation
+            self._G = G
+        return self._G
 
     def grad_constraints_multiply(
         self,
