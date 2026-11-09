@@ -307,6 +307,16 @@ at M = 1,000,000 cvxpy takes over 11 seconds to compile the problem
 before any solver runs, so a one-off solve is twelve times slower than
 Cvxium's.
 
+Compilation also has a memory cost. With y as a parameter, cvxpy 1.9
+stores the coefficients of the quadratic form as a dense
+(M + 1) × (M + 1) array (8 (M + 1)² bytes, or 75 GB at M = 100,000),
+almost all of it zeros. macOS, where we ran these timings, maps
+zero pages lazily and never commits most of that memory; Linux
+typically refuses the allocation, and compilation fails with a
+`MemoryError` beyond a few tens of thousands of readings. There, drop
+the parameter and pass y as a constant: each solve then recompiles,
+which costs the "first solve" column rather than the "solve" column.
+
 The comparison has limits worth naming. The sparse solvers handle any
 sparsity pattern, and they win wherever the pattern is irregular, or
 where Cvxium has no `MatrixSystem` for it. And a factor of two over

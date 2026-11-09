@@ -24,9 +24,12 @@ class DocumentationExamplesTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         matplotlib.use("Agg")
 
-    def _run(self, name: str) -> None:
+    def _run(self, name: str, replacements: dict[str, str] | None = None) -> None:
         script = _python_blocks(_ROOT / name)
         self.assertTrue(script, f"{name} has no python blocks")
+        for old, new in (replacements or {}).items():
+            self.assertIn(old, script, f"{name} no longer contains {old!r}")
+            script = script.replace(old, new)
         # Silence the guides' prints, including the whole of cvxium.usage().
         with contextlib.redirect_stdout(io.StringIO()):
             exec(compile(script, name, "exec"), {"__name__": f"docs.{name}"})
@@ -41,7 +44,12 @@ class DocumentationExamplesTest(unittest.TestCase):
         self._run("docs/user_guides/linear_programs.md")
 
     def test_banded_quadratic_programs_guide_examples_run(self) -> None:
-        self._run("docs/user_guides/banded_quadratic_programs.md")
+        # At the guide's M = 100,000, cvxpy's compilation allocates a dense
+        # (M + 1) x (M + 1) array (75 GB), which Linux CI runners refuse.
+        self._run(
+            "docs/user_guides/banded_quadratic_programs.md",
+            {"M, lam = 100_000, 50.0": "M, lam = 10_000, 50.0"},
+        )
 
 
 if __name__ == "__main__":
