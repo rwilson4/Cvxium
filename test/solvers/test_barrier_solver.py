@@ -1635,6 +1635,62 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
         assert result.btls_steps == []
         assert result.quadratic_from is None
 
+    def test_a_decrement_that_rises_leaves_the_quadratic_phase(self) -> None:
+        """A decrement back above eta returns the loop to the damped phase.
+
+        Inside the region of quadratic convergence the decrement shrinks, so one
+        that rises above eta proves the iterate has left it. Unit steps taken
+        there wandered for hundreds of iterations on a near-singular Hessian at
+        high t; the damped phase's line search must take over instead. Scripted:
+        enter the phase on iteration 1, rise above eta on iteration 2, converge on
+        iteration 3.
+        """
+        problem = CenteringStepQuadraticPhaseUnitStepTest._qp_problem()
+        settings = OptimizationSettings(
+            inner=InnerSettings(tolerance=1e-7, tolerance_soft=1e-7, max_iterations=50)
+        )
+        adapter = _BarrierAdapter(problem=problem, settings=settings)
+        decrements = iter([1e-2, 1.0, 1e-8])  # lambda = 0.1, 1.0, 1e-4; eta ~ 0.245
+        btls_calls: list[int] = []
+
+        def fake_newton_step(
+            x: npt.NDArray[np.float64], t: float
+        ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+            return np.zeros_like(x), np.zeros(0)
+
+        def fake_decrement_squared(
+            x: npt.NDArray[np.float64],
+            t: float,
+            delta_x: npt.NDArray[np.float64],
+        ) -> float:
+            return next(decrements)
+
+        def spy_btls(
+            x: npt.NDArray[np.float64],
+            delta_x: npt.NDArray[np.float64],
+            t: float,
+            lambda_squared: float,
+        ) -> float:
+            btls_calls.append(len(btls_calls))
+            return 0.5
+
+        with (
+            patch.object(adapter, "calculate_newton_step", new=fake_newton_step),
+            patch.object(
+                adapter, "newton_decrement_squared", new=fake_decrement_squared
+            ),
+            patch.object(adapter, "backtracking_line_search", new=spy_btls),
+        ):
+            result = adapter.centering_step(x0=np.ones(3), t=1e10, last_step=False)
+
+        assert result.status == 0
+        assert result.nits == 3
+        # Iteration 1: unit step (quadratic phase). Iteration 2: the line search.
+        assert btls_calls == [0]
+        assert result.btls_steps == [1.0, 0.5]
+        # The phase entered on iteration 1 was abandoned, so it is not reported.
+        assert result.quadratic_from is None
+
     def test_quadratic_phase_stall_detector_bails_to_best_iterate(self) -> None:
         """At high ``t`` the centering loop can drop into the quadratic
         phase and then bounce around the floating-point floor of

@@ -1771,6 +1771,28 @@ class BaseInteriorPointMethodSolver(Optimizer):
             quadratic_threshold_crossed = not in_quadratic_phase and lambda_norm <= eta
             if quadratic_threshold_crossed:
                 in_quadratic_phase = True
+            elif in_quadratic_phase and lambda_norm > eta:
+                # Left the region of quadratic convergence. Inside it the
+                # decrement shrinks quadratically (Boyd and Vandenberghe, 2004,
+                # section 9.5.3), so a decrement back above eta proves the iterate
+                # is outside it -- typically because the Newton direction has lost
+                # accuracy on a near-singular Hessian at high t. The unit steps
+                # below are only safe inside the region; taken outside it they
+                # wander, the decrement swinging by orders of magnitude for
+                # hundreds of iterations. Return to the damped phase, whose line
+                # search rejects a step that does not decrease ft. Floating-point
+                # noise at convergence sits far below eta, so it cannot trigger
+                # this.
+                logger.debug(
+                    "  %02d Newton decrement %.3g rose above the quadratic threshold "
+                    "%.3g; returning to the damped phase.",
+                    outer_nit,
+                    lambda_norm,
+                    eta,
+                )
+                in_quadratic_phase = False
+                quadratic_from = None
+                iters_since_improvement = 0
 
             # Track the best iterate seen, but reset the stall counter only on
             # *meaningful* improvement. A microscopic creep toward the FP floor
