@@ -24,6 +24,7 @@ from ..exceptions import (
     ConstraintBoundaryError,
     InvalidDescentDirectionError,
     NewtonStepError,
+    ProblemInfeasibleError,
     SevereCurvatureError,
 )
 from ..problems.constraint_layers import (
@@ -43,6 +44,7 @@ from ..solvers.optimization import (
     ProblemCertifiablyInfeasibleError,
     TrivialFeasibilitySolver,
     _barrier_solveresult,
+    _CenteringOutcome,
 )
 from ..solvers.phase1 import _SlackActiveLayer
 from ..solvers.settings import (
@@ -437,6 +439,54 @@ class _BarrierAdapter(InteriorPointMethodSolver):
 
         """
         return none_throws(self._problem.obj).feasibility_threshold
+
+    def _verified_primal(
+        self, result: _CenteringOutcome, t: float
+    ) -> _CenteringOutcome | None:
+        """Project a centering outcome onto A x = b and verify it stays interior.
+
+        A barrier iterate is strictly inside the inequalities, but it satisfies
+        A x = b only to the accuracy of the Newton solves. When those solves are
+        ill-conditioned, or a centering step stalls for many iterations, the iterate
+        can drift far enough off the affine set that its objective falls below p*, and
+        the best-bounds certificate would then read a zero gap for a wrong answer. So
+        the outcome is replaced by its Euclidean projection onto A x = b, the nearest
+        point that satisfies the equalities, and that point's objective becomes the
+        primal bound. The projection moves an already-feasible iterate only by
+        rounding, so it costs one O(p^2 M) saddle solve per centering step and changes
+        nothing in the common case.
+
+        Parameters
+        ----------
+         result : _CenteringOutcome
+            A completed centering step.
+         t : float
+            The barrier parameter of that step, for the re-evaluated barrier objective.
+
+        Returns
+        -------
+         verified : _CenteringOutcome | None
+            ``result`` unchanged when there are no equality constraints; otherwise a
+            copy at the projected point, with its objective and barrier objective
+            re-evaluated there. ``None`` when the projection fails, or leaves an
+            inequality no longer strictly satisfied: the step then offers no valid
+            primal bound.
+
+        """
+        if self._equality is None:
+            return result
+        try:
+            x = self._equality._project_via_saddle(result.solution).solution
+        except (ProblemInfeasibleError, NewtonStepError):
+            return None
+        if not np.all(self.constraints(x) < 0.0):
+            return None
+        return replace(
+            result,
+            solution=x,
+            objective_value=self.evaluate_objective(x),
+            barrier_objective_value=self.evaluate_barrier_objective(x, t),
+        )
 
     def evaluate_objective(self, x: npt.NDArray[np.float64]) -> float:
         """Evaluate the objective f0 at x.
@@ -847,9 +897,9 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         Solves either the Hessian system (no equality constraints),
            H_ft Δx = -∇ft,
         or the equality-constrained KKT system,
-            _         _   _      _     _        _
-           | H_ft  A^T | |   Δx   |   |   -∇ft   |
-           |_ A     0 _| |_  ν   _| = |_    0   _|
+            _         _   _      _     _         _
+           | H_ft  A^T | |   Δx   |   |   -∇ft    |
+           |_ A     0 _| |_  ν   _| = |_ b - A x _|
         Both branches use structured assembly: every component declares its Hessian as a
         ``MatrixSystem``, and the Problem assembles the weighted Hessian via
         ``build_hessian_system`` at the central-path barrier weights λ = -1/f (stacked
@@ -857,9 +907,19 @@ class _BarrierAdapter(InteriorPointMethodSolver):
 
         With no equality layer, the KKT system collapses to a plain Hessian solve and
         the returned ``nu`` is empty. With one, the weighted Hessian is fed into the
-        equality KKT saddle via the Problem equality's ``saddle_system`` seam. The
-        iterate is already equality-feasible, so the saddle's lower right-hand side is
-        zero (the default ``b_bottom=None``).
+        equality KKT saddle via the Problem equality's ``saddle_system`` seam.
+
+        The lower right-hand side is the equality residual b - A x rather than zero:
+        the infeasible-start Newton step (Boyd and Vandenberghe, 2004, section 10.3).
+        Every iterate is equality-feasible in exact arithmetic, but a feasible-start
+        step satisfies A Δx = 0 only to the accuracy of the saddle solve. When the
+        weighted Hessian is ill-conditioned (a linear objective, or high t), that error
+        accumulates over many Newton steps until the iterate is visibly off the affine
+        set and its objective is no longer an upper bound on p*. Carrying the residual
+        makes each step correct whatever drift came before it: a unit step restores
+        A x = b, and a damped step s shrinks the residual by the factor 1 - s. On a
+        feasible iterate the residual is at rounding level, so the step is unchanged.
+        The cost is one product A x, O(p M), against the solve's O(p^2 M).
 
         """
         lmbda = -1.0 / self.constraints(x)
@@ -870,7 +930,7 @@ class _BarrierAdapter(InteriorPointMethodSolver):
             return delta_x, np.zeros(0)
         assert self._problem.eq is not None
         return self._problem.eq.saddle_system(system).solve(
-            -self.gradient_barrier(x, t)
+            -self.gradient_barrier(x, t), self.b - self.A @ x
         )
 
     def evaluate_dual(

@@ -83,6 +83,29 @@ def _configure_verbose_logging() -> None:
         parent.setLevel(logging.DEBUG)
 
 
+# Relative rounding allowance when comparing a dual value against a feasible
+# objective. Far below any outer tolerance, so it absorbs floating-point noise at
+# convergence without admitting a dual that genuinely exceeds the primal.
+_WEAK_DUALITY_RTOL: float = 1e-9
+
+
+def _weak_duality_slack(objective_value: float) -> float:
+    """Return how far a valid dual may exceed ``objective_value`` through rounding.
+
+    Parameters
+    ----------
+     objective_value : float
+        A feasible point's objective value, an upper bound on p*.
+
+    Returns
+    -------
+     slack : float
+        ``_WEAK_DUALITY_RTOL * max(1, |objective_value|)``.
+
+    """
+    return _WEAK_DUALITY_RTOL * max(1.0, abs(objective_value))
+
+
 def _legacy_solve_status(status: Literal[0, 1, 2]) -> SolveStatus:
     """Map an integer status code onto a ``SolveStatus``.
 
@@ -729,10 +752,14 @@ class BaseInteriorPointMethodSolver(Optimizer):
         centering steps, enough for the last one, at t = t0 μ^(N-1), to have m / t ≤ ε,
         where ε is ``outer.tolerance`` and μ is ``outer.barrier_multiplier``.
 
-        Every barrier iterate is strictly feasible, so its objective value is an upper
-        bound on the optimal value p_star; every set of barrier multipliers is
-        nonnegative, so its dual value is a lower bound. The loop tracks the best of
-        each independently, and the best pair may come from different steps. This
+        A feasible point's objective value is an upper bound on the optimal value
+        p_star; every set of barrier multipliers is nonnegative, so its dual value is a
+        lower bound. Barrier iterates are strictly inside the inequalities but satisfy
+        A x = b only to the accuracy of the Newton solves, so the primal bound is taken
+        from each iterate's projection onto A x = b, verified to remain interior
+        (``_verified_primal``), and a dual above the best such bound is discarded as
+        invalid. The loop tracks the best of each independently, and the best pair may
+        come from different steps. This
         matters because the per-step gap is not monotone: at high t the conditioning
         degrades and the dual value sags while the objective keeps improving. The loop
         stops early once the best-bounds gap is within ε, which often happens before the
@@ -811,16 +838,23 @@ class BaseInteriorPointMethodSolver(Optimizer):
         nit = 0
         result: _CenteringOutcome | None = None
         # Track the best primal and best dual bounds *independently* across
-        # centering steps. Every barrier iterate is strictly feasible, so each
-        # ``objective_value`` is a valid upper bound on p*; every barrier
-        # multiplier is >= 0, so each ``dual_value`` is a valid lower bound. The
-        # tightest certificate from the run is therefore ``min(objective) -
-        # max(dual)``, which can pair a primal and a dual from *different* steps.
-        # This matters because the gap is not monotone: at high ``t`` the
-        # conditioning degrades and the dual sags even while the primal keeps
-        # improving, so the last (or single-best-gap) step is not the best
-        # certificate. ``min``/``max`` self-select the trustworthy steps, so no
-        # ``status`` gating is needed.
+        # centering steps. A feasible point's objective is a valid upper bound on
+        # p*, and every barrier multiplier is >= 0, so each ``dual_value`` is a
+        # lower bound. The tightest certificate from the run is therefore
+        # ``min(objective) - max(dual)``, which can pair a primal and a dual from
+        # *different* steps. This matters because the gap is not monotone: at high
+        # ``t`` the conditioning degrades and the dual sags even while the primal
+        # keeps improving, so the last (or single-best-gap) step is not the best
+        # certificate.
+        #
+        # Barrier iterates are strictly inside the inequalities but only
+        # approximately on A x = b, and a step whose Newton iterations stalled can
+        # drift far enough that its objective falls below p*. Taken at face value,
+        # such a step clamps ``min(objective) - max(dual)`` to zero and certifies a
+        # wrong answer. So the primal bound comes only from ``_verified_primal``
+        # (a feasible, repaired point), and duals that contradict it are dropped;
+        # see ``_update_incumbent_bounds``. ``duals`` keeps every step's dual so the
+        # best valid one can be re-selected when a lower primal arrives.
         #
         # ``best_primal_subopt`` is the barrier surrogate bound ``m / t`` (B&V
         # 11.3) for the central point that produced ``best_primal``, evaluated at
@@ -834,6 +868,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
         best_primal: _CenteringOutcome | None = None
         best_primal_subopt: float = float("inf")
         best_dual: _CenteringOutcome | None = None
+        duals: list[_CenteringOutcome] = []
         for nit in range(num_steps):
             step_start_time = time.time()
             self.settings.trace.on_centering_start(nit + 1, t)
@@ -884,14 +919,15 @@ class BaseInteriorPointMethodSolver(Optimizer):
             inner_btls_steps.append(result.btls_steps)
             inner_quadratic_from.append(result.quadratic_from)
             best_primal, best_primal_subopt, best_dual = self._update_incumbent_bounds(
-                result, t, best_primal, best_primal_subopt, best_dual
+                result, t, best_primal, best_primal_subopt, duals
             )
             # Record the running-best certificate, not the raw per-step gap. Each
-            # barrier iterate is strictly feasible (its objective is a valid upper
-            # bound on p*) and each multiplier is >= 0 (its dual is a valid lower
-            # bound), so ``min(primal) - max(dual)`` through this step -- floored at
-            # the B&V 11.3 surrogate ``m / t`` -- is the honest gap achieved so far,
-            # monotone non-increasing. The raw per-step gap is non-monotone and
+            # verified primal is a valid upper bound on p* and each valid dual a
+            # lower bound, so ``min(primal) - max(dual)`` through this step --
+            # floored at the B&V 11.3 surrogate ``m / t`` -- is the honest gap
+            # achieved so far. It is non-increasing except when a new, lower primal
+            # exposes the previous best dual as invalid; the gap then grows to what
+            # was honestly certified all along. The raw per-step gap is non-monotone and
             # inflates in the ill-conditioned high-``t`` regime even while the
             # certificate holds, so ``[-1]`` of a raw trace is not a trustworthy
             # convergence signal. This keeps ``duality_gaps`` consistent with the
@@ -905,6 +941,8 @@ class BaseInteriorPointMethodSolver(Optimizer):
                         best_primal_subopt,
                     ),
                 )
+                if best_primal is not None and best_dual is not None
+                else math.inf
             )
 
             # Optimization early-stop: B&V 11.3.1 sizes ``num_steps`` to drive the
@@ -915,17 +953,19 @@ class BaseInteriorPointMethodSolver(Optimizer):
             # inflates (the non-monotone gap). Stop on the honest certificate once
             # it is within ``tolerance``. Phase I has its own feasibility-based
             # early-stop below.
-            if not feasibility_mode:
-                if best_primal is None or best_dual is None:
+            # No verified primal yet (every step so far drifted off A x = b and
+            # could not be repaired): nothing is certified, so keep stepping.
+            if not feasibility_mode and best_primal is not None:
+                if best_dual is None:
                     # Unreachable in practice -- the incumbent-bounds update just
-                    # above sets both from the completed centering ``result``.
-                    # Raise (rather than ``assert``, which ``python -O`` strips)
-                    # so a broken invariant surfaces explicitly instead of a later
-                    # ``NoneType`` attribute error.
+                    # above records the completed step's dual (or a -inf
+                    # placeholder). Raise (rather than ``assert``, which ``python
+                    # -O`` strips) so a broken invariant surfaces explicitly
+                    # instead of a later ``NoneType`` attribute error.
                     raise InteriorPointMethodError(
                         message=(
                             "Interior point method reached the convergence check "
-                            "without recorded primal/dual bounds"
+                            "without a recorded dual bound"
                         ),
                         remaining_steps=num_steps - nit - 1,
                         suboptimality=float("inf"),
@@ -1108,21 +1148,57 @@ class BaseInteriorPointMethodSolver(Optimizer):
         """
         return None
 
+    def _verified_primal(
+        self, result: _CenteringOutcome, t: float
+    ) -> _CenteringOutcome | None:
+        """Return a centering outcome whose objective is a valid upper bound on p*.
+
+        Only a feasible point's objective bounds p* from above. The barrier keeps every
+        iterate strictly inside the inequality constraints, but equality feasibility
+        holds only to the accuracy of the Newton solves, and an iterate that has drifted
+        off A x = b can have an objective below p*. The best-bounds certificate takes
+        its primal bound from this method, never from a raw iterate. The base has no
+        equality constraints, so every outcome is already feasible; solvers that carry
+        A x = b override this to repair and verify.
+
+        Parameters
+        ----------
+         result : _CenteringOutcome
+            A completed centering step.
+         t : float
+            The barrier parameter of that step.
+
+        Returns
+        -------
+         verified : _CenteringOutcome | None
+            ``result``, or a repaired copy, whose solution is feasible; ``None`` when
+            the step offers no valid primal bound.
+
+        """
+        return result
+
     def _update_incumbent_bounds(
         self,
         result: _CenteringOutcome,
         t: float,
         best_primal: "_CenteringOutcome | None",
         best_primal_subopt: float,
-        best_dual: "_CenteringOutcome | None",
-    ) -> "tuple[_CenteringOutcome, float, _CenteringOutcome]":
+        duals: "list[_CenteringOutcome]",
+    ) -> "tuple[_CenteringOutcome | None, float, _CenteringOutcome | None]":
         """Fold a completed centering step into the best primal and dual bounds.
 
-        Keeps the step with the lowest objective value (the best upper bound on p_star)
-        and, independently, the step with the highest dual value (the best lower bound);
-        they may be different steps. A ``nan`` dual value certifies nothing, so it is
-        replaced by -inf before the comparison; left as ``nan``, it would win the first
-        comparison, never be displaced, and make the reported gap read as 0.
+        Keeps the step with the lowest *verified* objective value (the best upper bound
+        on p_star) and, independently, the step with the highest dual value (the best
+        lower bound); they may be different steps. The primal bound comes from
+        ``_verified_primal``, so it is the objective of a feasible point, not of a raw
+        iterate that may have drifted off A x = b.
+
+        Weak duality puts every valid dual at or below every feasible objective. A dual
+        above the best verified objective (beyond rounding) is therefore provably
+        invalid, and it is excluded rather than allowed to clamp the certificate to a
+        zero gap. Because a later, lower primal can expose an earlier dual as invalid,
+        every step's dual is kept in ``duals`` and the best valid one is re-selected on
+        each call. A ``nan`` dual certifies nothing, so it is replaced by -inf.
 
         Parameters
         ----------
@@ -1131,20 +1207,23 @@ class BaseInteriorPointMethodSolver(Optimizer):
          t : float
             The barrier parameter of that step.
          best_primal : _CenteringOutcome | None
-            The incumbent lowest-objective step, or ``None`` before the first step.
+            The incumbent lowest verified objective, or ``None`` before any step
+            produced a verified primal.
          best_primal_subopt : float
             The surrogate gap m / t of ``best_primal``'s step.
-         best_dual : _CenteringOutcome | None
-            The incumbent highest-dual step, or ``None`` before the first step.
+         duals : list[_CenteringOutcome]
+            Every step's dual so far; ``result`` is appended to it.
 
         Returns
         -------
-         best_primal : _CenteringOutcome
-            The updated lowest-objective step.
+         best_primal : _CenteringOutcome | None
+            The updated lowest verified objective, or ``None`` if no step has produced
+            one.
          best_primal_subopt : float
             The surrogate gap m / t of that step, using its own t.
-         best_dual : _CenteringOutcome
-            The updated highest-dual step.
+         best_dual : _CenteringOutcome | None
+            The highest dual consistent with ``best_primal``, or ``None`` when there is
+            none (only before the first step).
 
         """
         step_surrogate = self.num_ineq_constraints / t
@@ -1154,11 +1233,44 @@ class BaseInteriorPointMethodSolver(Optimizer):
         # converged solve.
         if math.isnan(result.dual_value):
             result = replace(result, dual_value=-math.inf)
-        if best_primal is None or result.objective_value < best_primal.objective_value:
-            best_primal = result
+        duals.append(result)
+
+        # Phase I never reports this certificate (it stops on feasibility), so it
+        # skips the repair and keeps the raw iterate.
+        verified = (
+            result
+            if self._feasibility_threshold() is not None
+            else self._verified_primal(result, t)
+        )
+        if verified is not None and (
+            best_primal is None
+            or verified.objective_value < best_primal.objective_value
+        ):
+            best_primal = verified
             best_primal_subopt = step_surrogate
-        if best_dual is None or result.dual_value > best_dual.dual_value:
-            best_dual = result
+
+        valid = duals
+        if best_primal is not None:
+            ceiling = best_primal.objective_value + _weak_duality_slack(
+                best_primal.objective_value
+            )
+            valid = [d for d in duals if d.dual_value <= ceiling]
+            if len(valid) < len(duals):
+                logger.debug(
+                    "Discarding %d dual value(s) above the best verified objective "
+                    "%.12g; weak duality rules them out.",
+                    len(duals) - len(valid),
+                    best_primal.objective_value,
+                )
+        if not valid:
+            # Every dual contradicts the primal: none certifies anything. Keep a -inf
+            # placeholder so the certificate falls back to the surrogate m / t.
+            return (
+                best_primal,
+                best_primal_subopt,
+                replace(result, dual_value=-math.inf),
+            )
+        best_dual = max(valid, key=lambda d: d.dual_value)
         return best_primal, best_primal_subopt, best_dual
 
     def _result_from_best_bounds(
@@ -1236,14 +1348,20 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
         """
         if best_primal is None or best_dual is None:
-            # No centering step ever completed: no certified bound to report.
+            # No certified bound to report: either no centering step completed, or
+            # every completed step drifted off A x = b and could not be repaired.
             # Fall back to the failed step's iterate when there was one, else the
             # ``fallback_iterate`` (the post-Phase-I feasible start) -- friendlier
             # than an empty array for the (likely unreachable) num_steps == 0 case.
+            what = (
+                "before any centering step completed"
+                if best_dual is None
+                else "without a centering step whose iterate satisfies A x = b"
+            )
             raise InteriorPointMethodError(
                 message=(
-                    "Interior point method failed before any centering step "
-                    f"completed{self._cause_suffix(cause)}"
+                    f"Interior point method failed {what}"
+                    f"{self._cause_suffix(cause)}"
                 ),
                 remaining_steps=num_steps - nit - 1,
                 suboptimality=float("inf"),

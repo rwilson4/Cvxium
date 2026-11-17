@@ -998,6 +998,54 @@ class BarrierSolverEqualityInfeasibleX0Test(unittest.TestCase):
         np.testing.assert_allclose(result.solution, np.ones(M), rtol=1e-5, atol=1e-5)
 
 
+class InfeasibleStartNewtonStepTest(unittest.TestCase):
+    """The Newton step corrects an iterate that has drifted off A x = b.
+
+    A feasible-start step satisfies A Δx = 0 only to the accuracy of the saddle
+    solve, so drift accumulates over many Newton steps. Carrying the residual
+    b - A x in the KKT right-hand side (Boyd and Vandenberghe, 2004, section 10.3)
+    makes a unit step land back on the affine set.
+    """
+
+    @staticmethod
+    def _adapter(
+        A: npt.NDArray[np.float64], b: npt.NDArray[np.float64]
+    ) -> _BarrierAdapter:
+        n = A.shape[1]
+        problem = Problem(
+            obj=QuadraticObjective(
+                c=-np.ones(n), hessian_contribution=DiagonalSystem(np.ones(n))
+            ),
+            ineq=[BoundsConstraintLayer(lb=0.0, dimension=n)],
+            eq=EqualityConstraintLayer(A=A, b=b),
+        )
+        return _BarrierAdapter(problem=problem)
+
+    def test_a_unit_step_restores_the_equality(self) -> None:
+        rng = np.random.default_rng(0)
+        A = rng.standard_normal((2, 6))
+        x_feasible = rng.uniform(0.5, 1.5, 6)
+        b = A @ x_feasible
+        adapter = self._adapter(A, b)
+        x = x_feasible + 1e-3 * rng.standard_normal(6)  # drifted, still interior
+        self.assertGreater(float(np.linalg.norm(A @ x - b)), 1e-4)
+
+        delta_x, _ = adapter.calculate_newton_step(x, 1.0)
+
+        np.testing.assert_allclose(A @ (x + delta_x), b, atol=1e-10)
+
+    def test_a_feasible_iterate_takes_the_feasible_start_step(self) -> None:
+        """On A x = b the residual is zero, so the step keeps A Δx = 0."""
+        rng = np.random.default_rng(1)
+        A = rng.standard_normal((2, 6))
+        x = rng.uniform(0.5, 1.5, 6)
+        adapter = self._adapter(A, A @ x)
+
+        delta_x, _ = adapter.calculate_newton_step(x, 1.0)
+
+        np.testing.assert_allclose(A @ delta_x, 0.0, atol=1e-12)
+
+
 class MinimizeLagrangianTest(unittest.TestCase):
     """``_BarrierAdapter._minimize_lagrangian`` mini-Newton over `L(x, lambda)`.
 
