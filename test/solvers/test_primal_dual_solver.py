@@ -1,6 +1,7 @@
 """Test the PrimalDualSolver, including the equality-constrained path."""
 
 import unittest
+from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
@@ -1605,3 +1606,46 @@ class StallWatchTest(unittest.TestCase):
         bare.observe(1e-5, 0, x, x)
 
         assert bare.best_nu is None
+
+
+class IllConditionedKktTest(unittest.TestCase):
+    """The primal-dual method converges on an LP whose KKT system degrades (#22).
+
+    The fixture is a lifted calibration LP captured from PyRake: a linear objective
+    over 121 variables, lower bounds, 15 linear inequality rows and 2 equalities.
+    Near its optimum the KKT saddle solve loses accuracy about 100x per iteration.
+    Without refinement, the direction's error overtook the dual residual at
+    iteration 14, the step collapsed to the line-search floor, and the method
+    crawled until the stall detector fired, at an iteration that depended on the
+    platform's BLAS (22 on Linux, 64 on macOS), ending ACCEPTABLE.
+    """
+
+    @staticmethod
+    def _problem() -> tuple[Problem, npt.NDArray[np.float64]]:
+        path = Path(__file__).parent / "data" / "pd_ill_conditioned_lp.npz"
+        with np.load(path) as d:
+            problem = Problem(
+                obj=LinearObjective(c=d["c"]),
+                ineq=[
+                    BoundsConstraintLayer(lb=d["lb"]),
+                    LinearInequalityConstraintLayer(
+                        A=d["A1"], cl=d["cl1"], cu=d["cu1"]
+                    ),
+                    LinearInequalityConstraintLayer(
+                        A=d["A2"], cl=d["cl2"], cu=d["cu2"]
+                    ),
+                ],
+                eq=EqualityConstraintLayer(A=d["A_eq"], b=d["b_eq"]),
+            )
+            x0 = d["x0"].copy()
+        return problem, x0
+
+    def test_it_converges_rather_than_stalling(self) -> None:
+        problem, x0 = self._problem()
+
+        result = PrimalDualSolver().solve(problem, x0)
+
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
+        self.assertLessEqual(result.n_iterations, 30)
+        # No collapse to the line-search floor on the way in.
+        self.assertGreater(min(result.primal_dual_diagnostics.step_sizes), 1e-2)

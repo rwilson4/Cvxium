@@ -1989,8 +1989,12 @@ class PrimalDualSolver(Solver):
 
         # The equality layer mints the saddle system from the structured Hessian;
         # the non-zero lower RHS ``g_nu`` is passed as the saddle's ``b_bottom``.
+        # Refined, because this system grows ill-conditioned near the optimum (a
+        # linear objective contributes no curvature to H): once the solve's error
+        # exceeds the residual the step is meant to remove, the line search
+        # collapses and the method stalls short of the optimum (issue #22).
         saddle = problem.eq.saddle_system(system)
-        delta_x, delta_nu = saddle.solve(g_x, g_nu)
+        delta_x, delta_nu = saddle.solve_refined(g_x, g_nu)
 
         # Recover Δλ.
         g_delta_x = _PrimalDualKernel.g_times(problem, x, delta_x)

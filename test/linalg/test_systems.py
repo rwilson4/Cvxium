@@ -2689,3 +2689,121 @@ class IsPositiveDefiniteTest(unittest.TestCase):
             scaled_neg.multiply(b), -2.0 * H.multiply(b), rtol=1e-12
         )
         self.assertIs(scaled_neg.definiteness, Definiteness.NEGATIVE_DEFINITE)
+
+
+class _InexactSchurSaddle(SchurComplementSaddleSystem):
+    """A Schur saddle whose solve is off by a relative factor ``eps``, counting calls.
+
+    The error is linear in the right-hand side, like rounding error in a fixed
+    factorization, so each refinement step shrinks it by a factor ``eps``.
+    """
+
+    def __init__(
+        self, hessian: MatrixSystem, A: npt.NDArray[np.float64], eps: float
+    ) -> None:
+        super().__init__(hessian, A)
+        self.eps = eps
+        self.calls = 0
+
+    def solve(
+        self,
+        b_top: npt.NDArray[np.float64],
+        b_bottom: npt.NDArray[np.float64] | None = None,
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        self.calls += 1
+        dx, nu = super().solve(b_top, b_bottom)
+        return (1.0 + self.eps) * dx, (1.0 + self.eps) * nu
+
+
+class SaddleSolveRefinedTest(unittest.TestCase):
+    """``SaddleSystem.solve_refined`` refines only inaccurate solves (issue #22)."""
+
+    @staticmethod
+    def _data(
+        seed: int,
+    ) -> tuple[
+        DiagonalSystem,
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+    ]:
+        rng = np.random.default_rng(seed)
+        M, p = 8, 3
+        H = DiagonalSystem(rng.uniform(0.5, 2.0, M))
+        A = rng.standard_normal((p, M))
+        return H, A, rng.standard_normal(M), rng.standard_normal(p)
+
+    @staticmethod
+    def _relative_residual(
+        saddle: SaddleSystem,
+        dx: npt.NDArray[np.float64],
+        nu: npt.NDArray[np.float64],
+        b_top: npt.NDArray[np.float64],
+        b_bot: npt.NDArray[np.float64],
+    ) -> float:
+        A = saddle.A
+        top = saddle.hessian.multiply(dx) + A.T @ nu - b_top
+        bot = A @ dx - b_bot
+        rhs = np.concatenate([b_top, b_bot])
+        return float(np.linalg.norm(np.concatenate([top, bot])) / np.linalg.norm(rhs))
+
+    def test_an_accurate_solve_is_returned_untouched(self) -> None:
+        H, A, b_top, b_bot = self._data(0)
+        saddle = _InexactSchurSaddle(H, A, eps=0.0)
+
+        dx, nu = saddle.solve_refined(b_top, b_bot)
+
+        self.assertEqual(saddle.calls, 1)
+        expected_dx, expected_nu = SchurComplementSaddleSystem(H, A).solve(b_top, b_bot)
+        np.testing.assert_array_equal(dx, expected_dx)
+        np.testing.assert_array_equal(nu, expected_nu)
+
+    def test_an_inaccurate_solve_is_refined_below_tolerance(self) -> None:
+        H, A, b_top, b_bot = self._data(1)
+        saddle = _InexactSchurSaddle(H, A, eps=1e-3)
+        plain = self._relative_residual(
+            saddle, *saddle.solve(b_top, b_bot), b_top, b_bot
+        )
+        self.assertGreater(plain, 1e-4)
+
+        saddle.calls = 0
+        dx, nu = saddle.solve_refined(b_top, b_bot)
+
+        self.assertLess(self._relative_residual(saddle, dx, nu, b_top, b_bot), 1e-10)
+        self.assertLessEqual(saddle.calls, 4)  # one solve plus at most 3 corrections
+
+    def test_a_correction_that_does_not_help_is_discarded(self) -> None:
+        """Refinement that diverges stops and keeps the original solution."""
+        H, A, b_top, b_bot = self._data(2)
+        saddle = _InexactSchurSaddle(H, A, eps=2.5)
+        first_dx, first_nu = saddle.solve(b_top, b_bot)
+
+        saddle.calls = 0
+        dx, nu = saddle.solve_refined(b_top, b_bot)
+
+        self.assertEqual(saddle.calls, 2)
+        np.testing.assert_array_equal(dx, first_dx)
+        np.testing.assert_array_equal(nu, first_nu)
+
+    def test_a_zero_bottom_block_defaults_like_solve(self) -> None:
+        H, A, b_top, _ = self._data(3)
+        saddle = SchurComplementSaddleSystem(H, A)
+
+        dx, nu = saddle.solve_refined(b_top)
+
+        expected_dx, expected_nu = saddle.solve(b_top)
+        np.testing.assert_allclose(dx, expected_dx, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(nu, expected_nu, rtol=1e-12, atol=1e-14)
+
+    def test_a_sparse_constraint_matrix_is_supported(self) -> None:
+        H, A, b_top, b_bot = self._data(4)
+        saddle = SparseSaddleSystem(H, scipy.sparse.csr_matrix(A))
+
+        dx, nu = saddle.solve_refined(b_top, b_bot)
+
+        self.assertLess(self._relative_residual(saddle, dx, nu, b_top, b_bot), 1e-10)
+
+    def test_a_matrix_right_hand_side_is_rejected(self) -> None:
+        H, A, _, _ = self._data(5)
+        with self.assertRaises(ValueError):
+            SchurComplementSaddleSystem(H, A).solve_refined(np.ones((8, 2)))

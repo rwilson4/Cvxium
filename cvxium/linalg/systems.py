@@ -67,6 +67,14 @@ from ..linalg.numerical_helpers import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+# Iterative refinement of saddle solves (``SaddleSystem.solve_refined``). A
+# well-conditioned interior-point KKT solve lands near 1e-12 relative residual, so
+# 1e-10 leaves it untouched and refines only the solves that are losing accuracy.
+# Two or three corrections recover what a single solve loses on the ill-conditioned
+# systems near the optimum (Cvxium issue #22).
+_SADDLE_REFINE_RTOL: float = 1e-10
+_SADDLE_REFINE_MAX_STEPS: int = 3
+
 
 class IncompatibleStructureError(ValueError):
     """Error raised when two ``MatrixSystem`` shapes cannot be summed structurally.
@@ -2298,6 +2306,106 @@ class SaddleSystem(ABC):
             The number of equality constraints.
 
         """
+
+    @property
+    @abstractmethod
+    def A(self) -> Any:
+        """Return the equality-constraint matrix A.
+
+        Returns
+        -------
+         A : npt.NDArray[np.float64] or scipy sparse matrix
+            The matrix A, of shape (p, M); dense or sparse depending on the subclass.
+
+        """
+
+    def solve_refined(
+        self,
+        b_top: npt.NDArray[np.float64],
+        b_bottom: npt.NDArray[np.float64] | None = None,
+        rtol: float = _SADDLE_REFINE_RTOL,
+        max_steps: int = _SADDLE_REFINE_MAX_STEPS,
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        r"""Solve the saddle-point system, refining the solution while it is inaccurate.
+
+        Solves the same system as ``solve`` and then checks the relative residual
+           ‖K z - rhs‖ / ‖rhs‖,   K = [H A^T; A 0],   z = [delta_x; nu].
+        While it exceeds ``rtol``, solves again for the residual and adds the correction
+        (iterative refinement; Golub and Van Loan, 2013, section 3.5.3), for at most
+        ``max_steps`` corrections. A correction that does not reduce the residual is
+        discarded and refinement stops, since refining a numerically singular system
+        can make things worse.
+
+        Interior-point KKT systems grow ill-conditioned as the iterates approach the
+        boundary, and once the solve's error exceeds the residual the step is meant to
+        remove, no line search can make progress: the step collapses and the method
+        stalls short of the optimum. A well-conditioned solve already meets ``rtol``,
+        so it costs one product with K and nothing more; each correction costs one more
+        ``solve``.
+
+        Parameters
+        ----------
+         b_top : npt.NDArray[np.float64]
+            Top block of the right-hand side, a vector of length M.
+         b_bottom : npt.NDArray[np.float64] | None
+            Bottom block, of length p; ``None`` means zero.
+         rtol : float
+            Relative residual below which the solution is accepted.
+         max_steps : int
+            Maximum number of corrections.
+
+        Returns
+        -------
+         delta_x : npt.NDArray[np.float64]
+            The primal step, the top block of the solution.
+         nu : npt.NDArray[np.float64]
+            The equality multipliers, the bottom block of the solution.
+
+        Raises
+        ------
+         ValueError
+            When ``b_top`` is not a vector.
+         NewtonStepError
+            Propagated from ``solve``.
+
+        References
+        ----------
+        Golub, Gene H. and Van Loan, Charles F., Matrix Computations, 4th edition, Johns
+        Hopkins University Press, 2013.
+
+        """
+        if np.ndim(b_top) != 1:
+            raise ValueError("solve_refined takes a vector right-hand side.")
+        A = self.A
+        hessian = self.hessian
+        b_bot = (
+            np.zeros(self.num_equality_constraints) if b_bottom is None else b_bottom
+        )
+        rhs_norm = math.sqrt(float(np.dot(b_top, b_top)) + float(np.dot(b_bot, b_bot)))
+        delta_x, nu = self.solve(b_top, b_bottom)
+        if rhs_norm == 0.0:
+            return delta_x, nu
+
+        def residual(
+            dx: npt.NDArray[np.float64], v: npt.NDArray[np.float64]
+        ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], float]:
+            r_top = b_top - hessian.multiply(dx) - A.T @ v
+            r_bot = b_bot - A @ dx
+            norm = math.sqrt(float(np.dot(r_top, r_top)) + float(np.dot(r_bot, r_bot)))
+            return r_top, r_bot, norm / rhs_norm
+
+        r_top, r_bot, rel = residual(delta_x, nu)
+        for _ in range(max_steps):
+            if not rel > rtol:  # also stops on nan
+                break
+            c_x, c_nu = self.solve(r_top, r_bot)
+            cand_x, cand_nu = delta_x + c_x, nu + c_nu
+            cand_top, cand_bot, cand_rel = residual(cand_x, cand_nu)
+            if not cand_rel < rel:
+                break
+            delta_x, nu = cand_x, cand_nu
+            r_top, r_bot, rel = cand_top, cand_bot, cand_rel
+        return delta_x, nu
 
     @abstractmethod
     def solve(
