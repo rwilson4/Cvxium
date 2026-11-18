@@ -1649,3 +1649,45 @@ class IllConditionedKktTest(unittest.TestCase):
         self.assertLessEqual(result.n_iterations, 30)
         # No collapse to the line-search floor on the way in.
         self.assertGreater(min(result.primal_dual_diagnostics.step_sizes), 1e-2)
+
+
+class LevenbergDampingRelaxesTest(unittest.TestCase):
+    """Levenberg damping shrinks once damped steps are accepted (issue #23).
+
+    The fixture is a calibration QP captured from PyRake: a squared-L2 objective over
+    1,007 weights, lower bounds, two imbalance bands, and two equalities. Its first
+    step needs Levenberg damping, which rose to 2.4e7 and then settled at 4.7e4. The
+    gain ratio compared each damped step against the reduction an *undamped* step
+    would predict, so it stayed below ``rho_ok`` and the damping never shrank: every
+    step sat at the line-search floor and the solve ran to its 1000-iteration cap.
+    """
+
+    @staticmethod
+    def _problem() -> tuple[Problem, npt.NDArray[np.float64]]:
+        path = Path(__file__).parent / "data" / "pd_stuck_damping.npz"
+        with np.load(path) as d:
+            M = d["v"].shape[0]
+            # PyRake's SquaredL2 distance, ||w - v||^2 / M, up to a constant.
+            objective = QuadraticObjective(
+                c=-(2.0 / M) * d["v"],
+                hessian_contribution=DiagonalSystem(np.full(M, 2.0 / M)),
+            )
+            problem = Problem(
+                obj=objective,
+                ineq=[
+                    BoundsConstraintLayer(lb=d["lb"]),
+                    ImbalanceConstraintLayer(B=d["B1"], c=d["c1"], psi=d["psi1"]),
+                    ImbalanceConstraintLayer(B=d["B2"], c=d["c2"], psi=d["psi2"]),
+                ],
+                eq=EqualityConstraintLayer(A=d["A_eq"], b=d["b_eq"]),
+            )
+            x0 = d["x0"].copy()
+        return problem, x0
+
+    def test_the_solve_converges_rather_than_running_to_the_cap(self) -> None:
+        problem, x0 = self._problem()
+
+        result = PrimalDualSolver().solve(problem, x0)
+
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
+        self.assertLessEqual(result.n_iterations, 100)

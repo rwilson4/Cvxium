@@ -39,6 +39,7 @@ Boyd, Stephen and Vandenberghe, Lieven, Convex Optimization, Cambridge Universit
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
@@ -2375,7 +2376,21 @@ class PrimalDualSolver(Solver):
                 b_eq,
                 t,
             )
-            predicted = step * r_norm0
+            # Gain ratio: actual reduction over the reduction the *damped* linear
+            # model predicts. The damped step solves (H + δI) Δx + G^T Δλ + A^T Δν =
+            # -r_dual, so its linearized dual residual after a step s is
+            #    (1 - s) r_dual - s δ Δx,
+            # while the centering and primal residuals shrink by (1 - s) exactly.
+            # Dividing by s ‖r‖ instead -- the reduction of the *undamped* step --
+            # makes ρ small whenever δ is large, so the damping never shrinks: in
+            # one observed solve it held at 4.7e4 for 990 iterations, every step
+            # at the line-search floor (issue #23).
+            r_dual_model = (1.0 - step) * r_dual - (step * damping) * delta_x
+            other_sq = float(np.dot(r_cent, r_cent) + np.dot(r_pri, r_pri))
+            r_norm_model = math.sqrt(
+                float(np.dot(r_dual_model, r_dual_model)) + (1.0 - step) ** 2 * other_sq
+            )
+            predicted = r_norm0 - r_norm_model
             rho = (r_norm0 - r_norm_new) / predicted if predicted > 0.0 else 0.0
             next_damping = self._relax_damping(damping, rho, x_scale, lm)
             return delta_x, delta_lmbda, delta_nu, step, next_damping
