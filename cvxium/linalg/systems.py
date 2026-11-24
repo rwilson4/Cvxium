@@ -1263,7 +1263,11 @@ class LowRankUpdatedSystem(MatrixSystem):
     Solves through the Woodbury identity on top of the base system's own ``solve``: a
     one-time preparation solves the base against the p columns of kappa and factors the
     p × p capacitance matrix, after which each right-hand side costs one base solve plus
-    O(n p). A multiply is the base multiply plus O(n p). The preparation is cached, so
+    O(n p), or two when the update dominates the base, as near the boundary of an
+    interior-point method: there the one-pass Woodbury formula cancels catastrophically,
+    and a second pass on the data with the update's share removed restores the accuracy
+    (see ``_apply_rank_p_update``). A multiply is the base multiply plus O(n p). The
+    preparation is cached, so
     the solves of one Newton step share one capacitance factorization (and, through the
     base's own cache, one base factorization).
 

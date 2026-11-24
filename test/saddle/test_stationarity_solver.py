@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
@@ -62,7 +63,7 @@ from cvxium.solvers.settings import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from cvxium.problems.constraint_layers import (
         ConstraintLayer,
@@ -144,6 +145,64 @@ def _dense_equality_kkt(
     rhs = np.concatenate([-a, -b, b_eq])
     sol = np.linalg.solve(kkt, rhs)
     return sol[:n], sol[n : n + m]
+
+
+def _hugging_problem(y_domain: list[ConstraintLayer]) -> StationarityProblem:
+    """A saddle whose x-domain has a floor hyperplane 1 above the saddle point.
+
+    The x-domain is a box 20 wide around the unconstrained saddle point x* plus the
+    floor mean(x) ≥ mean(x*) + 1, so ``_hugging_seed`` can start a hair above the
+    floor. The y-domain is the caller's.
+    """
+    obj = _quadratic(n=6, m=2, seed=5)
+    x_star, _ = _dense_saddle(obj)
+    weights = np.full(6, 1.0 / 6.0)
+    return StationarityProblem(
+        objective=obj,
+        x_domain=[
+            BoundsConstraintLayer(lb=x_star - 20.0, ub=x_star + 20.0),
+            LinearInequalityConstraintLayer(
+                A=weights.reshape(1, -1),
+                cl=np.array([float(weights @ x_star) + 1.0]),
+                cu=None,
+            ),
+        ],
+        y_domain=y_domain,
+    )
+
+
+def _hugging_seed(problem: StationarityProblem) -> npt.NDArray[np.float64]:
+    """A strictly interior x start that clears ``_hugging_problem``'s floor by 1e-12."""
+    x_star, _ = _dense_saddle(cast("QuadraticSaddleObjective", problem.objective))
+    return x_star + (1.0 + 1e-12) * np.ones(6)
+
+
+@contextmanager
+def _starve_first_run(solver: PrimalDualStationaritySolver) -> Iterator[None]:
+    """Make the solver's first ``_dispatch`` stop before its first iteration.
+
+    The run then fails without improving on its start (``_made_no_progress``), on
+    every platform, which arms the start-point retry. Later dispatches, and the
+    retry's Phase I, run with the solver's own settings.
+    """
+    real = solver._dispatch
+    inner = replace(solver.settings.inner, max_iterations=0)
+    starved = PrimalDualStationaritySolver(
+        settings=replace(solver.settings, inner=inner)
+    )
+    calls = 0
+
+    def dispatch(
+        problem: StationarityProblem,
+        x: npt.NDArray[np.float64],
+        y: npt.NDArray[np.float64],
+    ) -> TwoBlockSolveResult:
+        nonlocal calls
+        calls += 1
+        return (starved._dispatch if calls == 1 else real)(problem, x, y)
+
+    with patch.object(solver, "_dispatch", side_effect=dispatch):
+        yield
 
 
 def _central_path_duals(
@@ -1440,44 +1499,54 @@ class PrimalDualStationaritySolverTest(unittest.TestCase):
         done = next(r for r in trace.records() if r["event"] == "pd_done")
         self.assertIn("1-iteration budget", done["reason"])
 
-    def test_seed_hugging_a_face_is_recentered_and_retried(self) -> None:
-        """A strictly-interior seed that leaves no room to step is re-derived.
+    def test_seed_hugging_a_face_converges_without_a_retry(self) -> None:
+        """A strictly-interior seed that clears a face by 1e-12 is usable as given.
 
-        ``_resolve_block`` accepts any start with every ``f < 0``, and that test is
-        too weak to guarantee a usable start: this seed clears the floor hyperplane
-        by 1e-12 against box faces 20 wide, so the run gives up without ever
-        improving on the seed. Where it gives up is rounding noise: the first dual
-        step on the hugging row is a near-cancellation divided by the 1e-12 slack,
-        so on some CPUs the first step is capped to nothing (iteration 0) and on
-        others it overshoots and stalls one iteration later. Either way ``solve``
-        throws the seed away for the block's Phase I point and runs again. The
-        trace shows both runs -- the first one's honest diagnosis, then the one
-        that converged.
+        The seed clears the floor hyperplane by 1e-12 against box faces 20 wide. The
+        first dual step on the hugging row divides by that slack, and the coupled
+        Hessian's low-rank term then outweighs its base by about 1e12. A one-pass
+        Woodbury solve lost the step to cancellation there, so the run gave up at
+        iteration 1 or 2, depending on the CPU's rounding, and ``solve`` fell back to
+        a Phase I point (issue #24). With the two-pass solve the step is accurate,
+        and the run converges from the seed on its first attempt.
         """
-        obj = _quadratic(n=6, m=2, seed=5)
-        x_star, _ = _dense_saddle(obj)
-        weights = np.full(6, 1.0 / 6.0)
-        problem = StationarityProblem(
-            objective=obj,
-            x_domain=[
-                BoundsConstraintLayer(lb=x_star - 20.0, ub=x_star + 20.0),
-                LinearInequalityConstraintLayer(
-                    A=weights.reshape(1, -1),
-                    cl=np.array([float(weights @ x_star) + 1.0]),
-                    cu=None,
-                ),
-            ],
-            y_domain=[BoundsConstraintLayer(lb=-np.ones(2), ub=np.ones(2))],
+        problem = _hugging_problem(
+            [BoundsConstraintLayer(lb=-np.ones(2), ub=np.ones(2))]
         )
         trace = ListTrace()
         result = PrimalDualStationaritySolver(
             settings=OptimizationSettings(trace=trace)
-        ).solve(problem, x0=x_star + (1.0 + 1e-12) * np.ones(6))
+        ).solve(problem, x0=_hugging_seed(problem))
+        self.assertEqual(result.status, SolveStatus.OPTIMAL)
+        self.assertEqual(
+            len([r for r in trace.records() if r["event"] == "pd_start"]), 1
+        )
+
+    def test_a_seed_that_makes_no_progress_is_recentered_and_retried(self) -> None:
+        """A caller's start whose run never improves on it is re-derived.
+
+        ``_resolve_block`` accepts any start with every ``f < 0``, and that test is
+        too weak to guarantee a usable start. When a run from such a start gives up
+        without improving on it, ``solve`` throws the seed away for the block's
+        Phase I point and runs again. The first run here is starved of iterations
+        (``_starve_first_run``), so it fails that way on every platform. The trace
+        shows both runs: the first one's honest diagnosis, then the one that
+        converged.
+        """
+        problem = _hugging_problem(
+            [BoundsConstraintLayer(lb=-np.ones(2), ub=np.ones(2))]
+        )
+        trace = ListTrace()
+        solver = PrimalDualStationaritySolver(
+            settings=OptimizationSettings(trace=trace)
+        )
+        with _starve_first_run(solver):
+            result = solver.solve(problem, x0=_hugging_seed(problem))
         self.assertEqual(result.status, SolveStatus.OPTIMAL)
         starts = [r for r in trace.records() if r["event"] == "pd_start"]
         first, second = [r for r in trace.records() if r["event"] == "pd_done"]
         self.assertEqual(len(starts), 2)
-        self.assertIn("strictly-feasible interior", first["reason"])
+        self.assertIn("0-iteration budget", first["reason"])
         self.assertGreater(second["nits"], 1)
 
     def test_made_no_progress_compares_the_best_score_with_the_start(self) -> None:
@@ -1634,28 +1703,14 @@ class PrimalDualStationaritySolverTest(unittest.TestCase):
         chained as context. The test below covers the sibling layer that does
         supply the hook, and so is rescued rather than re-raised.
         """
-        obj = _quadratic(n=6, m=2, seed=5)
-        x_star, _ = _dense_saddle(obj)
-        weights = np.full(6, 1.0 / 6.0)
-        problem = StationarityProblem(
-            objective=obj,
-            x_domain=[
-                BoundsConstraintLayer(lb=x_star - 20.0, ub=x_star + 20.0),
-                LinearInequalityConstraintLayer(
-                    A=weights.reshape(1, -1),
-                    cl=np.array([float(weights @ x_star) + 1.0]),
-                    cu=None,
-                ),
-            ],
-            y_domain=[SquaredNormConstraintLayer(dimension=2, phi=1.0)],
-        )
-        with self.assertRaises(StationarityConvergenceError) as caught:
-            PrimalDualStationaritySolver().solve(
-                problem,
-                x0=x_star + (1.0 + 1e-12) * np.ones(6),
-                y0=np.zeros(2),
-            )
-        self.assertIn("strictly-feasible interior", caught.exception.result.message)
+        problem = _hugging_problem([SquaredNormConstraintLayer(dimension=2, phi=1.0)])
+        solver = PrimalDualStationaritySolver()
+        with (
+            _starve_first_run(solver),
+            self.assertRaises(StationarityConvergenceError) as caught,
+        ):
+            solver.solve(problem, x0=_hugging_seed(problem), y0=np.zeros(2))
+        self.assertIn("0-iteration budget", caught.exception.result.message)
         self.assertIsInstance(caught.exception.__context__, ValueError)
 
     def test_recentering_failure_outside_the_optimization_family_is_absorbed(
@@ -1669,24 +1724,12 @@ class PrimalDualStationaritySolverTest(unittest.TestCase):
         the caller the recovery's diagnosis in place of their own -- exactly
         what this branch exists to prevent.
         """
-        obj = _quadratic(n=6, m=2, seed=5)
-        x_star, _ = _dense_saddle(obj)
-        weights = np.full(6, 1.0 / 6.0)
-        problem = StationarityProblem(
-            objective=obj,
-            x_domain=[
-                BoundsConstraintLayer(lb=x_star - 20.0, ub=x_star + 20.0),
-                LinearInequalityConstraintLayer(
-                    A=weights.reshape(1, -1),
-                    cl=np.array([float(weights @ x_star) + 1.0]),
-                    cu=None,
-                ),
-            ],
-            y_domain=[BoundsConstraintLayer(lb=-np.ones(2), ub=np.ones(2))],
+        problem = _hugging_problem(
+            [BoundsConstraintLayer(lb=-np.ones(2), ub=np.ones(2))]
         )
-        # This seed arms the retry (see the recentering test above); the patch
-        # then makes the retry fail on a non-OptimizationError.
-        x0 = x_star + (1.0 + 1e-12) * np.ones(6)
+        # A starved first run arms the retry (see the recentering test above); the
+        # patch then makes the retry fail on a non-OptimizationError.
+        x0 = _hugging_seed(problem)
         for error in (
             ProblemInfeasibleError("no interior point"),
             NewtonStepError("singular KKT system"),
@@ -1696,13 +1739,12 @@ class PrimalDualStationaritySolverTest(unittest.TestCase):
             with self.subTest(error=type(error).__name__):
                 solver = PrimalDualStationaritySolver()
                 with (
+                    _starve_first_run(solver),
                     patch.object(solver, "_centered_start", side_effect=error),
                     self.assertRaises(StationarityConvergenceError) as caught,
                 ):
                     solver.solve(problem, x0=x0)
-                self.assertIn(
-                    "strictly-feasible interior", caught.exception.result.message
-                )
+                self.assertIn("0-iteration budget", caught.exception.result.message)
                 self.assertIs(caught.exception.__context__, error)
 
     def test_recentering_rescues_a_lone_ellipsoid_y_block(self) -> None:
@@ -1716,29 +1758,15 @@ class PrimalDualStationaritySolverTest(unittest.TestCase):
         centered point to fall back on and the rescue reaches the block that
         motivated it -- not just the polyhedral x side.
         """
-        obj = _quadratic(n=6, m=2, seed=5)
-        x_star, _ = _dense_saddle(obj)
-        weights = np.full(6, 1.0 / 6.0)
-        problem = StationarityProblem(
-            objective=obj,
-            x_domain=[
-                BoundsConstraintLayer(lb=x_star - 20.0, ub=x_star + 20.0),
-                LinearInequalityConstraintLayer(
-                    A=weights.reshape(1, -1),
-                    cl=np.array([float(weights @ x_star) + 1.0]),
-                    cu=None,
-                ),
-            ],
-            y_domain=[NormConstraintLayer(B=np.eye(2), c=np.zeros(2), phi=1.0)],
+        problem = _hugging_problem(
+            [NormConstraintLayer(B=np.eye(2), c=np.zeros(2), phi=1.0)]
         )
         trace = ListTrace()
-        result = PrimalDualStationaritySolver(
+        solver = PrimalDualStationaritySolver(
             settings=OptimizationSettings(trace=trace)
-        ).solve(
-            problem,
-            x0=x_star + (1.0 + 1e-12) * np.ones(6),
-            y0=np.zeros(2),
         )
+        with _starve_first_run(solver):
+            result = solver.solve(problem, x0=_hugging_seed(problem), y0=np.zeros(2))
         self.assertEqual(result.status, SolveStatus.OPTIMAL)
         self.assertEqual(
             len([r for r in trace.records() if r["event"] == "pd_start"]), 2

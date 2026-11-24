@@ -34,6 +34,14 @@ from scipy.linalg import lapack
 
 from ..exceptions import NewtonStepError
 
+_EPS = float(np.finfo(np.float64).eps)
+
+# A pure update whose curvature, relative to the base along its own columns, sums to at
+# most this much skips the second pass of a rank-one or rank-p solve: the one-pass
+# formula then loses at most about log10(1 + _ONE_PASS_DOMINANCE) digits (see
+# ``_apply_rank_p_update``).
+_ONE_PASS_DOMINANCE = 1e3
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
@@ -300,11 +308,15 @@ def solve_rank_one_update(
       and G > 0 means H is indefinite (the downdate is too large).
     The solve raises ``NewtonStepError`` unless H is positive definite.
 
-    For a vector b, the cost is 2t + 6M flops, where t is the cost of one solve with A:
+    For a vector b, the cost is 3t + 10M flops, where t is the cost of one solve with A:
     1. Solve A ξ = κ (t flops).
     2. Form G = 1 / d + κ^T ξ and its reciprocal (2M flops).
-    3. Solve A x' = b (t flops).
-    4. Compute x = x' - ((κ^T x') / G) ξ (4M flops).
+    3. Solve A x' = b and form the multiplier u = (κ^T x') / G (t + 2M flops).
+    4. Solve A x_r = b - u κ (t + 2M flops).
+    5. Compute x = x_r + ((u / d - κ^T x_r) / G) ξ (4M flops).
+    Steps 3 to 5 are the two passes of ``_apply_rank_one_update``. The second keeps
+    the solve accurate when d κ κ^T dominates A, where the one-pass formula
+    x' - ((κ^T x') / G) ξ cancels catastrophically.
 
     """
     prep = _prepare_rank_one_update(kappa, A_solve, d=d, **kwargs)
@@ -327,12 +339,20 @@ class _RankOneUpdatePrep:
         The solve ξ = A^{-1} κ.
      den : float
         Reciprocal 1 / G of the Sherman-Morrison scalar G = 1 / d + κ^T ξ.
+     inv_d : float
+        The reciprocal 1 / d of the weight (1 when d is ``None``), used by the second
+        pass of ``_apply_rank_one_update``.
+     two_pass : bool
+        Whether ``_apply_rank_one_update`` runs its second pass: False only for an
+        update (d > 0) with d κ^T ξ ≤ ``_ONE_PASS_DOMINANCE``.
 
     """
 
     kappa: npt.NDArray[np.float64]
     xi: npt.NDArray[np.float64]
     den: float
+    inv_d: float
+    two_pass: bool
 
 
 def _prepare_rank_one_update(
@@ -363,7 +383,7 @@ def _prepare_rank_one_update(
     Returns
     -------
      prep : _RankOneUpdatePrep
-        The cached κ, ξ = A^{-1} κ, and 1 / G.
+        The cached κ, ξ = A^{-1} κ, 1 / G, and 1 / d.
 
     Raises
     ------
@@ -401,7 +421,12 @@ def _prepare_rank_one_update(
     if d is not None and d < 0 and G >= 0:
         raise NewtonStepError("H is not positive definite")
 
-    return _RankOneUpdatePrep(kappa=kappa, xi=xi, den=1.0 / G)
+    # d κ^T ξ is the update's curvature along κ relative to the base's; see
+    # ``_apply_rank_p_update`` for why a modest one makes the second pass unnecessary.
+    two_pass = schur_diag < 0 or kappa_dot_xi > _ONE_PASS_DOMINANCE * schur_diag
+    return _RankOneUpdatePrep(
+        kappa=kappa, xi=xi, den=1.0 / G, inv_d=schur_diag, two_pass=two_pass
+    )
 
 
 def _apply_rank_one_update(
@@ -412,10 +437,17 @@ def _apply_rank_one_update(
 ) -> npt.NDArray[np.float64]:
     """Solve a rank-one-updated system from cached Sherman-Morrison data.
 
-    Computes
-       x = x' - ((κ^T x') / G) ξ,   x' = A^{-1} b,
-    using the κ, ξ, and 1 / G cached in ``prep``, so each right-hand side costs one
-    solve with A plus O(M) work per column.
+    Solves H x = b, H = A + d κ κ^T, in two passes, using the κ, ξ = A^{-1} κ, and
+    1 / G cached in ``prep``. The first pass is the Sherman-Morrison formula, kept only
+    for its multiplier
+       u = (κ^T x') / G = d κ^T x,   x' = A^{-1} b.
+    The second strips the update's share κ u of b from the data and solves for the
+    rest:
+       b_r = b - u κ,   x_r = A^{-1} b_r,   x = x_r + (ξ / G) (u / d - κ^T x_r).
+    Each right-hand side costs two solves with A plus O(M) work per column, or one when
+    the update is modest (``prep.two_pass`` is False). The second pass is an identity
+    in u, so u need not be exact for x to be; see ``_apply_rank_p_update`` for why it
+    restores the accuracy the first pass loses when d dominates A.
 
     Parameters
     ----------
@@ -459,9 +491,20 @@ def _apply_rank_one_update(
             f"A_solve(b) shape {x_prime.shape}. A_solve must preserve the "
             "shape of its input."
         )
+    # The first pass gives the multiplier u = d κ^T x. Unless the update is modest
+    # (``prep.two_pass``), its x is discarded, and the second pass removes the update's
+    # share u κ from b before A^{-1} touches it.
     if b.ndim == 1:
-        return x_prime - (np.dot(kappa, x_prime) * prep.den) * prep.xi
-    return x_prime - prep.den * np.outer(prep.xi, kappa.T @ x_prime)
+        u = np.dot(kappa, x_prime) * prep.den
+        if not prep.two_pass:
+            return x_prime - u * prep.xi
+        x_r = A_solve(b - u * kappa, **kwargs)
+        return x_r + (prep.den * (u * prep.inv_d - np.dot(kappa, x_r))) * prep.xi
+    u_row = (kappa.T @ x_prime) * prep.den
+    if not prep.two_pass:
+        return x_prime - np.outer(prep.xi, u_row)
+    x_r = A_solve(b - np.outer(kappa, u_row), **kwargs)
+    return x_r + np.outer(prep.xi, prep.den * (u_row * prep.inv_d - kappa.T @ x_r))
 
 
 def multiply_rank_p_update(
@@ -616,7 +659,7 @@ def solve_rank_p_update(
       factored by LU.
 
     With q right-hand sides and t the cost of one solve with A, the cost is
-       (p + q) t + 2Mp (p + 2q)
+       (p + 2q) t + 2Mp (p + 4q)
     plus O(p^3 + p^2 q) for G, which is negligible when p, q ≪ M:
     1. Solve A ξ = κ, with ξ of shape (M, p) (p t).
     2. Form G = D^{-1} + κ^T ξ (2Mp^2).
@@ -624,7 +667,11 @@ def solve_rank_p_update(
     4. Solve A x' = b, with x' of shape (M, q) (q t).
     5. Compute z = κ^T x', of shape (p, q) (2Mpq).
     6. Solve G y = z (O(p^2 q)).
-    7. Compute x = x' - ξ y (2Mpq).
+    7. Solve A x_r = b - κ y (q t + 2Mpq).
+    8. Compute x = x_r + ξ G^{-1} (Σ y - κ^T x_r), Σ = diag(sign(d)) (4Mpq + O(p^2 q)).
+    Steps 4 to 8 are the two passes of ``_apply_rank_p_update`` (in equilibrated form).
+    The one-pass formula x = x' - ξ y is exact too, but cancels catastrophically when
+    κ D κ^T dominates A; the second pass removes that error.
 
     """
     if b.ndim not in (1, 2):
@@ -654,12 +701,20 @@ class _RankPUpdatePrep:
         The equilibrated solve ξ_eq = A^{-1} κ_eq, of shape (M, p).
      woodbury : _WoodburyFactor
         Factorization of the equilibrated Woodbury matrix.
+     sign_d : npt.NDArray[np.float64] | None
+        The signs σ of d, of length p, or ``None`` for unit weights (all positive), used
+        by the second pass of ``_apply_rank_p_update``.
+     two_pass : bool
+        Whether ``_apply_rank_p_update`` runs its second pass: False only for a pure
+        update (every d > 0) with tr(κ_eq^T ξ_eq) ≤ ``_ONE_PASS_DOMINANCE``.
 
     """
 
     kappa_eq: npt.NDArray[np.float64]
     xi_eq: npt.NDArray[np.float64]
     woodbury: _WoodburyFactor
+    sign_d: npt.NDArray[np.float64] | None
+    two_pass: bool
 
 
 def _prepare_rank_p_update(
@@ -693,7 +748,8 @@ def _prepare_rank_p_update(
     Returns
     -------
      prep : _RankPUpdatePrep
-        The cached κ_eq, ξ_eq = A^{-1} κ_eq, and the factored Woodbury matrix.
+        The cached κ_eq, ξ_eq = A^{-1} κ_eq, the factored Woodbury matrix, and the
+        signs of d.
 
     Raises
     ------
@@ -773,7 +829,18 @@ def _prepare_rank_p_update(
     G = np.asarray(0.5 * (G + G.T))
 
     woodbury = _factor_woodbury(G, sign_d, check_inertia=check_inertia)
-    return _RankPUpdatePrep(kappa_eq=kappa_eq, xi_eq=xi_eq, woodbury=woodbury)
+    # tr(κ_eq^T ξ_eq) bounds the update's curvature relative to the base's; see
+    # ``_apply_rank_p_update`` for why a modest one makes the second pass unnecessary.
+    pure_update = sign_d is None or bool(np.all(sign_d > 0))
+    dominance = float(np.trace(G)) - (p if pure_update else 0.0)
+    two_pass = not pure_update or dominance > _ONE_PASS_DOMINANCE
+    return _RankPUpdatePrep(
+        kappa_eq=kappa_eq,
+        xi_eq=xi_eq,
+        woodbury=woodbury,
+        sign_d=sign_d,
+        two_pass=two_pass,
+    )
 
 
 def _apply_rank_p_update(
@@ -784,10 +851,15 @@ def _apply_rank_p_update(
 ) -> npt.NDArray[np.float64]:
     """Solve a rank-p-updated system from cached Woodbury data.
 
-    Computes
-       x = x' - ξ_eq G_eq^{-1} κ_eq^T x',   x' = A^{-1} b,
-    using the data cached in ``prep``, so each batch of q right-hand sides costs q
-    solves with A plus O(M p q + p^2 q) work.
+    Solves H x = b, H = A + κ_eq Σ κ_eq^T with Σ = diag(sign(d)), in two passes, using
+    the data cached in ``prep``. The first pass is the Woodbury formula, kept only for
+    its multipliers
+       y = G_eq^{-1} κ_eq^T x' = Σ κ_eq^T x,   x' = A^{-1} b.
+    The second strips the update's share κ_eq y of b from the data and solves for the
+    rest:
+       b_r = b - κ_eq y,   x_r = A^{-1} b_r,   x = x_r + ξ_eq G_eq^{-1} (Σ y - κ_eq^T x_r).
+    Each batch of q right-hand sides costs 2q solves with A plus O(M p q + p^2 q) work,
+    or q solves when the update is modest (``prep.two_pass`` is False; see Notes).
 
     Parameters
     ----------
@@ -816,6 +888,36 @@ def _apply_rank_p_update(
      NewtonStepError
         Propagated from ``_apply_woodbury`` when the LU solve fails.
 
+    Notes
+    -----
+    The one-pass formula x = x' - ξ_eq y is exact, but it fails when the update
+    dominates A, as it does near the boundary of an interior-point method, where
+    d_i = λ_i / (-f_i) reaches 1e16 against a base of order one. There b is mostly
+    the update's share, x' = A^{-1} b is many orders of magnitude larger than x, and
+    the subtraction leaves x' 's rounding error, of order ε ‖x'‖, in x. That error
+    points in every direction, including the stiff ones, where H magnifies it: in the
+    local norm ‖e‖_H = (e^T H e)^{1/2}, which is what Newton's method needs, the
+    computed step can be off by more than its own size.
+    The second pass rests on two facts. First, for any y,
+       H^{-1} b = H^{-1} b_r + H^{-1} κ_eq y,   H^{-1} κ_eq = ξ_eq G_eq^{-1} Σ,
+    which, with the Woodbury formula for H^{-1} b_r, is the expression above. It is
+    an identity in y, so y need not be exact for x to be. Second, y survives where
+    x does not: G_eq is large in the stiff directions, so G_eq^{-1} damps the rounding
+    error in κ_eq^T x' instead of passing it on. Since b = A x + κ_eq y, subtracting
+    κ_eq y leaves b_r ≈ A x, and the second solve with A has nothing large left to
+    cancel. The
+    subtraction itself happens on the data, where its rounding error is of order
+    ε ‖b‖ and ‖H^{-1}‖^{1/2} ε ‖b‖ in the local norm, which is negligible.
+    Iterative refinement, by contrast, forms the residual b - H x from the inaccurate
+    x, and converges only when cond(H) ε < 1. No dense matrix is formed.
+    The second pass costs a second solve with A, so it is skipped when the update is
+    modest. For a pure update (Σ = I), H ≤ (1 + ‖C‖) A in the A-norm sense, with
+    C = κ_eq^T ξ_eq, so the one-pass error in the local norm is at most about
+    (1 + ‖C‖) times the base solve's own. ‖C‖ ≤ tr C, which the preparation has at
+    hand, so a pure update with tr C ≤ ``_ONE_PASS_DOMINANCE`` (10^3) takes one pass,
+    losing at most three digits. A downdate always takes two: there the bound fails,
+    and H can be far less curved than A.
+
     """
     if b.ndim not in (1, 2):
         raise ValueError("b must be either a 1D or 2D NumPy array.")
@@ -831,10 +933,40 @@ def _apply_rank_p_update(
             f"A_solve(b) shape {x_prime.shape}. A_solve must preserve the "
             "shape of its input (handle both 1D vectors and 2D matrices)."
         )
-    z = prep.kappa_eq.T @ x_prime  # p-by-q
+    # First pass: the multipliers y = Σ κ_eq^T x. Unless the update is modest
+    # (``prep.two_pass``), its x = x' - ξ_eq y is discarded.
+    y = _apply_woodbury(prep.woodbury, prep.kappa_eq.T @ x_prime)  # p-by-q
+    if not prep.two_pass:
+        return x_prime - prep.xi_eq @ y
 
-    y = _apply_woodbury(prep.woodbury, z)
-    return x_prime - prep.xi_eq @ y
+    # Second pass: strip the update's share κ_eq y from the data, then solve for the
+    # rest. A sign vector applied to a p-by-q block broadcasts down its columns.
+    x_r = A_solve(b - prep.kappa_eq @ y, **kwargs)
+    sign_y = y if prep.sign_d is None else _scale_rows(prep.sign_d, y)
+    z = sign_y - prep.kappa_eq.T @ x_r
+    return x_r + prep.xi_eq @ _apply_woodbury(prep.woodbury, z)
+
+
+def _scale_rows(
+    s: npt.NDArray[np.float64],
+    y: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    """Multiply the rows of a vector or matrix by the entries of s.
+
+    Parameters
+    ----------
+     s : npt.NDArray[np.float64]
+        Row scales, of length p.
+     y : npt.NDArray[np.float64]
+        A vector of length p, or a matrix of shape (p, q).
+
+    Returns
+    -------
+     scaled : npt.NDArray[np.float64]
+        diag(s) y, of the same shape as ``y``.
+
+    """
+    return s * y if y.ndim == 1 else s[:, np.newaxis] * y
 
 
 def _diagnose_nonfinite(
@@ -1586,8 +1718,8 @@ def solve_arrow_sparsity_pattern(
     ------
      NewtonStepError
         When some η_i ≤ 0 (checked first, before the shapes), or when the Schur residual
-        ψ^2 (see Notes) is not positive to within a relative tolerance of 10^-12, so H
-        is not positive definite.
+        ψ^2 (see Notes) does not exceed the rounding error of its own evaluation,
+        4 ε (θ + ζ^T diag(η)^{-1} ζ), so H is not numerically positive definite.
      ValueError
         When ``eta`` and ``zeta`` differ in shape, ``b`` does not have M + 1 rows, or
         ``b`` is not 1D or 2D.
@@ -1613,6 +1745,13 @@ def solve_arrow_sparsity_pattern(
     multiplications, M additions, and one division; and x1 takes M divisions, M
     multiplications, and M additions. In total, for a vector b, that is 2M + 1
     divisions, 3M multiplications, and 3M additions, or 8M + 1 flops.
+    The guard on ψ^2 is the rounding error of its evaluation. Each term ζ_i^2 / η_i
+    carries a relative error of at most 2u (u = ε / 2, the unit roundoff), the
+    compensated sum adds u, and the final subtraction u |ψ^2|, so the computed ψ^2 is
+    within 4u (θ + ζ^T diag(η)^{-1} ζ) of the exact one. A guard any wider rejects
+    Hessians that are positive definite and solved accurately: near the end of a
+    slack-form Phase I, where θ and the inner product both grow like 1 / c^2, ψ^2 sits
+    around 10^-12 θ and is still known to several digits.
 
     """
     if not np.all(eta > 0):
@@ -1647,8 +1786,9 @@ def solve_arrow_sparsity_pattern(
     psi_squared = theta - psi_dot
     # Relative guard: a residual that is positive but smaller than the rounding noise of
     # the cancellation is numerically indistinguishable from a singular Hessian — reject
-    # it rather than dividing by it later.
-    tol = 1e-12 * (abs(theta) + abs(psi_dot))
+    # it rather than dividing by it later. The noise is at most 4u (θ + ψ_dot) with
+    # u = ε / 2 (see Notes), so 4ε leaves a factor of two to spare.
+    tol = 4.0 * _EPS * (abs(theta) + abs(psi_dot))
     if psi_squared <= tol:
         raise NewtonStepError("Hessian is not strictly positive definite.")
 
@@ -2397,7 +2537,17 @@ def solve_kkt_system(
        fallback (see ``_solve_schur_complement``).
     4. Solve H Δx = g - A^T ν: O(p M) time to form the right-hand side and O(M) for the
        solve.
+    5. Correct for the error in ν: solve (-S) δν = A Δx - g_bot with the factorization
+       of step 3, and return Δx - B δν and ν + δν, in O(p M) time.
     In total that is O(p^2 M + p^3), dominated by forming S when p ≤ M.
+    Step 5 matters when H is weak in directions A pins down, as near the end of a
+    barrier solve with a linear objective. There H^{-1} g is many orders of magnitude
+    larger than Δx, so the relative error in ν that steps 1 to 3 leave, though tiny,
+    becomes an error H^{-1} A^T δν in Δx larger than Δx itself. Step 4 subtracts A^T ν
+    from the data, so its right-hand side has nothing large left to cancel, and the
+    error left in its solution lies in the range of H^{-1} A^T, where step 5 removes it.
+    The result is exact for any ν, and it reuses B, so it costs no further solve with
+    H.
 
     References
     ----------
@@ -2431,4 +2581,8 @@ def solve_kkt_system(
     # Step 4: Solve H * delta_x = g - A^T * nu
     delta_x = hessian_solve(g - (A.T @ nu), **kwargs)
 
-    return delta_x, nu
+    # Step 5: Restore A * delta_x = g_bot, correcting nu (see Notes).
+    residual = A @ delta_x if g_bot is None else A @ delta_x - g_bot
+    delta_nu = _solve_schur_complement(neg_S, residual)
+
+    return delta_x - B @ delta_nu, nu + delta_nu
