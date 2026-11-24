@@ -259,13 +259,13 @@ def _made_no_progress(exc: StationarityConvergenceError) -> bool:
 
     Notes
     -----
-    An iteration count cannot stand in for this test. A seed that hugs a face leaves the
-    first dual step on that row as a cancellation of two nearly equal terms divided by a
-    slack of order 1e-12, so its sign is rounding noise. On some CPUs the first step is
-    capped to nothing and the run stops at iteration 0; on others it takes one long
-    step, blows the surrogate gap up by four orders of magnitude, and stops one
-    iteration later. The two runs are equally empty (their best score is the start's),
-    but an iteration count tells them apart and the score does not.
+    An iteration count cannot stand in for this test. Two failed runs can be equally
+    empty (their best score is the start's) yet stop at different iterations: one whose
+    first step is capped to nothing stops at iteration 0, and one whose first step
+    overshoots, blowing the surrogate gap up, stops one iteration later. Which happens
+    can come down to rounding. Before issue #24's two-pass solves, a seed hugging a face
+    by 1e-12 did exactly this, at iteration 0 on some CPUs and 1 on others. An
+    iteration count tells such runs apart, and the score does not.
 
     """
     diagnostics = exc.result.primal_dual_diagnostics

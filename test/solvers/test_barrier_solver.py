@@ -2,6 +2,7 @@
 
 import unittest
 import warnings
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from unittest.mock import patch
 
@@ -51,6 +52,7 @@ from cvxium.solvers.optimization import (
     ProblemCertifiablyInfeasibleError,
     _CenteringOutcome,
 )
+from cvxium.solvers.phase1 import LiftedConstraintLayer
 from cvxium.solvers.settings import (
     BarrierInitStrategy,
     InnerSettings,
@@ -3063,3 +3065,80 @@ class BarrierSolverSparsePhase1Test(unittest.TestCase):
         self.assertGreater(result.solution.min(), -1e-6)
         # The minimizer loads the cheapest coordinate: x = [3, 0, 0], cost 3.
         self.assertTrue(np.isclose(float(c @ result.solution), 3.0, atol=1e-3))
+
+
+class DominantLowRankUpdateTest(unittest.TestCase):
+    """Barrier solves survive a Hessian whose low-rank update dwarfs its base (#24).
+
+    The fixtures are deadzone-relaxation LPs captured from PyRake's knee-fallback
+    test: a linear objective over [w; t] (120 weights, 6 excesses), bounds, lifted
+    imbalance bands, 12 linear inequality rows and 2 equalities. At high t the
+    barrier Hessian is a diagonal base plus low-rank updates whose weights 1 / f_i^2
+    reach 1e16, and the Newton right-hand side lies almost entirely in the stiff
+    directions. The one-pass Woodbury solve then subtracted two vectors some ten
+    orders of magnitude larger than their difference, and the KKT elimination did
+    the same through the equality multipliers, so the computed step could point
+    uphill.
+    """
+
+    _DATA = Path(__file__).parent / "data"
+
+    @classmethod
+    def _imbalance(
+        cls, d: np.lib.npyio.NpzFile, suffix: str, M: int, q: int
+    ) -> LiftedConstraintLayer:
+        return LiftedConstraintLayer(
+            base=ImbalanceConstraintLayer(
+                B=d["B" + suffix], c=d["c" + suffix], psi=d["psi" + suffix]
+            ),
+            base_dimension=M,
+            extra_dimension=q,
+        )
+
+    @classmethod
+    def _problem(
+        cls, name: str, imbalance_suffixes: tuple[str, ...]
+    ) -> tuple[Problem, npt.NDArray[np.float64]]:
+        with np.load(cls._DATA / name) as d:
+            n = d["c"].shape[0]
+            M = d["B" + imbalance_suffixes[0]].shape[1]
+            problem = Problem(
+                obj=LinearObjective(c=d["c"]),
+                ineq=[
+                    BoundsConstraintLayer(lb=d["lb"], ub=d["ub"]),
+                    *(cls._imbalance(d, s, M, n - M) for s in imbalance_suffixes),
+                    LinearInequalityConstraintLayer(A=d["A"], cu=d["cu"]),
+                ],
+                eq=EqualityConstraintLayer(A=d["A_eq"], b=d["b_eq"]),
+            )
+            x0 = d["x0"].copy()
+        return problem, x0
+
+    def test_the_lp_converges_rather_than_stopping_on_an_uphill_step(self) -> None:
+        """The solve reaches OPTIMAL at the optimum an independent LP solver finds.
+
+        Under 1.0.2 the sixth centering step failed with "Newton step was not a
+        descent direction", so the solve stopped ACCEPTABLE with a duality gap of
+        7.8e-6 and an objective 0.3% above the optimum. The reference optimum,
+        9.47049e-4, is from ``scipy.optimize.linprog`` (HiGHS) on the same LP.
+        """
+        problem, x0 = self._problem("barrier_dominant_update_lp.npz", ("1",))
+
+        result = BarrierSolver().solve(problem, x0)
+
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
+        self.assertAlmostEqual(result.objective_value, 9.47049208801321e-4, delta=1e-6)
+
+    def test_phase1_certifies_infeasibility_rather_than_breaking_down(self) -> None:
+        """An infeasible relaxation gets its certificate, not a numerical failure.
+
+        This LP's feasible set is empty: the largest uniform margin by which a point
+        can satisfy every inequality is -1.9e-4 (``scipy.optimize.linprog``). The
+        caller's start is not interior, so Phase I runs, and under 1.0.2 its
+        centering broke down (``InteriorPointMethodError``) before it could reach the
+        certificate. Its Newton steps go through the same dominated Woodbury solve.
+        """
+        problem, x0 = self._problem("barrier_infeasible_deadzone_lp.npz", ("1", "2"))
+
+        with self.assertRaises(ProblemCertifiablyInfeasibleError):
+            BarrierSolver().solve(problem, x0)

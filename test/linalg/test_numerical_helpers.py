@@ -1,9 +1,11 @@
 """Test numerical helpers."""
 
 import functools
+import math
 import time
 import unittest
 from collections.abc import Callable
+from fractions import Fraction
 
 import numpy as np
 import numpy.typing as npt
@@ -12,6 +14,8 @@ from scipy import linalg
 
 from cvxium.exceptions import NewtonStepError
 from cvxium.linalg.numerical_helpers import (
+    _prepare_rank_one_update,
+    _prepare_rank_p_update,
     _solve_schur_complement,
     multiply_arrow_sparsity_pattern,
     multiply_block_diagonal,
@@ -1789,3 +1793,211 @@ class TikhonovFilterTest(unittest.TestCase):
         for bad in (0, 3, -1):
             with self.assertRaises(ValueError):
                 tikhonov_filter(s, power=bad)
+
+
+def _exact_solve(rows: list[list[Fraction]], b: npt.NDArray[np.float64]) -> np.ndarray:
+    """Solve a small linear system exactly, in rational arithmetic.
+
+    The reference for the accuracy tests below: the matrix entries are the exact
+    rationals of the float data, so the result is the exact solution for that data,
+    rounded once to float. Gaussian elimination with partial pivoting.
+    """
+    n = len(rows)
+    aug = [row[:] + [Fraction(float(b[i]))] for i, row in enumerate(rows)]
+    for k in range(n):
+        pivot = max(range(k, n), key=lambda i: abs(aug[i][k]))
+        aug[k], aug[pivot] = aug[pivot], aug[k]
+        for i in range(k + 1, n):
+            f = aug[i][k] / aug[k][k]
+            if f:
+                aug[i] = [a - f * c for a, c in zip(aug[i], aug[k], strict=True)]
+    x = [Fraction(0)] * n
+    for i in reversed(range(n)):
+        tail = sum((aug[i][j] * x[j] for j in range(i + 1, n)), Fraction(0))
+        x[i] = (aug[i][n] - tail) / aug[i][i]
+    return np.array([float(v) for v in x])
+
+
+def _exact_low_rank(
+    eta: npt.NDArray[np.float64],
+    kappa: npt.NDArray[np.float64],
+    d: npt.NDArray[np.float64],
+) -> list[list[Fraction]]:
+    """The exact rationals of diag(η) + κ diag(d) κ^T for float η, κ and d."""
+    n, p = kappa.shape
+    k = [[Fraction(float(v)) for v in row] for row in kappa]
+    w = [Fraction(float(v)) for v in d]
+    return [
+        [
+            (Fraction(float(eta[i])) if i == j else Fraction(0))
+            + sum((k[i][c] * w[c] * k[j][c] for c in range(p)), Fraction(0))
+            for j in range(n)
+        ]
+        for i in range(n)
+    ]
+
+
+class DominantUpdateAccuracyTest(unittest.TestCase):
+    """Structured solves stay accurate when an update dwarfs its base (issue #24).
+
+    Near the boundary, an interior-point Hessian is a base of order one plus
+    low-rank or bordered terms with weights up to 1e16, and the Newton right-hand
+    side lies mostly in those stiff directions. Accuracy is measured in the local
+    (energy) norm ‖e‖_H = (e^T H e)^{1/2}, the one Newton's method needs, evaluated
+    as a sum of nonnegative terms so that it does not itself cancel, against an
+    exact rational solve of the same float data.
+    """
+
+    M = 20
+
+    def _dominated(
+        self, seed: int, d: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], ...]:
+        rng = np.random.default_rng(seed)
+        eta = rng.uniform(1e-3, 1.0, self.M)
+        kappa = rng.standard_normal((self.M, d.shape[0]))
+        x = rng.standard_normal(self.M)
+        b = eta * x + kappa @ (d * (kappa.T @ x))  # H x, mostly the update's share
+        return eta, kappa, b
+
+    @staticmethod
+    def _energy(
+        e: npt.NDArray[np.float64],
+        eta: npt.NDArray[np.float64],
+        kappa: npt.NDArray[np.float64],
+        d: npt.NDArray[np.float64],
+    ) -> float:
+        return float(np.sqrt(e @ (eta * e) + np.sum(d * (kappa.T @ e) ** 2)))
+
+    @parameterized.expand([(seed,) for seed in range(4)])
+    def test_rank_p_solve_is_accurate_when_the_update_dominates(
+        self, seed: int
+    ) -> None:
+        """The two-pass Woodbury solve is accurate where the one-pass one is not."""
+        d = np.array([1e16, 3e15, 2.0])
+        eta, kappa, b = self._dominated(seed, d)
+        exact = _exact_solve(_exact_low_rank(eta, kappa, d), b)
+        scale = self._energy(exact, eta, kappa, d)
+
+        x = solve_rank_p_update(
+            b, kappa, functools.partial(solve_diagonal, eta=eta), d=d
+        )
+
+        self.assertLess(self._energy(x - exact, eta, kappa, d) / scale, 1e-6)
+        # The scenario is hard: the one-pass formula's error exceeds the step.
+        k_eq = kappa * np.sqrt(d)
+        xi = k_eq / eta[:, np.newaxis]
+        g = np.eye(3) + k_eq.T @ xi
+        one_pass = b / eta - xi @ np.linalg.solve(g, k_eq.T @ (b / eta))
+        self.assertGreater(self._energy(one_pass - exact, eta, kappa, d) / scale, 1.0)
+
+    @parameterized.expand([(seed,) for seed in range(4)])
+    def test_rank_one_solve_is_accurate_when_the_update_dominates(
+        self, seed: int
+    ) -> None:
+        """The two-pass Sherman-Morrison solve is accurate where one pass is not."""
+        d = np.array([1e16])
+        eta, kappa, b = self._dominated(seed, d)
+        exact = _exact_solve(_exact_low_rank(eta, kappa, d), b)
+        scale = self._energy(exact, eta, kappa, d)
+
+        x = solve_rank_one_update(
+            b, kappa[:, 0], functools.partial(solve_diagonal, eta=eta), d=1e16
+        )
+
+        self.assertLess(self._energy(x - exact, eta, kappa, d) / scale, 1e-6)
+        xi = kappa[:, 0] / eta
+        x_prime = b / eta
+        one_pass = x_prime - (kappa[:, 0] @ x_prime) / (1e-16 + kappa[:, 0] @ xi) * xi
+        self.assertGreater(self._energy(one_pass - exact, eta, kappa, d) / scale, 1.0)
+
+    def test_a_modest_update_takes_one_pass_and_a_downdate_two(self) -> None:
+        """The second pass runs only where the one-pass bound does not hold."""
+        rng = np.random.default_rng(0)
+        eta = rng.uniform(0.5, 2.0, self.M)
+        kappa = rng.standard_normal((self.M, 3))
+        solve = functools.partial(solve_diagonal, eta=eta)
+
+        modest = _prepare_rank_p_update(kappa, solve, d=np.array([1.0, 2.0, 3.0]))
+        dominant = _prepare_rank_p_update(kappa, solve, d=np.array([1.0, 2.0, 1e6]))
+        downdate = _prepare_rank_p_update(
+            kappa, solve, d=np.array([1.0, 2.0, -1e-3]), check_inertia=False
+        )
+
+        self.assertFalse(modest.two_pass)
+        self.assertTrue(dominant.two_pass)
+        self.assertTrue(downdate.two_pass)
+        self.assertFalse(_prepare_rank_one_update(kappa[:, 0], solve, d=1.0).two_pass)
+        self.assertTrue(_prepare_rank_one_update(kappa[:, 0], solve, d=1e6).two_pass)
+        self.assertTrue(_prepare_rank_one_update(kappa[:, 0], solve, d=-1e-3).two_pass)
+
+    @parameterized.expand([(seed,) for seed in range(4)])
+    def test_kkt_step_keeps_the_equality_where_the_hessian_is_weak(
+        self, seed: int
+    ) -> None:
+        """Δx satisfies A Δx = 0 when H is weak in the directions A pins down.
+
+        H is diagonal with entries 1e-8 in the coordinates A pins and of order one
+        elsewhere, and g carries a 1e4 component along A^T, as a linear objective
+        at high t does. H^{-1} g is then some 1e12 times larger than Δx, and the
+        tiny relative error the Schur complement leaves in ν became an error in Δx
+        that broke A Δx = 0 by about 1e-4. The correction step restores it.
+        """
+        rng = np.random.default_rng(seed)
+        M, p = self.M, 2
+        eta = rng.uniform(0.5, 2.0, M)
+        eta[:p] = 1e-8
+        A = np.hstack([np.eye(p), 0.1 * rng.standard_normal((p, M - p))])
+        x = rng.standard_normal(M)
+        x -= A.T @ np.linalg.solve(A @ A.T, A @ x)
+        g = eta * x + A.T @ (1e4 * rng.standard_normal(p))
+        rows = [
+            [Fraction(float(eta[i])) if i == j else Fraction(0) for j in range(M)]
+            + [Fraction(float(A[k, i])) for k in range(p)]
+            for i in range(M)
+        ] + [
+            [Fraction(float(A[k, j])) for j in range(M)] + [Fraction(0)] * p
+            for k in range(p)
+        ]
+        exact = _exact_solve(rows, np.concatenate([g, np.zeros(p)]))[:M]
+
+        delta_x, _ = solve_kkt_system(A, g, functools.partial(solve_diagonal, eta=eta))
+
+        self.assertLess(np.linalg.norm(A @ delta_x), 1e-12)
+        energy = np.sqrt((delta_x - exact) @ (eta * (delta_x - exact)))
+        self.assertLess(energy / np.sqrt(exact @ (eta * exact)), 1e-10)
+
+    @parameterized.expand([(seed,) for seed in range(4)])
+    def test_arrow_solve_accepts_a_positive_definite_lifted_bound(
+        self, seed: int
+    ) -> None:
+        """A slack-form Phase I arrow with ψ^2 ≈ 1e-12 θ is solved, not rejected.
+
+        Lifting lower bounds w_i - s ≥ lb_i adds μ_i (e_i + e_s)(e_i + e_s)^T with
+        μ_i = 1 / c_i^2, so η = o + μ, ζ = μ and θ = extra + ∑ μ_i, whose Schur
+        residual ψ^2 = extra + ∑ o_i μ_i / (o_i + μ_i) is positive but about 1e-12 θ
+        when μ ≈ 1e12. The guard used to be 10^-12 (θ + ζ^T diag(η)^{-1} ζ), which
+        rejected this positive definite matrix although the solve is accurate.
+        """
+        rng = np.random.default_rng(seed)
+        M = self.M
+        o = rng.uniform(0.5, 2.0, M)
+        mu = 10.0 ** rng.uniform(11.5, 12.5, M)
+        extra = 1.0
+        eta, zeta = o + mu, mu.copy()
+        theta = extra + math.fsum(mu.tolist())
+        rows = [
+            [Fraction(float(eta[i])) if i == j else Fraction(0) for j in range(M)]
+            + [Fraction(float(zeta[i]))]
+            for i in range(M)
+        ] + [[Fraction(float(z)) for z in zeta] + [Fraction(float(theta))]]
+        b = rng.standard_normal(M + 1) * np.append(mu, mu.sum())
+        exact = _exact_solve(rows, b)
+
+        def energy(e: npt.NDArray[np.float64]) -> float:
+            stiff = mu * (e[:M] + e[M]) ** 2
+            return float(np.sqrt(e[:M] @ (o * e[:M]) + extra * e[M] ** 2 + stiff.sum()))
+
+        x = solve_arrow_sparsity_pattern(b, eta, zeta, theta)
+
+        self.assertLess(energy(x - exact) / energy(exact), 1e-3)
