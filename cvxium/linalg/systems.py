@@ -35,8 +35,10 @@ import numpy.typing as npt
 import scipy.sparse
 from scipy import linalg
 
+from .._typing import none_throws
 from ..exceptions import NewtonStepError
 from ..linalg.numerical_helpers import (
+    _EPS,
     _apply_rank_one_update,
     _apply_rank_p_update,
     _prepare_rank_one_update,
@@ -914,7 +916,13 @@ class DiagonalSystem(MatrixSystem):
         recip_dominant = np.where(
             self._eta >= other._eta, self._eta_inverse, other._eta_inverse
         )
-        eta_inverse = recip_dominant / (self._eta / dominant + other._eta / dominant)
+        # An entry zero in both (a free variable) has no curvature: its reciprocal is
+        # inf, not the 0 / 0 of the scaled sum.
+        vanishes = dominant == 0.0
+        safe = np.where(vanishes, 1.0, dominant)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            scaled = recip_dominant / (self._eta / safe + other._eta / safe)
+        eta_inverse = np.where(vanishes, np.inf, scaled)
         return DiagonalSystem(eta, eta_inverse=eta_inverse)
 
     def is_positive_definite(self) -> bool:
@@ -1562,9 +1570,10 @@ class LowRankUpdatedSystem(MatrixSystem):
 def _semidefinite_diagonal(base: MatrixSystem) -> npt.NDArray[np.float64] | None:
     """Return a diagonal base's entries when some vanish, or ``None``.
 
-    A ``ZeroSystem`` is the all-zero diagonal. A ``DiagonalSystem`` with a zero entry
-    arises when some variables carry no curvature of their own: free variables beside
-    bounded ones, or slack-form Phase I, whose base is positive only on the slack.
+    A ``ZeroSystem`` is the all-zero diagonal. A diagonal with a zero entry arises
+    when some variables carry no curvature of their own: free variables beside
+    bounded ones, or slack-form Phase I, whose base is positive only on the slack. A
+    ``BlockDiagonalSystem`` of diagonal blocks counts as diagonal.
 
     Parameters
     ----------
@@ -1578,10 +1587,74 @@ def _semidefinite_diagonal(base: MatrixSystem) -> npt.NDArray[np.float64] | None
         otherwise, including for a positive-definite diagonal.
 
     """
-    if isinstance(base, ZeroSystem):
-        return np.zeros(base.dimension)
-    if isinstance(base, DiagonalSystem) and bool(np.any(base.eta == 0.0)):
-        return np.asarray(base.eta, dtype=np.float64)
+    eta = _diagonal_entries(base)
+    if eta is None or not bool(np.any(eta == 0.0)):
+        return None
+    return eta
+
+
+def _semidefinite_hessian_diagonal(
+    hessian: MatrixSystem,
+) -> npt.NDArray[np.float64] | None:
+    """Return H's diagonal when its diagonal base vanishes somewhere, else ``None``.
+
+    H qualifies when it is itself a diagonal with a zero entry, or a
+    ``LowRankUpdatedSystem`` over one, the Hessians ``_SemidefiniteDiagonalBase``
+    solves. ``SchurComplementSaddleSystem`` uses the diagonal to scale its augmented
+    Lagrangian term.
+
+    Parameters
+    ----------
+     hessian : MatrixSystem
+        The Hessian block H.
+
+    Returns
+    -------
+     diagonal : npt.NDArray[np.float64] | None
+        The diagonal entries H_ii, or ``None`` when H's base is positive definite or
+        H has another structure.
+
+    """
+    eta = _semidefinite_diagonal(hessian)
+    if eta is not None:
+        return eta
+    if not isinstance(hessian, LowRankUpdatedSystem):
+        return None
+    eta = _semidefinite_diagonal(hessian._base)
+    if eta is None:
+        return None
+    kappa_sq = hessian._kappa**2
+    update = kappa_sq.sum(axis=1) if hessian._d is None else kappa_sq @ hessian._d
+    return np.asarray(eta + update, dtype=np.float64)
+
+
+def _diagonal_entries(system: MatrixSystem) -> npt.NDArray[np.float64] | None:
+    """Return a diagonal system's entries, or ``None`` if it is not diagonal.
+
+    A ``ZeroSystem`` and a ``DiagonalSystem`` are diagonal, and so is a
+    ``BlockDiagonalSystem`` whose blocks all are, as slack-form Phase I assembles:
+    the variables' diagonal beside the slack's.
+
+    Parameters
+    ----------
+     system : MatrixSystem
+        The system to inspect.
+
+    Returns
+    -------
+     eta : npt.NDArray[np.float64] | None
+        The diagonal, of length ``system.dimension``, or ``None``.
+
+    """
+    if isinstance(system, ZeroSystem):
+        return np.zeros(system.dimension)
+    if isinstance(system, DiagonalSystem):
+        return np.asarray(system.eta, dtype=np.float64)
+    if isinstance(system, BlockDiagonalSystem):
+        blocks = [_diagonal_entries(block) for block in system._blocks]
+        if any(block is None for block in blocks):
+            return None
+        return np.concatenate([none_throws(block) for block in blocks])
     return None
 
 
@@ -1593,28 +1666,37 @@ class _SemidefiniteDiagonalBase:
     inequality-form linear program, minimize c^T x subject to G x ≤ h, has the
     Hessian G^T diag(1 / f^2) G on a zero base. Split the coordinates into P, where
     η > 0, and Z, where η = 0, and write κ_eq = κ diag(d)^{1/2}, with rows κ_P and
-    κ_Z. Then
-       H_PP = diag(η_P) + κ_P κ_P^T,   H_PZ = κ_P κ_Z^T,   H_ZZ = κ_Z κ_Z^T.
-    H_PP is an ordinary low-rank update of a positive diagonal, solved as a
-    ``LowRankUpdatedSystem``. By the Woodbury identity, the Schur complement onto Z is
-       S = H_ZZ - H_ZP H_PP^{-1} H_PZ = κ_Z G^{-1} κ_Z^T,   G = I + κ_P^T diag(η_P)^{-1} κ_P,
-    the p × p capacitance matrix. With G = L L^T and W = L^{-1} κ_Z^T, S = W^T W, so
-    the QR factorization W = Q R gives S = R^T R without squaring W's condition
-    number. With no positive entries (a zero base), G = I and W = κ_Z^T. H is
-    positive definite exactly when S is, which needs |Z| ≤ p and κ_Z G^{-1/2} of full
-    row rank.
+    κ_Z. By the Woodbury identity, the Schur complement of H onto Z is
+       S = κ_Z G^{-1} κ_Z^T,   G = I + κ_P^T diag(η_P)^{-1} κ_P,
+    the p × p capacitance matrix. G = M^T M for M the stack of diag(η_P)^{-1/2} κ_P
+    over I, so the QR factorization M = Q R_G gives G = R_G^T R_G without forming G,
+    whose unit eigenvalues rounding would erase beside large ones. Then
+    W = R_G^{-T} κ_Z^T satisfies S = W^T W, and the QR factorization W = Q R gives
+    S = R^T R without squaring W's condition number. (With no positive entries,
+    G = I and W = κ_Z^T.) H is positive definite exactly when S is, which needs
+    |Z| ≤ p and R of full rank.
 
-    A solve eliminates x_P: with u = H_PP^{-1} b_P,
-       x_Z = S^{-1} (b_Z - κ_Z κ_P^T u),   x_P = u - H_PP^{-1} κ_P κ_Z^T x_Z.
-    The preparation costs O(p^2 (|P| + |Z|) + p |Z|^2), and each solve two solves with
-    H_PP plus O(p M + |Z|^2).
+    With no positive entries, H = R^T R, and a solve is two triangular solves, which
+    stay accurate however the weights d are spread.
 
-    With no positive entries, the solve is two triangular solves with R and stays
-    accurate however the weights d are spread. With some, the elimination subtracts the
-    update's stiff share through b_Z - κ_Z κ_P^T u, and when that share dominates, as
-    it does near the boundary of an interior-point method, the step loses accuracy
-    like the one-pass Woodbury formula (``_apply_rank_p_update``). Issue #37 tracks
-    the fix.
+    With some, eliminating P subtracts the update's stiff share through
+    b_Z - κ_Z κ_P^T H_PP^{-1} b_P, and near the boundary of an interior-point method,
+    where that share dominates, the step loses accuracy like the one-pass Woodbury
+    formula (issue #37). Instead the zero entries are regularized and the
+    regularization removed exactly:
+       H = H' - δ E_Z E_Z^T,   H' = diag(η + δ 1_Z) + κ_eq κ_eq^T,
+    with E_Z the unit columns of Z. H' is a low-rank update of a positive diagonal,
+    solved by the two-pass Woodbury solve (``_apply_rank_p_update``), which keeps
+    dominant updates accurate. The downdate is a separate Woodbury layer whose
+    capacitance matrix, δ^{-1} I - (H'^{-1})_ZZ, is well conditioned once
+    δ ≪ λ_min(S), since then (H'^{-1})_ZZ ≈ S^{-1} is small beside δ^{-1}. Too small
+    a δ hurts the other way, since the inner solve divides by δ on Z. The error grows
+    roughly as δ / λ_min(S) from the outer layer and as its inverse from the inner
+    one, so δ = sqrt(ε) λ_min(S) balances the two. On issue #37's linear program it
+    keeps the Newton step's local-norm error at or below 1e-11 for t up to 1e8.
+
+    The preparation costs O(p^2 (|P| + p) + p |Z|^2 + |Z|^3) plus the two layers'
+    Woodbury preparations, and each solve the two layers' solves.
 
     Parameters
     ----------
@@ -1630,7 +1712,8 @@ class _SemidefiniteDiagonalBase:
      NewtonStepError
         When some d ≤ 0 or some η < 0 (H cannot be shown positive definite this
         way), when |Z| > p (H has rank below M), when an entry is non-finite, or when
-        G or S is not positive definite to working precision (H singular).
+        S is not positive definite to working precision (H singular). Propagated
+        from the regularized system's preparation.
 
     """
 
@@ -1651,40 +1734,51 @@ class _SemidefiniteDiagonalBase:
         if not np.all(np.isfinite(kappa_eq)):
             raise NewtonStepError("H has non-finite entries in its low-rank update.")
         zero = eta == 0.0
-        self._z = np.flatnonzero(zero)
-        self._p = np.flatnonzero(~zero)
-        n_z = self._z.size
+        z = np.flatnonzero(zero)
+        pos = np.flatnonzero(~zero)
+        n_z = z.size
         if n_z > p:
             raise NewtonStepError(
                 f"H is singular: the base vanishes on {n_z} coordinates, more than "
                 f"the rank {p} of the update."
             )
-        self._kz = kappa_eq[self._z]
-        self._kp = kappa_eq[self._p]
-        self._hpp: LowRankUpdatedSystem | None = None
-        if self._p.size:
-            eta_p = eta[self._p]
-            g = np.eye(p) + self._kp.T @ (self._kp / eta_p[:, np.newaxis])
-            try:
-                chol = linalg.cholesky(0.5 * (g + g.T), lower=True)
-            except np.linalg.LinAlgError:
-                raise NewtonStepError("H is not positive definite.") from None
-            w = linalg.solve_triangular(chol, self._kz.T, lower=True)
-            self._hpp = LowRankUpdatedSystem(DiagonalSystem(eta_p), self._kp, None)
+        kz = kappa_eq[z]
+        if pos.size:
+            # G = I + κ_P^T diag(η_P)^{-1} κ_P = M^T M with M the stack of
+            # diag(η_P)^{-1/2} κ_P over I, so the QR factorization M = Q R_G gives
+            # G = R_G^T R_G without forming G. Forming it would lose its unit
+            # eigenvalues to rounding beside the large ones when κ_P has fewer rows
+            # than columns, and the identity block keeps R_G nonsingular.
+            kp = kappa_eq[pos]
+            stacked = np.vstack([kp / np.sqrt(eta[pos])[:, np.newaxis], np.eye(p)])
+            r_g = np.asarray(np.linalg.qr(stacked, mode="r"), dtype=np.float64)
+            w = linalg.solve_triangular(r_g, kz.T, trans="T")
         else:
-            w = self._kz.T
+            w = kz.T
         # numpy's stubs type mode="r" as the full QR result; it returns R alone.
         r = np.asarray(np.linalg.qr(w, mode="r"), dtype=np.float64)
         diag = np.abs(np.diag(r))
-        if diag.min() <= n_z * np.finfo(np.float64).eps * diag.max():
+        if diag.min() <= n_z * _EPS * diag.max():
             raise NewtonStepError(
                 "H is singular or nearly singular: the update does not reach every "
                 "coordinate the base leaves without curvature."
             )
         self._r = r
+        self._regularized: MatrixSystem | None = None
+        if pos.size:
+            schur_min = float(np.linalg.eigvalsh(r.T @ r)[0])
+            delta = math.sqrt(_EPS) * schur_min
+            eta_reg = eta.copy()
+            eta_reg[z] = delta
+            inner = LowRankUpdatedSystem(DiagonalSystem(eta_reg), kappa_eq, None)
+            unit = np.zeros((eta.size, n_z))
+            unit[z, np.arange(n_z)] = 1.0
+            self._regularized = inner.low_rank_update(
+                unit, np.full(n_z, -delta), coalesce=False
+            )
 
     def solve(self, b: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """Solve H x = b by eliminating the coordinates with base curvature.
+        """Solve H x = b.
 
         Parameters
         ----------
@@ -1696,21 +1790,16 @@ class _SemidefiniteDiagonalBase:
          x : npt.NDArray[np.float64]
             The solution, of the same shape as ``b``.
 
+        Raises
+        ------
+         NewtonStepError
+            Propagated from the regularized system's solve.
+
         """
-        vec = b.ndim == 1
-        rhs = b[:, np.newaxis] if vec else b
-        x = np.empty(rhs.shape, dtype=np.float64)
-        rhs_z = rhs[self._z]
-        u: npt.NDArray[np.float64] | None = None
-        if self._hpp is not None:
-            u = self._hpp.solve(rhs[self._p])
-            rhs_z = rhs_z - self._kz @ (self._kp.T @ u)
-        y = linalg.solve_triangular(self._r, rhs_z, trans="T")
-        x_z = linalg.solve_triangular(self._r, y)
-        x[self._z] = x_z
-        if self._hpp is not None and u is not None:
-            x[self._p] = u - self._hpp.solve(self._kp @ (self._kz.T @ x_z))
-        return x[:, 0] if vec else x
+        if self._regularized is not None:
+            return self._regularized.solve(b)
+        y = linalg.solve_triangular(self._r, b, trans="T")
+        return np.asarray(linalg.solve_triangular(self._r, y), dtype=np.float64)
 
 
 class BlockDiagonalSystem(MatrixSystem):
@@ -2624,6 +2713,26 @@ class SchurComplementSaddleSystem(SaddleSystem):
     ``H.solve``: p + 1 solves with H, O(p^2 M) to form the p × p Schur complement, and
     O(p^3) to factor it.
 
+    The elimination needs H^{-1}, but the KKT matrix is nonsingular whenever H is
+    positive definite on the null space of A, which is weaker. When H's diagonal
+    base vanishes on some coordinates (free variables), H can be nearly singular in
+    directions that only the equality pins: on issue #37's linear program with
+    A x = b, cond(H) reaches 1e17 near the optimum while H restricted to null(A) has
+    condition number 1e2, and no solve with H, dense Cholesky included, keeps the
+    step's accuracy. For such a Hessian ``solve`` eliminates the augmented Lagrangian
+    form instead,
+        _                  _     _    _     _                    _
+       |  H + ρ A^T A   A^T |   |  Δx  |   |  b_top + ρ A^T b_bot |
+       |_      A         0 _|   |_  ν _| = |_        b_bot       _|,
+    which has the same solution, since its first block row differs from the
+    original's by ρ A^T (A Δx - b_bot) = 0. H + ρ A^T A is a low-rank update of the
+    same semidefinite base, so it keeps H's structure, and it is positive definite
+    for every ρ > 0 when H is positive semidefinite and definite on null(A)
+    (Finsler's lemma). ρ scales A^T A to H: ρ max_j ‖a_j‖^2 = max_i H_ii, with a_j
+    the columns of A; on issue #37's problem every ρ within three orders of
+    magnitude of that choice converges the same. A Hessian whose base is positive
+    definite is eliminated as given.
+
     Parameters
     ----------
      hessian : MatrixSystem
@@ -2649,6 +2758,7 @@ class SchurComplementSaddleSystem(SaddleSystem):
             )
         self._hessian = hessian
         self._A = A
+        self._augmented: tuple[MatrixSystem, float] | None = None
 
     @property
     def hessian(self) -> MatrixSystem:
@@ -2661,6 +2771,33 @@ class SchurComplementSaddleSystem(SaddleSystem):
 
         """
         return self._hessian
+
+    def _augmented_hessian(self) -> tuple[MatrixSystem, float] | None:
+        """Return H + ρ A^T A and ρ when H's base is semidefinite, else ``None``.
+
+        Built once and cached, since a saddle is solved more than once per Newton
+        step (iterative refinement).
+
+        Returns
+        -------
+         augmented : tuple[MatrixSystem, float] | None
+            The augmented Hessian and ρ, or ``None`` to eliminate H as given.
+
+        """
+        if self._augmented is None:
+            diagonal = _semidefinite_hessian_diagonal(self._hessian)
+            column_norms_sq = np.sum(self._A**2, axis=0)
+            if diagonal is None or not np.any(column_norms_sq > 0.0):
+                return None
+            h_max = float(diagonal.max())
+            if not (math.isfinite(h_max) and h_max > 0.0):
+                return None
+            rho = h_max / float(column_norms_sq.max())
+            augmented = self._hessian.low_rank_update(
+                self._A.T, np.full(self._A.shape[0], rho)
+            )
+            self._augmented = (augmented, rho)
+        return self._augmented
 
     @property
     def num_equality_constraints(self) -> int:
@@ -2726,7 +2863,13 @@ class SchurComplementSaddleSystem(SaddleSystem):
             wrong length.
 
         """
-        return solve_kkt_system(self._A, b_top, self._hessian.solve, g_bot=b_bottom)
+        augmented = self._augmented_hessian()
+        if augmented is None:
+            return solve_kkt_system(self._A, b_top, self._hessian.solve, g_bot=b_bottom)
+        hessian, rho = augmented
+        if b_bottom is not None:
+            b_top = b_top + rho * (self._A.T @ b_bottom)
+        return solve_kkt_system(self._A, b_top, hessian.solve, g_bot=b_bottom)
 
 
 class CoupledSaddleSystem:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+import warnings
+from fractions import Fraction
 from unittest.mock import patch
 
 import numpy as np
@@ -40,6 +42,32 @@ from cvxium.linalg.systems import (
     SparseSaddleSystem,
     ZeroSystem,
 )
+
+
+def _exact_solve(
+    H: npt.NDArray[np.float64], b: npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
+    """Solve H x = b in exact rational arithmetic, then round to float64.
+
+    The reference for accuracy tests whose matrices are too ill-conditioned for a
+    floating-point solve to serve. Gaussian elimination with partial pivoting.
+    """
+    n = len(b)
+    rows = [
+        [Fraction(float(H[i, j])) for j in range(n)] + [Fraction(float(b[i]))]
+        for i in range(n)
+    ]
+    for k in range(n):
+        pivot = max(range(k, n), key=lambda i: abs(rows[i][k]))
+        rows[k], rows[pivot] = rows[pivot], rows[k]
+        for i in range(k + 1, n):
+            factor = rows[i][k] / rows[k][k]
+            rows[i] = [a - factor * c for a, c in zip(rows[i], rows[k], strict=True)]
+    x = [Fraction(0)] * n
+    for i in reversed(range(n)):
+        tail = sum((rows[i][j] * x[j] for j in range(i + 1, n)), Fraction(0))
+        x[i] = (rows[i][n] - tail) / rows[i][i]
+    return np.array([float(v) for v in x])
 
 
 def _random_spd(M: int, seed: int) -> npt.NDArray[np.float64]:
@@ -2895,6 +2923,58 @@ class SemidefiniteBaseLowRankUpdateTest(unittest.TestCase):
         )
         self.assertTrue(system.is_positive_definite())
 
+    def test_a_block_diagonal_base_with_zeros_is_solved(self) -> None:
+        """Slack-form Phase I's base, the variables' diagonal beside the slack's.
+
+        The block-diagonal base is diagonal, so it takes the semidefinite path; before
+        issue #37 it fell to Woodbury, which needs a solve with the base.
+        """
+        rng = np.random.default_rng(37)
+        eta_w = rng.uniform(0.5, 2.0, 6)
+        eta_w[[1, 4]] = 0.0
+        base = BlockDiagonalSystem([DiagonalSystem(eta_w), DiagonalSystem(np.ones(1))])
+        kappa = rng.standard_normal((7, 5))
+        d = rng.uniform(0.1, 10.0, 5)
+        system = base.low_rank_update(kappa, d)
+        dense = np.diag(np.r_[eta_w, 1.0]) + (kappa * d) @ kappa.T
+        b = rng.standard_normal(7)
+
+        np.testing.assert_allclose(
+            system.solve(b), np.linalg.solve(dense, b), rtol=1e-9
+        )
+
+    def test_a_partly_zero_base_stays_accurate_near_the_boundary(self) -> None:
+        """A barrier Hessian at t = 1e6 with free variables keeps its step (#37).
+
+        Near an LP optimum, seven rows of G are active with slack ~1/t, two bounds
+        are active, and three variables are free. Eliminating the bounded
+        coordinates subtracted the update's stiff share and lost every digit
+        (local-norm error 2); regularizing the zeros and downdating the
+        regularization reaches the accuracy of a dense Cholesky factorization of the
+        same matrix, about 2e-4 against an exact rational reference.
+        """
+        t = 1e6
+        errors = []
+        for seed in range(3):
+            rng = np.random.default_rng(seed)
+            n, m, n_free = 10, 12, 3
+            G = rng.standard_normal((m, n))
+            s = rng.uniform(0.5, 1.5, m)
+            s[: n - n_free] = rng.uniform(0.5, 1.5, n - n_free) / t
+            x = rng.uniform(0.5, 1.5, n)
+            eta = np.r_[np.zeros(n_free), 1.0 / x[n_free:] ** 2]
+            eta[n_free : n_free + 2] = t**2
+            d = 1.0 / s**2
+            dense = np.diag(eta) + (G.T * d) @ G
+            b = np.random.default_rng(100 + seed).standard_normal(n)
+            exact = _exact_solve(dense, b)
+            error = DiagonalSystem(eta).low_rank_update(G.T, d).solve(b) - exact
+            errors.append(
+                np.sqrt(abs(error @ dense @ error) / abs(exact @ dense @ exact))
+            )
+
+        self.assertLess(max(errors), 1e-2)
+
     def test_more_zeros_than_update_columns_raise(self) -> None:
         eta = np.r_[np.zeros(5), np.ones(3)]
         kappa = np.random.default_rng(5).standard_normal((8, 4))
@@ -2911,3 +2991,72 @@ class SemidefiniteBaseLowRankUpdateTest(unittest.TestCase):
 
         with self.assertRaisesRegex(NewtonStepError, "singular"):
             system.solve(np.ones(6))
+
+
+class FreeCoordinateDiagonalSumTest(unittest.TestCase):
+    """Two diagonals that both vanish on a coordinate sum to a zero entry (#37).
+
+    A free variable gets no curvature from the bounds layer or from a diagonal
+    objective, and the stable reciprocal of the sum divided 0 by 0 there.
+    """
+
+    def test_the_reciprocal_of_a_zero_entry_is_inf(self) -> None:
+        a = DiagonalSystem(np.array([0.0, 2.0, 0.0]))
+        b = DiagonalSystem(np.array([0.0, 1.0, 3.0]))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            total = a.plus(b)
+        assert isinstance(total, DiagonalSystem)
+        np.testing.assert_array_equal(total.eta, [0.0, 3.0, 3.0])
+        np.testing.assert_allclose(total._eta_inverse, [np.inf, 1.0 / 3.0, 1.0 / 3.0])
+
+
+class AugmentedLagrangianSaddleTest(unittest.TestCase):
+    """The Schur saddle eliminates H + ρ A^T A when H's base is semidefinite (#37).
+
+    With free variables, H can be singular, or nearly so, in directions the
+    equality alone pins, while the KKT matrix is nonsingular. The augmented form has
+    the same solution and a positive definite (1, 1) block.
+    """
+
+    @staticmethod
+    def _saddle(
+        eta: npt.NDArray[np.float64], seed: int = 7
+    ) -> tuple[
+        SchurComplementSaddleSystem, npt.NDArray[np.float64], npt.NDArray[np.float64]
+    ]:
+        rng = np.random.default_rng(seed)
+        n, q, p = eta.size, 2, 3
+        kappa = rng.standard_normal((n, q))
+        d = rng.uniform(0.5, 2.0, q)
+        A = rng.standard_normal((p, n))
+        hessian = DiagonalSystem(eta).low_rank_update(kappa, d)
+        kkt = np.block(
+            [
+                [np.diag(eta) + (kappa * d) @ kappa.T, A.T],
+                [A, np.zeros((p, p))],
+            ]
+        )
+        return SchurComplementSaddleSystem(hessian, A), A, kkt
+
+    @parameterized.expand([("feasible_start", False), ("infeasible_start", True)])
+    def test_a_singular_hessian_pinned_by_the_equality_is_solved(
+        self, _name: str, with_residual: bool
+    ) -> None:
+        """Four zeros against a rank-2 update: H is singular, the KKT matrix is not."""
+        eta = np.r_[np.zeros(4), np.ones(4)]
+        saddle, _, kkt = self._saddle(eta)
+        rng = np.random.default_rng(1)
+        b_top = rng.standard_normal(8)
+        b_bottom = rng.standard_normal(3) if with_residual else None
+
+        delta_x, nu = saddle.solve(b_top, b_bottom)
+
+        rhs = np.r_[b_top, np.zeros(3) if b_bottom is None else b_bottom]
+        expected = np.linalg.solve(kkt, rhs)
+        np.testing.assert_allclose(delta_x, expected[:8], rtol=1e-9, atol=1e-12)
+        np.testing.assert_allclose(nu, expected[8:], rtol=1e-9, atol=1e-12)
+
+    def test_a_positive_definite_base_is_eliminated_as_given(self) -> None:
+        saddle, _, _ = self._saddle(np.linspace(1.0, 2.0, 8))
+        self.assertIsNone(saddle._augmented_hessian())

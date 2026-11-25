@@ -256,8 +256,8 @@ class BarrierSolverTest(unittest.TestCase):
     def test_solve_without_x0_constructs_phase1(self, seed: int, M: int) -> None:
         """With no ``x0``, BarrierSolver builds a feasible start from its layers.
 
-        Exercises ``_solve_feasibility`` -- Phase I via the last constraint
-        layer's ``make_phase1_solver`` dispatch.
+        A sole bounds layer supplies a strictly interior point itself
+        (``BoundsConstraintLayer.interior_point``), so no Phase I solve runs.
         """
         rng = np.random.default_rng(seed)
         Q = _make_psd_matrix(rng, M)
