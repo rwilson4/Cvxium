@@ -7,6 +7,7 @@ import numpy as np
 import scipy.sparse
 from parameterized import parameterized
 from scipy import linalg
+from scipy.optimize import linprog
 
 from cvxium.exceptions import ProblemInfeasibleError
 from cvxium.linalg.systems import (
@@ -20,8 +21,14 @@ from cvxium.linalg.systems import (
 )
 from cvxium.problems.linear_constraints import (
     EqualityConstraintLayer,
+    LinearInequalityConstraintLayer,
 )
-from cvxium.solvers.solver import EqualitySolver
+from cvxium.problems.objective import LinearObjective
+from cvxium.problems.problem import Problem
+from cvxium.problems.result import SolveStatus
+from cvxium.solvers.barrier_solver import BarrierSolver
+from cvxium.solvers.primal_dual_solver import PrimalDualSolver
+from cvxium.solvers.solver import EqualitySolver, Solver
 
 
 class EqualitySolverTest(unittest.TestCase):
@@ -656,3 +663,81 @@ class EqualitySolverDelegatesToLayerTest(unittest.TestCase):
             EqualitySolver(b=b, constraint=layer)
         with self.assertRaises(ValueError):
             EqualitySolver(A=A, b=b, constraint=layer)
+
+
+class InequalityFormLinearProgramTest(unittest.TestCase):
+    """Inequality-form LPs, minimize c^T x subject to G x <= h, solve (issue #31).
+
+    With no bounds layer, the Newton Hessian is a weighted G^T G riding a zero base,
+    and the Woodbury solve, which starts from a solve with the base, failed in both
+    solvers: the barrier with "Failed to calculate Newton step" and primal-dual with
+    "The zero matrix is not invertible". The zero base is now factored directly. The
+    reference optimum is ``scipy.optimize.linprog`` (HiGHS).
+    """
+
+    @staticmethod
+    def _lp(
+        with_equality: bool,
+    ) -> tuple[Problem, np.ndarray, float]:
+        rng = np.random.default_rng(31)
+        n, m = 10, 60
+        G = rng.standard_normal((m, n))
+        x0 = rng.standard_normal(n)
+        h = G @ x0 + rng.uniform(0.5, 1.5, m)  # x0 is strictly feasible
+        # c = -G^T y with y > 0 is bounded below on G x <= h: c^T x >= -y^T h.
+        c = -G.T @ rng.uniform(0.1, 1.0, m)
+        eq = None
+        kwargs: dict[str, Any] = {}
+        if with_equality:
+            A = rng.standard_normal((2, n))
+            eq = EqualityConstraintLayer(A=A, b=A @ x0)
+            kwargs = {"A_eq": A, "b_eq": A @ x0}
+        problem = Problem(
+            obj=LinearObjective(c=c),
+            ineq=[LinearInequalityConstraintLayer(A=G, cu=h)],
+            eq=eq,
+        )
+        reference = linprog(c, A_ub=G, b_ub=h, bounds=[(None, None)] * n, **kwargs)
+        return problem, x0, float(reference.fun)
+
+    @parameterized.expand(
+        [
+            (
+                f"{solver}_{'eq' if eq else 'noeq'}_{'warm' if warm else 'cold'}",
+                solver,
+                eq,
+                warm,
+            )
+            for solver in ("barrier", "primal_dual")
+            for eq in (False, True)
+            for warm in (True, False)
+        ]
+    )
+    def test_matches_highs(
+        self, _name: str, solver_name: str, with_equality: bool, warm: bool
+    ) -> None:
+        problem, x0, optimum = self._lp(with_equality)
+        solver: Solver = (
+            BarrierSolver() if solver_name == "barrier" else PrimalDualSolver()
+        )
+
+        result = solver.solve(problem, x0 if warm else None)
+
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
+        self.assertAlmostEqual(result.objective_value, optimum, delta=1e-5)
+
+    def test_the_issues_two_variable_lp(self) -> None:
+        """min x1 + x2 subject to x1 - x2 <= 1, x1 >= 0, from (1, 1): optimum -1."""
+        problem = Problem(
+            obj=LinearObjective(c=np.array([1.0, 1.0])),
+            ineq=[
+                LinearInequalityConstraintLayer(
+                    A=np.array([[1.0, -1.0], [-1.0, 0.0]]), cu=np.array([1.0, 0.0])
+                )
+            ],
+        )
+        for solver in (BarrierSolver(), PrimalDualSolver()):
+            with self.subTest(solver=type(solver).__name__):
+                result = solver.solve(problem, np.array([1.0, 1.0]))
+                self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
+                self.assertAlmostEqual(result.objective_value, -1.0, delta=1e-5)

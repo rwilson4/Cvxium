@@ -2807,3 +2807,107 @@ class SaddleSolveRefinedTest(unittest.TestCase):
         H, A, _, _ = self._data(5)
         with self.assertRaises(ValueError):
             SchurComplementSaddleSystem(H, A).solve_refined(np.ones((8, 2)))
+
+
+class SemidefiniteBaseLowRankUpdateTest(unittest.TestCase):
+    """A low-rank update to a base with zero entries is solved directly (issue #31).
+
+    The Woodbury identity starts from a solve with the base, and a ``ZeroSystem`` has
+    none. An inequality-form linear program, minimize c^T x subject to G x ≤ h, has
+    exactly this Hessian, a weighted G^T G on a zero base. It is positive definite when
+    G has at least as many rows as columns and full column rank, and it is now
+    factored as R^T R from the QR factorization of its scaled factor.
+    """
+
+    def _system(
+        self, n: int, p: int, d: npt.NDArray[np.float64] | None = None, seed: int = 31
+    ) -> tuple[LowRankUpdatedSystem, npt.NDArray[np.float64]]:
+        rng = np.random.default_rng(seed)
+        kappa = rng.standard_normal((n, p))
+        weights = rng.uniform(0.1, 10.0, p) if d is None else d
+        system = ZeroSystem(n).low_rank_update(kappa, weights)
+        assert isinstance(system, LowRankUpdatedSystem)
+        return system, (kappa * weights) @ kappa.T
+
+    @parameterized.expand([("square", 6, 6), ("tall", 6, 40)])
+    def test_a_positive_definite_update_is_solved(
+        self, _name: str, n: int, p: int
+    ) -> None:
+        system, dense = self._system(n, p)
+        rng = np.random.default_rng(0)
+        b = rng.standard_normal(n)
+        B = rng.standard_normal((n, 3))
+
+        np.testing.assert_allclose(
+            system.solve(b), np.linalg.solve(dense, b), rtol=1e-9
+        )
+        np.testing.assert_allclose(
+            system.solve(B), np.linalg.solve(dense, B), rtol=1e-9
+        )
+        self.assertTrue(system.is_positive_definite())
+
+    def test_weights_spanning_many_orders_are_solved_accurately(self) -> None:
+        """The factor is of κ diag(d)^{1/2}, never of the squared κ diag(d) κ^T."""
+        n, p = 5, 12
+        d = 10.0 ** np.linspace(-6, 10, p)
+        system, dense = self._system(n, p, d=d)
+        x = np.random.default_rng(1).standard_normal(n)
+
+        np.testing.assert_allclose(system.solve(system.multiply(x)), x, rtol=1e-6)
+
+    @parameterized.expand(
+        [
+            ("too_few_columns", 6, 4, None, "singular"),
+            ("a_downdate", 6, 8, np.r_[np.ones(7), -1.0], "not positive definite"),
+        ]
+    )
+    def test_a_singular_or_indefinite_update_raises(
+        self,
+        _name: str,
+        n: int,
+        p: int,
+        d: npt.NDArray[np.float64] | None,
+        message: str,
+    ) -> None:
+        system, _ = self._system(n, p, d=d)
+
+        with self.assertRaisesRegex(NewtonStepError, message):
+            system.solve(np.ones(n))
+        self.assertFalse(system.is_positive_definite())
+
+    @parameterized.expand([("one_zero", [3]), ("three_zeros", [0, 4, 7])])
+    def test_a_partly_zero_diagonal_base_is_solved(
+        self, _name: str, zeros: list[int]
+    ) -> None:
+        """Free variables beside bounded ones: the base vanishes on a few coordinates."""
+        rng = np.random.default_rng(4)
+        n, p = 8, 5
+        eta = rng.uniform(0.5, 2.0, n)
+        eta[zeros] = 0.0
+        kappa = rng.standard_normal((n, p))
+        d = rng.uniform(0.1, 10.0, p)
+        system = DiagonalSystem(eta).low_rank_update(kappa, d)
+        dense = np.diag(eta) + (kappa * d) @ kappa.T
+        b = rng.standard_normal((n, 2))
+
+        np.testing.assert_allclose(
+            system.solve(b), np.linalg.solve(dense, b), rtol=1e-9
+        )
+        self.assertTrue(system.is_positive_definite())
+
+    def test_more_zeros_than_update_columns_raise(self) -> None:
+        eta = np.r_[np.zeros(5), np.ones(3)]
+        kappa = np.random.default_rng(5).standard_normal((8, 4))
+        system = DiagonalSystem(eta).low_rank_update(kappa, np.ones(4))
+
+        with self.assertRaisesRegex(NewtonStepError, "singular"):
+            system.solve(np.ones(8))
+
+    def test_rank_deficient_columns_raise(self) -> None:
+        """Eight columns that span only three directions cannot make H definite."""
+        rng = np.random.default_rng(2)
+        kappa = rng.standard_normal((6, 3)) @ rng.standard_normal((3, 8))
+        system = ZeroSystem(6).low_rank_update(kappa, np.ones(8))
+
+        with self.assertRaisesRegex(NewtonStepError, "singular"):
+            system.solve(np.ones(6))
