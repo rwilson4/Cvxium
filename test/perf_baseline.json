@@ -279,6 +279,33 @@
   "test.solvers.test_barrier_solver.FlatPhase1BoxTest.test_issue_28_lp_is_solved_without_primal_dual_2_seed_7": [
     69
   ],
+  "test.solvers.test_barrier_solver.LongNewtonStepTest.test_phase1_finds_the_far_band_0_lo_1000_2d": [
+    4
+  ],
+  "test.solvers.test_barrier_solver.LongNewtonStepTest.test_phase1_finds_the_far_band_1_lo_1000_1d": [
+    5
+  ],
+  "test.solvers.test_barrier_solver.LongNewtonStepTest.test_phase1_finds_the_far_band_2_lo_10000_2d": [
+    5
+  ],
+  "test.solvers.test_barrier_solver.LongNewtonStepTest.test_phase1_finds_the_far_band_3_lo_10000_1d": [
+    5
+  ],
+  "test.solvers.test_barrier_solver.LongNewtonStepTest.test_phase1_finds_the_far_band_4_lo_100000_2d": [
+    5
+  ],
+  "test.solvers.test_barrier_solver.LongNewtonStepTest.test_phase1_finds_the_far_band_5_lo_100000_1d": [
+    5
+  ],
+  "test.solvers.test_barrier_solver.LongNewtonStepTest.test_the_far_optimum_is_reached_0_lo_10000": [
+    74
+  ],
+  "test.solvers.test_barrier_solver.LongNewtonStepTest.test_the_far_optimum_is_reached_1_lo_100000": [
+    75
+  ],
+  "test.solvers.test_barrier_solver.LongNewtonStepTest.test_the_far_optimum_is_reached_2_lo_1e_06": [
+    80
+  ],
   "test.solvers.test_barrier_solver.OnInfeasibleContinueTest.test_feasible_problem_returns_normally": [
     2
   ],

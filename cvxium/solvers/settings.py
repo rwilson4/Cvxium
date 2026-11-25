@@ -243,7 +243,12 @@ class ArmijoSettings:
      beta : float
         Shrink factor β applied to the step between trials. Default 0.5.
      min_step : float
-        Smallest step the search tries before declaring failure. Default 1e-3.
+        Smallest step the search tries before declaring failure. Default 1e-3. The
+        barrier method scales it by the damped Newton step 1 / (1 + λ), so its floor
+        is min_step / (1 + λ): far from the center, where λ is large, every feasible
+        fraction of the full step can be small although the damped step, feasible
+        and decreasing by self-concordance, moves a long way. The primal-dual step
+        search uses it as given.
      use_self_concordant_step_cap : bool
         When ``True``, the barrier method's line search starts from
            min(1 / (1 + λ), β s_feas)

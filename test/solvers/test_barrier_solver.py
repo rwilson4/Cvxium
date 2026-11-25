@@ -3725,3 +3725,62 @@ class MakePhase1BoxTest(unittest.TestCase):
     ) -> None:
         with self.assertRaisesRegex(ValueError, "radius"):
             self._problem(False).make_phase1(np.ones(3), radius=radius)
+
+
+class LongNewtonStepTest(unittest.TestCase):
+    """A Newton step far longer than the room to the boundary is still taken (#51).
+
+    Starting far from the band lo ≤ x ≤ 2 lo, slack-form Phase I (and the barrier
+    beside it) lands near a corner where the only curvature along the step comes from
+    the far constraint, so the Newton decrement λ reaches the hundreds and the largest
+    feasible fraction of the step is about 1 / λ. The line search's floor was a
+    fixed fraction, 1e-3, of the full step, so it raised ``ConstraintBoundaryError``
+    with a move of hundreds of units available. The floor is now relative to the
+    damped Newton step 1 / (1 + λ), which self-concordance guarantees to be feasible
+    and to decrease f_t.
+    """
+
+    @staticmethod
+    def _layers(lo: float, with_free_ray: bool) -> "list[ConstraintLayer]":
+        if with_free_ray:  # a decoupled y >= 0, which is harmless
+            return [
+                BoundsConstraintLayer(lb=np.array([-np.inf, 0.0])),
+                LinearInequalityConstraintLayer(
+                    A=np.array([[1.0, 0.0]]),
+                    cl=np.array([lo]),
+                    cu=np.array([2 * lo]),
+                ),
+            ]
+        return [
+            BoundsConstraintLayer(lb=np.array([-np.inf])),
+            LinearInequalityConstraintLayer(
+                A=np.array([[1.0]]), cl=np.array([lo]), cu=np.array([2 * lo])
+            ),
+        ]
+
+    @parameterized.expand(
+        [
+            (f"lo_{lo:g}_{'2d' if ray else '1d'}", lo, ray)
+            for lo in (1e3, 1e4, 1e5)
+            for ray in (True, False)
+        ]
+    )
+    def test_phase1_finds_the_far_band(
+        self, _name: str, lo: float, with_free_ray: bool
+    ) -> None:
+        problem = Problem(ineq=self._layers(lo, with_free_ray))
+
+        result = BarrierSolver().solve(problem)
+
+        self.assertTrue(problem.is_feasible(result.solution), result.message)
+
+    @parameterized.expand([(f"lo_{lo:g}", lo) for lo in (1e4, 1e5, 1e6)])
+    def test_the_far_optimum_is_reached(self, _name: str, lo: float) -> None:
+        problem = Problem(
+            obj=LinearObjective(c=np.array([1.0])), ineq=self._layers(lo, False)
+        )
+
+        result = BarrierSolver().solve(problem)
+
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
+        self.assertAlmostEqual(result.objective_value / lo, 1.0, delta=1e-8)
