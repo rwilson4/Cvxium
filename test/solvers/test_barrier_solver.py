@@ -3366,6 +3366,56 @@ class RecessionDirectionTest(unittest.TestCase):
         np.testing.assert_array_equal(B.T @ d[:2], np.zeros(1))
         self.assertTrue(problem.is_feasible(np.asarray(result.solution) + 1e6 * d))
 
+    @parameterized.expand(
+        [
+            ("barrier_norm", BarrierSolver, False),
+            ("primal_dual_norm", PrimalDualSolver, False),
+            ("barrier_lifted_squared_norm", BarrierSolver, True),
+            ("primal_dual_lifted_squared_norm", PrimalDualSolver, True),
+        ]
+    )
+    def test_search_respects_norm_constraint(
+        self,
+        _name: str,
+        solver: type[BarrierSolver] | type[PrimalDualSolver],
+        squared: bool,
+    ) -> None:
+        B = np.array([[0.0, 1.0, -1.0]])
+        c = np.array([-10.0, -1.0, 0.0])
+        obj = QuadraticObjective(c, ZeroSystem(3).low_rank_update(B.T))
+        bounds = BoundsConstraintLayer(lb=0.0, dimension=3)
+        norm: ConstraintLayer
+        if squared:
+            norm = LiftedConstraintLayer(SquaredNormConstraintLayer(4.0, 1), 1, 2)
+        else:
+            norm = NormConstraintLayer(
+                B=np.array([[1.0, 0.0, 0.0]]), c=np.zeros(1), phi=2.0
+            )
+        x0 = np.array([1.0, 2.0, 1.0])
+        affine_problem = Problem(obj=obj, ineq=[bounds])
+        problem = Problem(obj=obj, ineq=[bounds, norm])
+
+        affine_d, _ = none_throws(
+            _BarrierAdapter(affine_problem).find_structured_recession_direction(x0)
+        )
+        self.assertGreater(affine_d[0], 0.0)
+        self.assertIsNone(norm.recession_rates(x0, affine_d))
+        witness = _BarrierAdapter(problem).find_structured_recession_direction(x0)
+        d, slope = none_throws(witness)
+        self.assertEqual(d[0], 0.0)
+        self.assertLess(slope, 0.0)
+
+        result = solver().solve(problem, x0)
+
+        self.assertIs(result.status, SolveStatus.UNBOUNDED, result.message)
+        certified = np.asarray(
+            none_throws(none_throws(result.certificate).primal_witness)
+        )
+        np.testing.assert_allclose(certified, d, rtol=1e-12, atol=0.0)
+        self.assertTrue(
+            problem.is_feasible(np.asarray(result.solution) + 1e6 * certified)
+        )
+
     def test_lifted_curved_layer_checks_only_its_coordinates(self) -> None:
         layer = LiftedConstraintLayer(SquaredNormConstraintLayer(2.0, 2), 2)
         x = np.zeros(3)

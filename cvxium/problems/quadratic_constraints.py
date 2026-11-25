@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
+from scipy.sparse import csr_array, eye_array
 
 from ..exceptions import NewtonStepError
 from ..linalg.numerical_helpers import (
@@ -131,6 +132,10 @@ class NormConstraintLayer(DirectConstraintLayer):
 
         """
         return self.B.shape[1]
+
+    def recession_constraint_rows(self) -> npt.NDArray[np.float64]:
+        """Require the affine residual to remain fixed along the ray."""
+        return self.B
 
     def recession_rates(
         self, x: npt.NDArray[np.float64], d: npt.NDArray[np.float64]
@@ -575,6 +580,10 @@ class SquaredNormConstraintLayer(DirectConstraintLayer):
 
         """
         return self._dimension
+
+    def recession_constraint_rows(self) -> csr_array:
+        """Require every bounded coordinate to stay fixed along the ray."""
+        return eye_array(self.dimension, dtype=np.float64, format="csr")
 
     def recession_rates(
         self, x: npt.NDArray[np.float64], d: npt.NDArray[np.float64]

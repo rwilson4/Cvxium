@@ -660,17 +660,18 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         if self._searched_recession or obj.feasibility_threshold is not None:
             return None
         rows = obj.recession_nullspace_rows()
-        if rows is None or not all(layer.is_linear for layer in self._problem.ineq):
+        if rows is None:
             self._searched_recession = True
             return None
         if not self._problem.is_feasible(x):
             return None
 
+        equalities = [scipy.sparse.csr_matrix(rows)]
         eq = self._problem.eq
         if eq is not None:
             if not np.all(np.abs(eq.A @ x - eq.b) < 1e-10):
                 return None
-            rows = scipy.sparse.vstack((rows, eq.A), format="csr")
+            equalities.append(scipy.sparse.csr_matrix(eq.A))
 
         lo = np.full(x.size, -1.0)
         hi = np.ones(x.size)
@@ -682,8 +683,15 @@ class _BarrierAdapter(InteriorPointMethodSolver):
                     lo[np.broadcast_to(np.isfinite(layer.lb), x.shape)] = 0.0
                 if layer.ub is not None:
                     hi[np.broadcast_to(np.isfinite(layer.ub), x.shape)] = 0.0
-            else:
+            elif layer.is_linear:
                 inequalities.append(layer.grad_constraints(x))
+            else:
+                layer_rows = layer.recession_constraint_rows()
+                if layer_rows is None:
+                    self._searched_recession = True
+                    return None
+                equalities.append(scipy.sparse.csr_matrix(layer_rows))
+        A = scipy.sparse.vstack(equalities, format="csr")
         G = (
             scipy.sparse.vstack(
                 [scipy.sparse.csr_matrix(block) for block in inequalities], format="csr"
@@ -694,8 +702,8 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         self._searched_recession = True
         result = scipy.optimize.linprog(
             obj.gradient(x),
-            A_eq=rows,
-            b_eq=np.zeros(rows.shape[0]),
+            A_eq=A,
+            b_eq=np.zeros(A.shape[0]),
             A_ub=G,
             b_ub=np.zeros(G.shape[0]) if G is not None else None,
             bounds=np.column_stack((lo, hi)),

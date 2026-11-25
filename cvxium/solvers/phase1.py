@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
+from scipy.sparse import csr_array, hstack
 
 from ..linalg.systems import (
     ArrowSystem,
@@ -179,6 +180,16 @@ class LiftedConstraintLayer(SlackConstraintLayer):
 
         """
         return self._base.num_constraints(self._base_dim)
+
+    def recession_constraint_rows(self) -> npt.NDArray[np.float64] | csr_array | None:
+        """Extend the base layer's recession equations with zero columns."""
+        rows = self._base.recession_constraint_rows()
+        if rows is None:
+            return None
+        if isinstance(rows, csr_array):
+            extra = csr_array((rows.shape[0], self._extra_dim))
+            return hstack((rows, extra), format="csr")
+        return np.pad(rows, ((0, 0), (0, self._extra_dim)))
 
     def recession_rates(
         self, x: npt.NDArray[np.float64], d: npt.NDArray[np.float64]
