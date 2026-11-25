@@ -25,11 +25,9 @@ import scipy.sparse.linalg
 from .._typing import none_throws
 from ..exceptions import (
     ConstraintBoundaryError,
-    InteriorPointMethodError,
     InvalidDescentDirectionError,
     NewtonStepError,
     ProblemInfeasibleError,
-    RecessionDirectionError,
     SevereCurvatureError,
 )
 from ..problems.constraint_layers import (
@@ -1627,9 +1625,9 @@ class BarrierSolver(Solver):
         soon as a strictly feasible point is found (objective < 0), so the same solver
         doubles as a feasibility solver, e.g. for a Phase I problem, where iterating to
         the optimum is both wasteful and (for the slack form) numerically degenerate as
-        the slack is driven to its minimum. Under the raise policy, if a flat
-        recession direction prevents Phase I from finding a barrier center, the
-        feasibility subproblem is retried with the primal-dual solver.
+        the slack is driven to its minimum. When a flat recession direction leaves a
+        Phase I problem without a barrier center, the cascade in
+        ``_solve_feasibility`` retries it inside a box around its seed (issue #49).
 
         """
         if not problem.ineq:
@@ -1672,33 +1670,4 @@ class BarrierSolver(Solver):
         adapter = _BarrierAdapter(
             problem=problem, settings=self.settings, equality=equality
         )
-        x = np.asarray(x0_feasible)
-        try:
-            return adapter.solve(x0=x, on_infeasible=on_infeasible)
-        except InteriorPointMethodError as e:
-            cause = e.__cause__
-            threshold = problem.obj.feasibility_threshold
-            if (
-                threshold is None
-                or on_infeasible != "raise"
-                or not isinstance(cause, RecessionDirectionError)
-                or cause.unbounded
-            ):
-                raise
-
-            # A flat recession direction can leave the Phase I barrier without
-            # a center. The primal-dual loop can reach the feasibility threshold
-            # directly from the original Phase I seed.
-            from .primal_dual_solver import PrimalDualSolver
-
-            result = PrimalDualSolver(settings=self.settings).solve(problem, x)
-            seed = np.asarray(result.solution)
-            if equality is not None:
-                # The next barrier solve assumes its start lies on the manifold.
-                seed = np.asarray(equality.solve(x0=seed).solution)
-            if (
-                problem.is_feasible(seed)
-                and problem.obj.feasibility_residual(seed) < threshold
-            ):
-                return replace(result, solution=seed)
-            raise
+        return adapter.solve(x0=np.asarray(x0_feasible), on_infeasible=on_infeasible)

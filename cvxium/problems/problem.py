@@ -18,6 +18,7 @@ policy a feasibility solve follows on an infeasibility certificate.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import reduce
@@ -33,6 +34,7 @@ from ..problems.constraint_layers import (
     SlackConstraintLayer,
 )
 from ..problems.linear_constraints import (
+    BoundsConstraintLayer,
     EqualityConstraintLayer,
 )
 from ..problems.objective import (
@@ -584,6 +586,7 @@ class Problem:
     def make_phase1(
         self,
         x0: npt.NDArray[np.float64],
+        radius: float | None = None,
     ) -> tuple[Problem, npt.NDArray[np.float64]]:
         """Construct a Phase I problem whose solution is a strictly feasible point.
 
@@ -598,6 +601,14 @@ class Problem:
           ``_make_phase1_slack_form``).
         ``Solver._solve_feasibility`` drives the Phase I solve.
 
+        With a ``radius`` R, the box |w_j - x0_j| ≤ R (around the projected x0) joins
+        the background layers. It makes the Phase I region bounded, so a recession
+        direction along which the Phase I objective is constant cannot leave the
+        barrier without a center (issue #49). The box changes the Phase I problem but
+        not its purpose, since any strictly feasible point inside the box is strictly
+        feasible for the original problem; it can only make a feasible problem look
+        infeasible when R is too small, which the caller must allow for.
+
         When equality constraints are present, ``x0`` is first projected onto A w = b
         (with ``EqualitySolver``), since a feasible-start barrier keeps A w = b but
         never corrects an off-manifold iterate. Both forms start from the projected
@@ -609,6 +620,9 @@ class Problem:
          x0 : npt.NDArray[np.float64]
             Starting iterate, of length M. For the slack form it also sets the initial
             slack, and it should already satisfy the background layers.
+         radius : float | None
+            Half-width R > 0 of a box around x0 to add as a background layer, or
+            ``None`` (the default) for no box.
 
         Returns
         -------
@@ -651,7 +665,12 @@ class Problem:
 
             x0 = np.asarray(EqualitySolver(constraint=self.eq).solve(x0=x0).solution)
         active = self.ineq[-1]
-        background = self.ineq[:-1]
+        background = list(self.ineq[:-1])
+        if radius is not None:
+            if not (math.isfinite(radius) and radius > 0.0):
+                raise ValueError(f"radius must be positive and finite; got {radius}.")
+            box = BoundsConstraintLayer(lb=x0 - radius, ub=x0 + radius)
+            background = [box, *background]
 
         if isinstance(active, DirectConstraintLayer):
             return self._make_phase1_direct_form(active, background), x0

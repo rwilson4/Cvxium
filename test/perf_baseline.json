@@ -270,6 +270,15 @@
     57,
     2
   ],
+  "test.solvers.test_barrier_solver.FlatPhase1BoxTest.test_issue_28_lp_is_solved_without_primal_dual_0_seed_0": [
+    68
+  ],
+  "test.solvers.test_barrier_solver.FlatPhase1BoxTest.test_issue_28_lp_is_solved_without_primal_dual_1_seed_3": [
+    73
+  ],
+  "test.solvers.test_barrier_solver.FlatPhase1BoxTest.test_issue_28_lp_is_solved_without_primal_dual_2_seed_7": [
+    69
+  ],
   "test.solvers.test_barrier_solver.OnInfeasibleContinueTest.test_feasible_problem_returns_normally": [
     2
   ],
