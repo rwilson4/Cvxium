@@ -2255,7 +2255,8 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
         Wires ``ArmijoBarrierMerit`` on f_t to ``LineSearch``, with
         ``btls_keep_feasible`` as the maximum-step finder and the Armijo settings for α,
-        β and the minimum step. When ``armijo.use_self_concordant_step_cap`` is set, the
+        β and the minimum step, scaled by the damped Newton step 1 / (1 + λ) (see the
+        comment at its use). When ``armijo.use_self_concordant_step_cap`` is set, the
         first trial step is capped at 1 / (1 + λ); the cap is applied here because this
         method knows λ^2.
 
@@ -2308,10 +2309,17 @@ class BaseInteriorPointMethodSolver(Optimizer):
         """
         alpha = self.settings.armijo.alpha
         beta = self.settings.armijo.beta
-        min_step = self.settings.armijo.min_step
+        # The floor is relative to the damped Newton step 1 / (1 + λ), not to the
+        # full step (issue #51). The damped step is feasible, since it stays inside
+        # the Dikin ellipsoid, and it decreases f_t by at least λ - log(1 + λ)
+        # (Boyd and Vandenberghe, 2004, section 9.6.4). With λ in the hundreds or
+        # more, far from the center, every feasible fraction of Δx can be below a
+        # fixed floor although a large decrease is available.
+        damped_step = 1.0 / (1.0 + math.sqrt(max(lambda_squared, 0.0)))
+        min_step = self.settings.armijo.min_step * damped_step
 
         if self.settings.armijo.use_self_concordant_step_cap:
-            step_cap = 1.0 / (1.0 + math.sqrt(lambda_squared))
+            step_cap = damped_step
         else:
             step_cap = 1.0
 
