@@ -806,6 +806,52 @@ class ImbalanceConstraintLayer(SlackConstraintLayer):
         else:
             self._psi = np.full(q, psi, dtype=np.float64)
 
+    def interior_point(
+        self, equality: EqualityConstraintLayer | None = None
+    ) -> npt.NDArray[np.float64] | None:
+        """Return the band's center, B w = c, on the equality manifold if one is given.
+
+        Every residual (B w - c)_i is then 0, strictly inside its band ±ψ_i. The point
+        returned is the minimum-norm solution of
+           [ A ]       [ b ]
+           [ B ]  w  = [ c ],
+        computed as w = C^T y from the small Gram system (C C^T) y = r, with C the
+        stacked matrix and r the stacked right-hand side, plus one step of iterative
+        refinement. That costs O((p + q)^2 M) and works for a sparse A. When the stacked
+        system has no solution, so no point of the manifold reaches the center, the
+        result misses it, and the caller's recheck of the inequality and the equality
+        residual sends the solve on to Phase I.
+
+        Parameters
+        ----------
+         equality : EqualityConstraintLayer | None
+            The problem's equality constraints A w = b, or ``None``.
+
+        Returns
+        -------
+         w : npt.NDArray[np.float64]
+            The minimum-norm point with B w = c (and A w = b), in the least-squares
+            sense when that system is inconsistent.
+
+        """
+        B = np.asarray(self.B, dtype=np.float64)
+        if equality is None:
+            blocks: list[Any] = [B]
+            r = np.asarray(self.c, dtype=np.float64)
+        else:
+            A = equality.A
+            blocks = [A.toarray() if scipy.sparse.issparse(A) else np.asarray(A), B]
+            r = np.concatenate([np.asarray(equality.b, dtype=np.float64), self.c])
+        C = np.vstack(blocks)
+        gram = C @ C.T
+
+        def min_norm(rhs: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+            y = np.linalg.lstsq(gram, rhs, rcond=None)[0]
+            return np.asarray(C.T @ y, dtype=np.float64)
+
+        w = min_norm(r)
+        return w + min_norm(r - C @ w)
+
     @property
     def q(self) -> int:
         """Return the number q of imbalance rows, the row count of B.

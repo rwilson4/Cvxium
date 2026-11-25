@@ -20,6 +20,7 @@ from cvxium.linalg.systems import (
 from cvxium.problems.linear_constraints import (
     BoundsConstraintLayer,
     EqualityConstraintLayer,
+    ImbalanceConstraintLayer,
     LinearInequalityConstraintLayer,
 )
 from cvxium.problems.objective import (
@@ -699,6 +700,75 @@ class ProblemMakePhase1Test(unittest.TestCase):
         slack_upper = phase1.ineq[-2]
         c_upper = slack_upper.constraints(x0_aug)
         assert np.all(c_upper < 0), f"Slack upper not strictly feasible: {c_upper}"
+
+
+class SlackPhase1ResidualTest(unittest.TestCase):
+    """Slack-form Phase I stops on the active layer itself (#19).
+
+    The objective is still the slack s, which the dual certificate needs, but s only
+    bounds max_i f_i(w) from above and can stay positive long after w is strictly
+    feasible, so the feasibility residual a solver stops on is max_i f_i(w).
+    """
+
+    def _phase1(self) -> tuple[Problem, npt.NDArray[np.float64]]:
+        problem = Problem(
+            obj=LinearObjective(c=np.zeros(2)),
+            ineq=[BoundsConstraintLayer(lb=0.0, dimension=2)],
+        )
+        return problem.make_phase1(x0=np.array([-0.4, 1.0]))
+
+    def test_the_objective_is_still_the_slack(self) -> None:
+        phase1, x0_aug = self._phase1()
+        obj = none_throws(phase1.obj)
+        self.assertAlmostEqual(obj.evaluate(x0_aug), x0_aug[-1])
+
+    @parameterized.expand(
+        [
+            ("barely_inside_with_positive_slack", [1e-6, 1.0], 0.5, True),
+            ("inside_with_negative_slack", [0.05, 1.0], -0.01, True),
+            ("outside", [-0.1, 1.0], 0.5, False),
+        ]
+    )
+    def test_the_residual_is_the_active_layers_largest_value(
+        self, _name: str, w: list[float], s: float, feasible: bool
+    ) -> None:
+        phase1, _ = self._phase1()
+        residual = none_throws(phase1.obj).feasibility_residual(np.array([*w, s]))
+        self.assertEqual(residual < 0.0, feasible)
+
+
+class ImbalanceInteriorPointTest(unittest.TestCase):
+    """``ImbalanceConstraintLayer.interior_point`` returns its band's center (#19)."""
+
+    def setUp(self) -> None:
+        rng = np.random.default_rng(19)
+        self.B = rng.standard_normal((4, 30))
+        self.c = rng.standard_normal(4)
+        self.layer = ImbalanceConstraintLayer(B=self.B, c=self.c, psi=0.05)
+
+    def test_without_equality_it_is_the_center(self) -> None:
+        w = none_throws(self.layer.interior_point())
+        np.testing.assert_allclose(self.B @ w, self.c, atol=1e-12)
+        self.assertTrue(self.layer.is_satisfied(w))
+
+    @parameterized.expand([("dense", False), ("sparse", True)])
+    def test_with_equality_it_is_the_center_on_the_manifold(
+        self, _name: str, sparse: bool
+    ) -> None:
+        rng = np.random.default_rng(1)
+        A = rng.standard_normal((3, 30))
+        b = rng.standard_normal(3)
+        eq = EqualityConstraintLayer(A=scipy.sparse.csr_matrix(A) if sparse else A, b=b)
+        w = none_throws(self.layer.interior_point(eq))
+        np.testing.assert_allclose(A @ w, b, atol=1e-12)
+        np.testing.assert_allclose(self.B @ w, self.c, atol=1e-12)
+
+    def test_an_unreachable_center_fails_the_callers_recheck(self) -> None:
+        """When A w = b forbids B w = c, the point misses, and Phase I must run."""
+        eq = EqualityConstraintLayer(A=self.B[:1], b=self.c[:1] + 1.0)
+        w = none_throws(self.layer.interior_point(eq))
+        reached = bool(np.all(np.abs(eq.A @ w - eq.b) < 1e-10))
+        self.assertFalse(reached and self.layer.is_satisfied(w))
 
 
 class ProblemMakePhase1ProjectionTest(unittest.TestCase):

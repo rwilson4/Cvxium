@@ -126,6 +126,7 @@ from .exceptions import (
     NewtonStepError,
     OptimizationError,
     ProblemInfeasibleError,
+    RecessionDirectionError,
     SevereCurvatureError,
 )
 from .frontier.frontier_interpolation import (
@@ -395,6 +396,7 @@ __all__ = [
     "ProblemMarginallyFeasibleError",
     "QuadraticObjective",
     "QuadraticSaddleObjective",
+    "RecessionDirectionError",
     "SaddleBarrierDiagnostics",
     "SaddleFactory",
     "SaddleSystem",

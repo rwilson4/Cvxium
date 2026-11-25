@@ -270,6 +270,65 @@ class CenteringStepError(OptimizationError):
         self.inequality_multipliers = inequality_multipliers
 
 
+class RecessionDirectionError(CenteringStepError):
+    """Error raised when a centering step follows a recession direction to infinity.
+
+    The barrier's centering problem, minimize t f0(x) + φ(x) subject to A x = b, has no
+    minimizer when the feasible set has a recession direction d (A d = 0, and every
+    constraint is non-increasing along d) on which the objective does not increase.
+    Newton's method then follows d: each step roughly doubles x until the barrier
+    Hessian is numerically singular. The solver watches for that growth and, once it
+    sets in, checks the step as a candidate d against the constraints and the
+    objective. A verified direction is a certificate:
+    - cᵀd < 0 (``unbounded`` True): the objective is unbounded below on the feasible
+      set. ``BarrierSolver`` turns this into a ``SolveStatus.UNBOUNDED`` result with d
+      as its certificate.
+    - cᵀd = 0: an optimum may exist, but the optimal set is unbounded along d and the
+      central path does not exist, so the barrier method cannot reach it. The error
+      propagates like any failed centering step, with this diagnosis as its message.
+    The check is to a relative tolerance, so d is a recession direction of the
+    constraints as computed, up to rounding.
+
+    Parameters
+    ----------
+     message : str
+        Description of the failure.
+     suboptimality : float
+        Suboptimality bound of the centering subproblem at ``last_iterate``.
+     last_iterate : npt.NDArray[np.float64]
+        The iterate when the direction was certified.
+     direction : npt.NDArray[np.float64]
+        The recession direction d, normalized to unit length.
+     objective_slope : float
+        The objective's directional derivative ∇f0ᵀd along d.
+
+    """
+
+    def __init__(
+        self,
+        message: str,
+        suboptimality: float,
+        last_iterate: npt.NDArray[np.float64],
+        direction: npt.NDArray[np.float64],
+        objective_slope: float,
+    ) -> None:
+        super().__init__(message, suboptimality, last_iterate)
+        self.direction = direction
+        self.objective_slope = objective_slope
+
+    @property
+    def unbounded(self) -> bool:
+        """Return whether the objective decreases along the direction.
+
+        Returns
+        -------
+         unbounded : bool
+            True when ∇f0ᵀd < 0, which certifies the problem unbounded below.
+
+        """
+        return self.objective_slope < 0.0
+
+
 class ConeBoundaryError(ValueError):
     """Error raised when a cone-interior operation receives a boundary point.
 

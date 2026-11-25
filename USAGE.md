@@ -449,10 +449,14 @@ writing once the layer is correct:
   backtracks numerically; a closed form is usually available and is
   both faster and exact (return inf when no constraint binds).
 - `is_satisfied(w)`: a cheap strict-feasibility test.
-- For direct layers: `interior_point(equality)`, a strictly feasible
-  point known in closed form (it lets a feasibility solve skip Phase I),
-  and `barrier_parameter_hint`, a floor on the initial barrier
-  parameter for the direct-form Phase I.
+- `interior_point(equality)`: a strictly feasible point known in
+  closed form. When the layer is a feasibility problem's only
+  inequality, the solve takes it and skips Phase I. That matters most
+  for a low-rank slack layer, whose Phase I alone has a singular Newton
+  system (no curvature off the layer's rows). `ImbalanceConstraintLayer`
+  returns its band's center on the equality manifold.
+- For direct layers: `barrier_parameter_hint`, a floor on the initial
+  barrier parameter for the direct-form Phase I.
 
 ### 4c. Example: a squared-imbalance layer
 
@@ -672,6 +676,37 @@ Passing `on_infeasible="continue"` to `solve` makes `BarrierSolver`
 drive Phase I to its optimum before raising, so that `result` holds the
 least-infeasible point; the other solvers raise `NotImplementedError`
 for it.
+
+### 5d. Unbounded problems and recession directions
+
+A barrier solve has nothing to converge to when the feasible set has a
+recession direction d (A d = 0, no constraint increases along d) on
+which the objective does not increase: the centering problem
+t f0(x) + φ(x) is unbounded below, and Newton's method follows d,
+roughly doubling x each step. `BarrierSolver` watches for that growth
+and, on problems whose objective and layers are all affine, checks the
+step as such a d. A verified d settles the solve either way:
+- c^T d < 0: the problem is unbounded below. The result has status
+  `UNBOUNDED`, and its `certificate` (kind `"unbounded"`) carries d as
+  `primal_witness`: x + α d is feasible for every α ≥ 0.
+- c^T d = 0: an optimum may exist, but the optimal set is unbounded
+  along d and the central path does not exist. The solve fails with a
+  `RecessionDirectionError` (a `CenteringStepError`) naming the cause,
+  usually chained beneath an `InteriorPointMethodError`. Bound the
+  variables, or add an objective term that grows along d.
+
+```python
+from cvxium import LinearObjective, SolveStatus
+
+ray = Problem(
+    obj=LinearObjective(c=np.array([-1.0, -1.0])),
+    ineq=[BoundsConstraintLayer(lb=0.0, dimension=2)],
+    eq=EqualityConstraintLayer(A=np.array([[1.0, -1.0]]), b=np.zeros(1)),
+)
+ray_result = BarrierSolver().solve(ray, np.ones(2))
+assert ray_result.status is SolveStatus.UNBOUNDED
+d = ray_result.certificate.primal_witness  # along (1, 1)
+```
 
 ## 6. Initialize the barrier parameter to match the problem
 

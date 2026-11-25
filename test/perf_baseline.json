@@ -142,10 +142,10 @@
     2
   ],
   "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_recentering_failure_outside_the_optimization_family_is_absorbed": [
-    2,
-    2,
-    2,
-    2
+    0,
+    0,
+    0,
+    0
   ],
   "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_recentering_rescues_a_lone_ellipsoid_y_block": [
     2,
@@ -153,7 +153,7 @@
   ],
   "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_resolve_block_flags_only_a_seed_it_took_verbatim": [
     8,
-    6
+    1
   ],
   "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_seed_hugging_a_face_is_recentered_and_retried": [
     2,
@@ -249,7 +249,7 @@
     9
   ],
   "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_slack_form_solves_over_rank_update_background": [
-    8
+    12
   ],
   "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_slack_form_stages_background_infeasible_seed": [
     9

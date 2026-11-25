@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
+import scipy.sparse
+import scipy.sparse.linalg
 
 from .._typing import none_throws
 from ..exceptions import (
@@ -227,6 +229,11 @@ def _raise_to_objective_hint(
     if hint is None:
         return t0
     return max(t0, hint)
+
+
+# Relative tolerance of ``recession_slope``'s checks. Along a ray x = x0 + α d, the
+# step's deviation from d decays like |x0| / α, so a step from |x| ~ 1e6 |x0| passes.
+_RECESSION_RTOL = 1e-6
 
 
 class _BarrierAdapter(InteriorPointMethodSolver):
@@ -612,6 +619,67 @@ class _BarrierAdapter(InteriorPointMethodSolver):
             offset += n_c
         return result
 
+    def recession_slope(
+        self,
+        x: npt.NDArray[np.float64],
+        d: npt.NDArray[np.float64],
+    ) -> float | None:
+        """Verify d as a recession direction of an affine problem.
+
+        Checks, to the relative tolerance ``_RECESSION_RTOL`` (τ):
+        - A d = 0: ‖A d‖ ≤ τ ‖A‖_F;
+        - no inequality increases along d: max_i (G d)_i ≤ τ max_i |(G d)_i|, where G
+          stacks every layer's constraint Jacobian;
+        - the objective does not increase along d: c^T d ≤ τ ‖c‖.
+        Each layer and the objective must be affine (``is_linear``), so that G and c
+        do not depend on x and one direction holds along the whole ray. Otherwise
+        nothing is verified.
+
+        Parameters
+        ----------
+         x : npt.NDArray[np.float64]
+            The current iterate.
+         d : npt.NDArray[np.float64]
+            The candidate direction, of unit length.
+
+        Returns
+        -------
+         slope : float | None
+            c^T d when it is below -τ ‖c‖ (unbounded below), 0.0 when |c^T d| ≤ τ ‖c‖
+            (the objective is constant along d), and ``None`` when d is not verified
+            or the objective increases along it.
+
+        """
+        obj = none_throws(self._problem.obj)
+        if not obj.is_linear or not all(
+            layer.is_linear for layer in self._problem.ineq
+        ):
+            return None
+        tol = _RECESSION_RTOL
+        if self._equality is not None:
+            A = self.A
+            a_norm = float(
+                scipy.sparse.linalg.norm(A)
+                if scipy.sparse.issparse(A)
+                else np.linalg.norm(A)
+            )
+            if float(np.linalg.norm(A @ d)) > tol * a_norm:
+                return None
+        gd = np.concatenate(
+            [layer.grad_constraints_multiply(x, d) for layer in self._problem.ineq]
+            if self._problem.ineq
+            else [np.zeros(0)]
+        )
+        scale = float(np.max(np.abs(gd))) if gd.size else 0.0
+        if gd.size and float(np.max(gd)) > tol * scale:
+            return None
+        c = obj.gradient(x)
+        c_norm = float(np.linalg.norm(c))
+        slope = float(c @ d)
+        if slope > tol * c_norm:
+            return None
+        return slope if slope < -tol * c_norm else 0.0
+
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
         r"""Test whether x is feasible enough to stop a feasibility (Phase I) solve.
 
@@ -628,15 +696,17 @@ class _BarrierAdapter(InteriorPointMethodSolver):
 
         Notes
         -----
-        A feasibility solver's objective is its feasibility residual. For a slack-form
-        Phase I problem the objective is the slack s. For a direct-form Phase I problem
-        it is the active constraint value. The original problem is strictly feasible
-        once that residual drops below zero (the barrier keeps every constraint strictly
-        inside its domain, so a negative objective means a strictly interior iterate).
+        The test is the objective's ``feasibility_residual``. For a direct-form Phase I
+        problem that is the objective itself, the active constraint value. For a
+        slack-form one it is the active layer's largest constraint value max_i f_i(w),
+        which turns negative as soon as w is strictly feasible, even while the slack s
+        (the objective) is still positive. The barrier keeps every other constraint
+        strictly inside its domain, so a negative residual means a strictly interior
+        iterate.
         Only consulted in feasibility mode; an optimization solve never calls it.
 
         """
-        return bool(none_throws(self._problem.obj).evaluate(x) < 0.0)
+        return bool(none_throws(self._problem.obj).feasibility_residual(x) < 0.0)
 
     def solve(
         self,

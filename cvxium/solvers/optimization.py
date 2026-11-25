@@ -36,10 +36,12 @@ from ..exceptions import (
     InteriorPointMethodError,
     NewtonStepError,
     ProblemInfeasibleError,
+    RecessionDirectionError,
 )
 from ..problems.result import (
     BarrierDiagnostics,
     Duals,
+    InfeasibilityCertificate,
     ObjectiveOutcome,
     SolveResult,
     SolveStatus,
@@ -165,6 +167,16 @@ def _newton_solveresult(outcome: "_CenteringOutcome") -> SolveResult:
         ),
         duals=_duals_from(outcome.equality_multipliers, outcome.inequality_multipliers),
     )
+
+
+# Newton's method following a recession direction to infinity grows the iterate
+# geometrically: on a pure ray, a full step doubles it. ``_RAY_PATIENCE`` consecutive
+# steps that each grow the iterate's norm by ``_RAY_GROWTH`` or more trigger a check of
+# the step as a recession direction (``recession_slope``). The trigger only decides when
+# to check; the check decides what is certified, so a spurious trigger costs one
+# Jacobian product per layer and certifies nothing.
+_RAY_GROWTH = 1.5
+_RAY_PATIENCE = 3
 
 
 def _barrier_solveresult(
@@ -881,6 +893,14 @@ class BaseInteriorPointMethodSolver(Optimizer):
                     outer_nit=nit + 1,
                 )
             except CenteringStepError as e:
+                # A certified descent ray is the answer, not a failure: the problem
+                # is unbounded below, and the ray is the certificate.
+                if (
+                    isinstance(e, RecessionDirectionError)
+                    and e.unbounded
+                    and not feasibility_mode
+                ):
+                    return self._unbounded_result(e, nit, duality_gaps, phase1_res)
                 # A centering step failed: finalize from the best bounds gathered
                 # so far (or raise with them attached). Only meaningful for the
                 # optimization path; Phase I keeps its own feasibility handling.
@@ -1506,6 +1526,64 @@ class BaseInteriorPointMethodSolver(Optimizer):
             )
         return base + self._cause_suffix(cause)
 
+    def _unbounded_result(
+        self,
+        error: RecessionDirectionError,
+        nit: int,
+        duality_gaps: list[float],
+        phase1_res: SolveResult | None,
+    ) -> SolveResult:
+        """Build the ``UNBOUNDED`` result for a certified descent ray.
+
+        Parameters
+        ----------
+         error : RecessionDirectionError
+            The centering failure carrying the ray d, with ∇f0ᵀd < 0.
+         nit : int
+            Zero-based index of the outer iteration whose centering found the ray.
+         duality_gaps : list[float]
+            The duality-gap trajectory of the completed outer iterations.
+         phase1_res : SolveResult | None
+            The Phase I result that seeded the solve, if one ran.
+
+        Returns
+        -------
+         result : SolveResult
+            Status ``UNBOUNDED``, the last iterate as ``solution``, and an
+            ``InfeasibilityCertificate`` of kind ``"unbounded"`` whose
+            ``primal_witness`` is d. A point x + α d stays feasible for every α ≥ 0
+            and drives the objective to -inf.
+
+        """
+        x = error.last_iterate
+        result = _barrier_solveresult(
+            solution=x,
+            objective_value=self.evaluate_objective(x),
+            dual_value=float("-inf"),
+            equality_multipliers=np.zeros(0),
+            inequality_multipliers=np.zeros(0),
+            suboptimality=float("inf"),
+            duality_gaps=duality_gaps,
+            nits=nit + 1,
+            inner_nits=[],
+            inner_suboptimalities=[],
+            inner_btls_steps=[],
+            inner_quadratic_from=[],
+            status=2,
+            message=(
+                f"{error.message} The direction d is attached as the certificate's "
+                f"primal_witness (objective slope {error.objective_slope:.3g})."
+            ),
+            phase1=phase1_res,
+        )
+        return replace(
+            result,
+            status=SolveStatus.UNBOUNDED,
+            certificate=InfeasibilityCertificate(
+                kind="unbounded", primal_witness=error.direction
+            ),
+        )
+
     def _accept_phase1_partial_or_raise(
         self,
         e: CenteringStepError,
@@ -1748,6 +1826,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
         best_suboptimality = np.inf
         best_nu_hat: npt.NDArray[np.float64] | None = None
         best_delta_x: npt.NDArray[np.float64] | None = None
+        ray_steps = 0  # consecutive steps growing ``x`` by ``_RAY_GROWTH`` or more
         iters_since_improvement = 0
         for nit in range(self.settings.inner.max_iterations):
             newton_start = time.time()
@@ -2023,6 +2102,32 @@ class BaseInteriorPointMethodSolver(Optimizer):
                     status=1,
                     message=("Newton's method found a feasible point."),
                 )
+
+            # A run of steps that each grow x geometrically is the signature of a
+            # recession direction (see ``_RAY_GROWTH``): check the step as one.
+            x_norm = float(np.linalg.norm(x))
+            step_norm = float(np.linalg.norm(x + btls_s * delta_x))
+            grew = x_norm > 0.0 and step_norm >= _RAY_GROWTH * x_norm
+            ray_steps = ray_steps + 1 if grew else 0
+            if ray_steps >= _RAY_PATIENCE:
+                d = delta_x / float(np.linalg.norm(delta_x))
+                slope = self.recession_slope(x, d)
+                if slope is not None:
+                    kind = (
+                        "the objective decreases along it, so the problem is "
+                        "unbounded below"
+                        if slope < 0.0
+                        else "the objective is constant along it, so the optimal set "
+                        "is unbounded and the central path does not exist"
+                    )
+                    raise RecessionDirectionError(
+                        "Centering followed a recession direction of the feasible "
+                        f"set to infinity (|x| = {step_norm:.3g}): {kind}.",
+                        suboptimality=suboptimality,
+                        last_iterate=x.copy(),
+                        direction=d,
+                        objective_slope=slope,
+                    )
 
             x += btls_s * delta_x
 
@@ -2318,6 +2423,37 @@ class BaseInteriorPointMethodSolver(Optimizer):
             Implementations raise when the system cannot be solved.
 
         """
+
+    def recession_slope(
+        self,
+        x: npt.NDArray[np.float64],
+        d: npt.NDArray[np.float64],
+    ) -> float | None:
+        """Check whether d is a recession direction along which centering diverges.
+
+        The centering problem has no minimizer when d satisfies A d = 0, no constraint
+        increases along d, and the objective does not increase either. Implementations
+        verify those conditions where they can (``BarrierSolver`` does for affine
+        problems) and return the objective's slope along d. The base class verifies
+        nothing.
+
+        Parameters
+        ----------
+         x : npt.NDArray[np.float64]
+            The current iterate.
+         d : npt.NDArray[np.float64]
+            The candidate direction, of unit length.
+
+        Returns
+        -------
+         slope : float | None
+            ∇f0ᵀd when d is a verified recession direction with ∇f0ᵀd ≤ 0: negative
+            when the problem is unbounded below, 0.0 when the objective is constant
+            along d (to tolerance). ``None`` when d is not verified, or the objective
+            increases along it.
+
+        """
+        return None
 
     @abstractmethod
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:

@@ -11,10 +11,12 @@ import numpy.typing as npt
 import scipy.sparse
 from parameterized import parameterized
 
+from cvxium._typing import none_throws
 from cvxium.diagnostics.trace import ListTrace
 from cvxium.exceptions import (
     CenteringStepError,
     InteriorPointMethodError,
+    RecessionDirectionError,
 )
 from cvxium.linalg.systems import (
     DenseSystem,
@@ -53,6 +55,7 @@ from cvxium.solvers.optimization import (
     _CenteringOutcome,
 )
 from cvxium.solvers.phase1 import LiftedConstraintLayer
+from cvxium.solvers.primal_dual_solver import PrimalDualSolver
 from cvxium.solvers.settings import (
     BarrierInitStrategy,
     InnerSettings,
@@ -3142,3 +3145,162 @@ class DominantLowRankUpdateTest(unittest.TestCase):
 
         with self.assertRaises(ProblemCertifiablyInfeasibleError):
             BarrierSolver().solve(problem, x0)
+
+
+class UnboundedPhase1Test(unittest.TestCase):
+    """Phase I copes with a feasible set that is unbounded (issue #19).
+
+    Bounds w ≥ 0.01, 20 equality rows and a 5-row imbalance band over 100 weights
+    leave a feasible set with recession directions d ≥ 0 (A d = 0, B d = 0), and Phase I
+    drops the objective that bounds the problem. With bounds as the background, the
+    imbalance stage's barrier is unbounded below along d: every Newton step doubled w,
+    up to 5e7, where the Hessian was numerically singular. With the imbalance band
+    feasibilized alone, its Phase I has no curvature off the band's rows, so its Newton
+    system was exactly singular. Now the imbalance stage sees that the bounds stage's
+    point already satisfies it, a slack-form Phase I stops once the active layer is
+    satisfied rather than waiting for the slack to turn negative, and the band alone
+    supplies its center through ``interior_point``.
+    """
+
+    @staticmethod
+    def _problem(bounds_first: bool, shift: float = 0.0) -> Problem:
+        rng = np.random.default_rng(0)
+        M = 100
+        A = rng.standard_normal((20, M))
+        b = A @ (rng.random(M) + 0.1)
+        eq = EqualityConstraintLayer(A=A, b=b)
+        bounds = BoundsConstraintLayer(lb=0.01, dimension=M)
+        feasible = BarrierSolver().solve(Problem(eq=eq, ineq=[bounds])).solution
+        B = rng.standard_normal((5, M))
+        imbalance = ImbalanceConstraintLayer(B=B, c=B @ feasible + shift, psi=0.05)
+        objective = QuadraticObjective(
+            c=np.zeros(M), hessian_contribution=DiagonalSystem(np.ones(M))
+        )
+        ineq: list[ConstraintLayer] = (
+            [bounds, imbalance] if bounds_first else [imbalance, bounds]
+        )
+        return Problem.minimize(objective).subject_to(eq=eq, ineq=ineq)
+
+    @parameterized.expand(
+        [
+            ("bounds_first_barrier", True, "barrier"),
+            ("bounds_first_primal_dual", True, "primal_dual"),
+            ("imbalance_first_barrier", False, "barrier"),
+            ("imbalance_first_primal_dual", False, "primal_dual"),
+        ]
+    )
+    def test_solves_without_a_starting_point(
+        self, _name: str, bounds_first: bool, engine: str
+    ) -> None:
+        problem = self._problem(bounds_first)
+        solver = BarrierSolver() if engine == "barrier" else PrimalDualSolver()
+
+        result = problem.solve(solver=solver)
+
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
+        self.assertTrue(problem.is_feasible(result.solution))
+
+    @parameterized.expand([(f"shift_{shift:g}", shift) for shift in (0.5, 5.0, 50.0)])
+    def test_solves_when_phase1_must_cross_into_the_band(
+        self, _name: str, shift: float
+    ) -> None:
+        """A seed outside the band still reaches OPTIMAL, bounds first, barrier.
+
+        Shifting the band's target puts the bounds stage's point outside it, so the
+        imbalance stage's Phase I must work, along a feasible set with recession
+        directions. It reaches the band within a few steps, which then holds w
+        inside it by only up to ψ = 0.05 while the barrier pulls w out along the
+        ray. Stopping on max_i f_i(w) < 0 ends Phase I there. A stop margin of half
+        the seed's violation, about 1.1, could never be met inside a 0.05 band, and
+        neither could s < 0 on the ray, so the iterates ran off to |w| ~ 1e8.
+        """
+        problem = self._problem(bounds_first=True, shift=shift)
+
+        result = problem.solve(solver=BarrierSolver())
+
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
+
+
+class RecessionDirectionTest(unittest.TestCase):
+    """The barrier certifies a ray its centering follows to infinity.
+
+    On a feasible set with a recession direction d along which the objective does not
+    increase, the centering problem has no minimizer and Newton's method doubles x
+    each step. A descent ray (c^T d < 0) is returned as an ``UNBOUNDED`` result with d
+    as its certificate. A flat one (c^T d = 0) fails with ``RecessionDirectionError``.
+    Before, both died on a singular Newton system or a failed line search.
+    """
+
+    @staticmethod
+    def _assert_ray(
+        problem: Problem, d: npt.NDArray[np.float64], tol: float = 1e-6
+    ) -> None:
+        """Check d independently: A d = 0, no constraint grows, c^T d < 0."""
+        x = np.zeros(problem.dimension)
+        if problem.eq is not None:
+            np.testing.assert_allclose(problem.eq.A @ d, 0.0, atol=tol)
+        for layer in problem.ineq:
+            gd = layer.grad_constraints_multiply(x, d)
+            assert np.all(gd <= tol), gd
+        assert float(none_throws(problem.obj).gradient(x) @ d) < -tol
+
+    def test_an_unbounded_lp_is_certified(self) -> None:
+        problem = Problem(
+            obj=LinearObjective(c=np.array([-1.0, 0.0, 0.0])),
+            ineq=[BoundsConstraintLayer(lb=0.0, ub=np.array([np.inf, 1.0, 1.0]))],
+        )
+
+        result = BarrierSolver().solve(problem, np.full(3, 0.5))
+
+        self.assertIs(result.status, SolveStatus.UNBOUNDED, result.message)
+        certificate = none_throws(result.certificate)
+        self.assertEqual(certificate.kind, "unbounded")
+        d = none_throws(certificate.primal_witness)
+        np.testing.assert_allclose(d, [1.0, 0.0, 0.0], atol=1e-6)
+        self._assert_ray(problem, d)
+
+    def test_the_ray_respects_the_equality(self) -> None:
+        problem = Problem(
+            obj=LinearObjective(c=np.array([-1.0, -1.0])),
+            ineq=[BoundsConstraintLayer(lb=0.0, dimension=2)],
+            eq=EqualityConstraintLayer(A=np.array([[1.0, -1.0]]), b=np.zeros(1)),
+        )
+
+        result = BarrierSolver().solve(problem, np.ones(2))
+
+        self.assertIs(result.status, SolveStatus.UNBOUNDED, result.message)
+        d = none_throws(none_throws(result.certificate).primal_witness)
+        np.testing.assert_allclose(d, np.full(2, np.sqrt(0.5)), atol=1e-6)
+        self._assert_ray(problem, d)
+
+    def test_a_flat_ray_is_diagnosed(self) -> None:
+        """min x_1 over x >= 0: x_2 can grow forever at no cost."""
+        problem = Problem(
+            obj=LinearObjective(c=np.array([1.0, 0.0])),
+            ineq=[BoundsConstraintLayer(lb=0.0, dimension=2)],
+        )
+
+        with self.assertRaises(InteriorPointMethodError) as caught:
+            BarrierSolver().solve(problem, np.ones(2))
+
+        cause = caught.exception.__cause__
+        self.assertIsInstance(cause, RecessionDirectionError)
+        assert isinstance(cause, RecessionDirectionError)
+        self.assertFalse(cause.unbounded)
+        np.testing.assert_allclose(cause.direction, [0.0, 1.0], atol=1e-6)
+        self.assertIn("central path does not exist", str(cause))
+
+    def test_a_curved_objective_is_never_certified(self) -> None:
+        """Only affine problems are checked: a quadratic grows along any ray."""
+        problem = Problem(
+            obj=QuadraticObjective(
+                c=np.array([-10.0, 0.0]),
+                hessian_contribution=DiagonalSystem(np.array([1e-3, 1e-3])),
+            ),
+            ineq=[BoundsConstraintLayer(lb=0.0, dimension=2)],
+        )
+
+        result = BarrierSolver().solve(problem, np.ones(2))
+
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
+        np.testing.assert_allclose(result.solution[0], 1e4, rtol=1e-3)

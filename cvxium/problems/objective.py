@@ -230,6 +230,29 @@ class Objective(ABC):
         obj.feasibility_threshold = threshold
         return obj
 
+    def feasibility_residual(self, w: npt.NDArray[np.float64]) -> float:
+        """Return the value a feasibility solve compares with its threshold.
+
+        A solver in feasibility mode (``feasibility_threshold`` set) stops once this
+        falls below the threshold. It is the objective value itself unless a subclass
+        knows a sharper test. Slack-form Phase I's objective is one: its value, the
+        slack s, only bounds the active layer's largest constraint value from above, and
+        the original problem is strictly feasible as soon as that constraint value is
+        negative, whatever s is.
+
+        Parameters
+        ----------
+         w : npt.NDArray[np.float64]
+            Point to test, of length M.
+
+        Returns
+        -------
+         residual : float
+            A value that is negative only at points that solve the feasibility problem.
+
+        """
+        return self.evaluate(w)
+
     @abstractmethod
     def evaluate(self, w: npt.NDArray[np.float64]) -> float:
         """Evaluate the objective value f0(w).
