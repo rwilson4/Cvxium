@@ -1171,22 +1171,21 @@ class MinimizeLagrangianTest(unittest.TestCase):
         assert x_min is None
         assert delta2 is None
 
-    def test_returns_none_for_linear_objective_with_quadratic_layer(self) -> None:
-        r"""LP objective + ``NormConstraintLayer`` falls back to plug-in despite PD ``H_L``.
+    def test_recovers_minimizer_for_linear_objective_with_quadratic_layer(
+        self,
+    ) -> None:
+        r"""LP objective + ``NormConstraintLayer`` minimizes the Lagrangian exactly.
 
-        Architecturally, ``_lagrangian_hessian_solve`` assembles ``H_L`` as a
-        structured ``MatrixSystem`` -- the objective's ``hessian_contribution`` as the
-        base, with the layer's ``hessian_curvature`` composed on top.
-        ``LinearObjective`` contributes no curvature (a zero base), so the layer's
-        low-rank (Woodbury) update rides a singular base and the solve is non-finite
-        even though the assembled ``H_L = 2 lambda B^T B`` is analytically PD.
-        ``_minimize_lagrangian`` detects the non-finite delta and returns ``None`` so
-        the caller falls back to the plug-in ``L(x^star, lambda)`` form (which is
-        correct at centering convergence).
-
-        Pinning current behavior; a more sophisticated dispatch could recognize the
-        zero-curvature base case and route the solve through the constraint layer's
-        curvature directly.
+        ``_lagrangian_hessian_solve`` assembles ``H_L`` as a structured
+        ``MatrixSystem``: the objective's ``hessian_contribution`` as the base, with
+        the layer's ``hessian_curvature`` on top. ``LinearObjective`` contributes no
+        curvature, so the layer's low-rank update rides a zero base. That base has no
+        solve for the Woodbury identity to start from, and this case used to fall
+        back to the plug-in ``L(x^star, lambda)``. A zero base is now factored
+        directly (``_prepare_zero_base_update``), since ``H_L = 2 lambda B^T B`` is
+        positive definite whenever ``B`` (5 x 4 here) has full column rank. So the
+        minimizer of ``L = c^T x + lambda (||B x - c_n||^2 - phi^2)`` is recovered:
+        ``x = (B^T B)^{-1} (B^T c_n - c / (2 lambda))``.
         """
         rng = np.random.default_rng(2704)
         M = 4
@@ -1200,13 +1199,14 @@ class MinimizeLagrangianTest(unittest.TestCase):
             ineq=[NormConstraintLayer(B=B, c=c_norm, phi=phi)],
         )
         adapter = _BarrierAdapter(problem=problem, settings=OptimizationSettings())
-        lmbda = np.array([0.6])
+        lam = 0.6
         x0 = np.zeros(M)
 
-        x_min, delta2 = adapter._minimize_lagrangian(x0=x0, lmbda=lmbda)
+        x_min, delta2 = adapter._minimize_lagrangian(x0=x0, lmbda=np.array([lam]))
 
-        assert x_min is None
-        assert delta2 is None
+        expected = np.linalg.solve(B.T @ B, B.T @ c_norm - c_obj / (2.0 * lam))
+        np.testing.assert_allclose(none_throws(x_min), expected, rtol=1e-10)
+        self.assertLess(none_throws(delta2), 1e-12)
 
     def test_recovers_minimizer_with_two_quadratic_layers(self) -> None:
         r"""QP + ``NormConstraintLayer`` + ``SquaredNormConstraintLayer`` composes two curvature contributions.

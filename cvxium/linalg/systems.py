@@ -1300,7 +1300,9 @@ class LowRankUpdatedSystem(MatrixSystem):
         # Lazily-cached Woodbury data (xi and the factored capacitance matrix),
         # reused across the solves of one Newton step. Safe because the matrix
         # is immutable (see BandedSystem).
-        self._prep: _RankOneUpdatePrep | _RankPUpdatePrep | None = None
+        self._prep: (
+            _RankOneUpdatePrep | _RankPUpdatePrep | _SemidefiniteDiagonalBase | None
+        ) = None
 
     @property
     def dimension(self) -> int:
@@ -1314,28 +1316,37 @@ class LowRankUpdatedSystem(MatrixSystem):
         """
         return self._base.dimension
 
-    def _ensure_prep(self) -> _RankOneUpdatePrep | _RankPUpdatePrep:
+    def _ensure_prep(
+        self,
+    ) -> _RankOneUpdatePrep | _RankPUpdatePrep | _SemidefiniteDiagonalBase:
         """Compute and cache the Woodbury preparation, or return the cached copy.
 
-        Shared by ``solve`` and ``is_positive_definite``, so the rank-one versus rank-p
-        choice and the scalar-weight conversion live in one place. A single column uses
-        the rank-one (Sherman-Morrison) preparation.
+        Shared by ``solve`` and ``is_positive_definite``, so the choice of path and the
+        scalar-weight conversion live in one place. A single column uses the rank-one
+        (Sherman-Morrison) preparation. A diagonal base that vanishes on some
+        coordinates, a ``ZeroSystem`` included, has no solve for the Woodbury identity
+        to start from, and takes ``_SemidefiniteDiagonalBase`` instead.
 
         Returns
         -------
-         prep : _RankOneUpdatePrep | _RankPUpdatePrep
-            The right-hand-side-independent Woodbury data.
+         prep : _RankOneUpdatePrep | _RankPUpdatePrep | _SemidefiniteDiagonalBase
+            The right-hand-side-independent Woodbury data, or the semidefinite-base
+            factorization.
 
         Raises
         ------
          NewtonStepError
-            Propagated from the base solve when the base is not positive definite, or
+            Propagated from the base solve when the base is not positive definite,
             from the preparation when the capacitance factorization fails (a downdate
-            that breaks definiteness, or an inertia mismatch).
+            that breaks definiteness, or an inertia mismatch), or from
+            ``_SemidefiniteDiagonalBase`` when H is singular or indefinite.
 
         """
         if self._prep is None:
-            if self._kappa.shape[1] == 1:
+            eta = _semidefinite_diagonal(self._base)
+            if eta is not None:
+                self._prep = _SemidefiniteDiagonalBase(eta, self._kappa, self._d)
+            elif self._kappa.shape[1] == 1:
                 d = None if self._d is None else float(self._d[0])
                 self._prep = _prepare_rank_one_update(
                     self._kappa[:, 0], self._base.solve, d=d
@@ -1371,6 +1382,8 @@ class LowRankUpdatedSystem(MatrixSystem):
 
         """
         prep = self._ensure_prep()
+        if isinstance(prep, _SemidefiniteDiagonalBase):
+            return prep.solve(b)
         if isinstance(prep, _RankOneUpdatePrep):
             return _apply_rank_one_update(b, prep, self._base.solve)
         return _apply_rank_p_update(b, prep, self._base.solve)
@@ -1544,6 +1557,160 @@ class LowRankUpdatedSystem(MatrixSystem):
         except NewtonStepError:
             return super().is_positive_definite()
         return True
+
+
+def _semidefinite_diagonal(base: MatrixSystem) -> npt.NDArray[np.float64] | None:
+    """Return a diagonal base's entries when some vanish, or ``None``.
+
+    A ``ZeroSystem`` is the all-zero diagonal. A ``DiagonalSystem`` with a zero entry
+    arises when some variables carry no curvature of their own: free variables beside
+    bounded ones, or slack-form Phase I, whose base is positive only on the slack.
+
+    Parameters
+    ----------
+     base : MatrixSystem
+        The base of a ``LowRankUpdatedSystem``.
+
+    Returns
+    -------
+     eta : npt.NDArray[np.float64] | None
+        The diagonal when ``base`` is diagonal with at least one zero entry; ``None``
+        otherwise, including for a positive-definite diagonal.
+
+    """
+    if isinstance(base, ZeroSystem):
+        return np.zeros(base.dimension)
+    if isinstance(base, DiagonalSystem) and bool(np.any(base.eta == 0.0)):
+        return np.asarray(base.eta, dtype=np.float64)
+    return None
+
+
+class _SemidefiniteDiagonalBase:
+    """Solve H = diag(η) + κ diag(d) κ^T when η ≥ 0 vanishes on some coordinates.
+
+    The Woodbury identity starts from a solve with the base, which a base with zero
+    entries does not have, although H itself can be positive definite: an
+    inequality-form linear program, minimize c^T x subject to G x ≤ h, has the
+    Hessian G^T diag(1 / f^2) G on a zero base. Split the coordinates into P, where
+    η > 0, and Z, where η = 0, and write κ_eq = κ diag(d)^{1/2}, with rows κ_P and
+    κ_Z. Then
+       H_PP = diag(η_P) + κ_P κ_P^T,   H_PZ = κ_P κ_Z^T,   H_ZZ = κ_Z κ_Z^T.
+    H_PP is an ordinary low-rank update of a positive diagonal, solved as a
+    ``LowRankUpdatedSystem``. By the Woodbury identity, the Schur complement onto Z is
+       S = H_ZZ - H_ZP H_PP^{-1} H_PZ = κ_Z G^{-1} κ_Z^T,   G = I + κ_P^T diag(η_P)^{-1} κ_P,
+    the p × p capacitance matrix. With G = L L^T and W = L^{-1} κ_Z^T, S = W^T W, so
+    the QR factorization W = Q R gives S = R^T R without squaring W's condition
+    number. With no positive entries (a zero base), G = I and W = κ_Z^T. H is
+    positive definite exactly when S is, which needs |Z| ≤ p and κ_Z G^{-1/2} of full
+    row rank.
+
+    A solve eliminates x_P: with u = H_PP^{-1} b_P,
+       x_Z = S^{-1} (b_Z - κ_Z κ_P^T u),   x_P = u - H_PP^{-1} κ_P κ_Z^T x_Z.
+    The preparation costs O(p^2 (|P| + |Z|) + p |Z|^2), and each solve two solves with
+    H_PP plus O(p M + |Z|^2).
+
+    With no positive entries, the solve is two triangular solves with R and stays
+    accurate however the weights d are spread. With some, the elimination subtracts the
+    update's stiff share through b_Z - κ_Z κ_P^T u, and when that share dominates, as
+    it does near the boundary of an interior-point method, the step loses accuracy
+    like the one-pass Woodbury formula (``_apply_rank_p_update``). Issue #37 tracks
+    the fix.
+
+    Parameters
+    ----------
+     eta : npt.NDArray[np.float64]
+        The base's diagonal, of length M, nonnegative with at least one zero.
+     kappa : npt.NDArray[np.float64]
+        The update factor κ, of shape (M, p).
+     d : npt.NDArray[np.float64] | None
+        The weights, of length p, or ``None`` for unit weights.
+
+    Raises
+    ------
+     NewtonStepError
+        When some d ≤ 0 or some η < 0 (H cannot be shown positive definite this
+        way), when |Z| > p (H has rank below M), when an entry is non-finite, or when
+        G or S is not positive definite to working precision (H singular).
+
+    """
+
+    def __init__(
+        self,
+        eta: npt.NDArray[np.float64],
+        kappa: npt.NDArray[np.float64],
+        d: npt.NDArray[np.float64] | None,
+    ) -> None:
+        p = kappa.shape[1]
+        if d is not None and not np.all(d > 0):
+            raise NewtonStepError(
+                "H is not positive definite: a downdate of a singular base."
+            )
+        if np.any(eta < 0):
+            raise NewtonStepError("H is not positive definite: a negative base.")
+        kappa_eq = kappa if d is None else kappa * np.sqrt(d)
+        if not np.all(np.isfinite(kappa_eq)):
+            raise NewtonStepError("H has non-finite entries in its low-rank update.")
+        zero = eta == 0.0
+        self._z = np.flatnonzero(zero)
+        self._p = np.flatnonzero(~zero)
+        n_z = self._z.size
+        if n_z > p:
+            raise NewtonStepError(
+                f"H is singular: the base vanishes on {n_z} coordinates, more than "
+                f"the rank {p} of the update."
+            )
+        self._kz = kappa_eq[self._z]
+        self._kp = kappa_eq[self._p]
+        self._hpp: LowRankUpdatedSystem | None = None
+        if self._p.size:
+            eta_p = eta[self._p]
+            g = np.eye(p) + self._kp.T @ (self._kp / eta_p[:, np.newaxis])
+            try:
+                chol = linalg.cholesky(0.5 * (g + g.T), lower=True)
+            except np.linalg.LinAlgError:
+                raise NewtonStepError("H is not positive definite.") from None
+            w = linalg.solve_triangular(chol, self._kz.T, lower=True)
+            self._hpp = LowRankUpdatedSystem(DiagonalSystem(eta_p), self._kp, None)
+        else:
+            w = self._kz.T
+        # numpy's stubs type mode="r" as the full QR result; it returns R alone.
+        r = np.asarray(np.linalg.qr(w, mode="r"), dtype=np.float64)
+        diag = np.abs(np.diag(r))
+        if diag.min() <= n_z * np.finfo(np.float64).eps * diag.max():
+            raise NewtonStepError(
+                "H is singular or nearly singular: the update does not reach every "
+                "coordinate the base leaves without curvature."
+            )
+        self._r = r
+
+    def solve(self, b: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Solve H x = b by eliminating the coordinates with base curvature.
+
+        Parameters
+        ----------
+         b : npt.NDArray[np.float64]
+            Right-hand side, a vector of length M or a matrix with M rows.
+
+        Returns
+        -------
+         x : npt.NDArray[np.float64]
+            The solution, of the same shape as ``b``.
+
+        """
+        vec = b.ndim == 1
+        rhs = b[:, np.newaxis] if vec else b
+        x = np.empty(rhs.shape, dtype=np.float64)
+        rhs_z = rhs[self._z]
+        u: npt.NDArray[np.float64] | None = None
+        if self._hpp is not None:
+            u = self._hpp.solve(rhs[self._p])
+            rhs_z = rhs_z - self._kz @ (self._kp.T @ u)
+        y = linalg.solve_triangular(self._r, rhs_z, trans="T")
+        x_z = linalg.solve_triangular(self._r, y)
+        x[self._z] = x_z
+        if self._hpp is not None and u is not None:
+            x[self._p] = u - self._hpp.solve(self._kp @ (self._kz.T @ x_z))
+        return x[:, 0] if vec else x
 
 
 class BlockDiagonalSystem(MatrixSystem):
