@@ -1634,7 +1634,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
         )
         if suboptimality >= self.settings.outer.tolerance_soft:
             raise InteriorPointMethodError(
-                message="Centering step failed",
+                message=f"Phase I centering step failed: {e.message}",
                 remaining_steps=num_steps - nit - 1,
                 suboptimality=suboptimality,
                 last_iterate=e.last_iterate,
