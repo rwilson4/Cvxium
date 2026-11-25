@@ -2,6 +2,8 @@
 
 import unittest
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import numpy.typing as npt
@@ -1691,3 +1693,152 @@ class LevenbergDampingRelaxesTest(unittest.TestCase):
 
         self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
         self.assertLessEqual(result.n_iterations, 100)
+
+
+def _minimize_max_imbalance(seed: int) -> Problem:
+    """#28's LP: minimize the largest external imbalance of two weighted samples.
+
+    Variables [w1 (250), w2 (300), φ]. Mean weights of 1, w ≥ 0, φ ≥ 0, an internal
+    band |Z2ᵀw2/M2 - Z1ᵀw1/M1| ≤ ψ3, and one-sided rows ±(Zbᵀwb/Mb) - φ/√Mb ≤ 0. Exact
+    balance is attainable, so φ* = 0 and both rows of every pair are tight at the
+    optimum, which is highly degenerate.
+    """
+    rng = np.random.default_rng(seed)
+    M1, M2, q = 250, 300, 4
+    Z1 = rng.standard_normal((M1, q)) + rng.uniform(0.2, 0.8, q)
+    Z2 = rng.standard_normal((M2, q)) + rng.uniform(0.2, 0.8, q)
+    psi3 = 1.5 * np.sqrt(1 / M1 + 1 / M2)
+    z = np.zeros
+    p1 = np.full((q, 1), -1 / np.sqrt(M1))
+    p2 = np.full((q, 1), -1 / np.sqrt(M2))
+    A_ext = np.block(
+        [
+            [Z1.T / M1, z((q, M2)), p1],
+            [-Z1.T / M1, z((q, M2)), p1],
+            [z((q, M1)), Z2.T / M2, p2],
+            [z((q, M1)), -Z2.T / M2, p2],
+        ]
+    )
+    A_int = np.hstack([-Z1.T / M1, Z2.T / M2, z((q, 1))])
+    A_eq = np.block(
+        [
+            [np.full((1, M1), 1 / M1), z((1, M2)), z((1, 1))],
+            [z((1, M1)), np.full((1, M2), 1 / M2), z((1, 1))],
+        ]
+    )
+    c = np.zeros(M1 + M2 + 1)
+    c[-1] = 1.0
+    return Problem(
+        obj=LinearObjective(c),
+        eq=EqualityConstraintLayer(A=A_eq, b=np.ones(2)),
+        ineq=[
+            BoundsConstraintLayer(lb=np.zeros(M1 + M2 + 1)),
+            LinearInequalityConstraintLayer(
+                A=A_int, cl=np.full(q, -psi3), cu=np.full(q, psi3)
+            ),
+            LinearInequalityConstraintLayer(A=A_ext, cu=np.zeros(4 * q)),
+        ],
+    )
+
+
+class DegenerateOptimumTest(unittest.TestCase):
+    """Primal-dual keeps its good iterate when a degenerate optimum breaks it (#28).
+
+    At φ* = 0 every slack of the φ rows goes to zero together, λ/s diverges on all of
+    them, and the low-rank update's capacitance matrix loses definiteness in floating
+    point: the Newton step raises ``NewtonStepError``. Cvxium 1.0.2 usually stalled
+    short of that and returned ACCEPTABLE, failing on 9 of 30 seeds. Its more accurate
+    two-pass solves (#29) then reached the breakdown sooner, failing on 26 of 30. The
+    loop now returns its best iterate when the breakdown comes after it is within the
+    soft tolerance. With CI's BLAS settings (``OPENBLAS_NUM_THREADS=1``,
+    ``OPENBLAS_CORETYPE=Haswell``), seeds 3 and 7 failed under every version before
+    this one.
+    """
+
+    @parameterized.expand([(f"seed_{seed}", seed) for seed in (0, 3, 7)])
+    def test_a_cold_start_reaches_the_degenerate_optimum(
+        self, _name: str, seed: int
+    ) -> None:
+        problem = _minimize_max_imbalance(seed)
+
+        result = PrimalDualSolver().solve(problem)
+
+        self.assertIn(
+            result.status, (SolveStatus.OPTIMAL, SolveStatus.ACCEPTABLE), result.message
+        )
+        self.assertLess(result.solution[-1], 1e-6)  # φ* = 0
+        self.assertTrue(problem.is_feasible(result.solution))
+
+
+class NewtonBreakdownFallbackTest(unittest.TestCase):
+    """Both primal-dual loops return the best iterate on a late Newton breakdown.
+
+    The breakdown is injected after ``k`` good steps, so the rule is pinned
+    independently of where floating point happens to fail. A breakdown before any
+    iterate is within the soft tolerance still propagates.
+    """
+
+    @staticmethod
+    def _failing_after(
+        name: str, k: int
+    ) -> Any:  # a patch context manager wrapping the real step method
+        real = getattr(PrimalDualSolver, name)
+        calls = {"n": 0}
+
+        def step(self: PrimalDualSolver, *args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            if calls["n"] > k:
+                raise NewtonStepError("injected breakdown")
+            return real(self, *args, **kwargs)
+
+        return patch.object(PrimalDualSolver, name, step)
+
+    def _problem(self, equality: bool) -> tuple[Problem, npt.NDArray[np.float64]]:
+        rng = np.random.default_rng(28)
+        n = 12
+        objective = QuadraticObjective(
+            c=rng.standard_normal(n), hessian_contribution=DiagonalSystem(np.ones(n))
+        )
+        bounds = BoundsConstraintLayer(lb=-np.ones(n), ub=np.ones(n))
+        eq = (
+            EqualityConstraintLayer(A=np.ones((1, n)), b=np.zeros(1))
+            if equality
+            else None
+        )
+        return Problem(obj=objective, ineq=[bounds], eq=eq), np.zeros(n)
+
+    @parameterized.expand(
+        [
+            ("inequality_only", False, "_mpc_solve_step"),
+            ("equality", True, "_solve_damped_step_equality"),
+        ]
+    )
+    def test_a_late_breakdown_returns_the_best_iterate(
+        self, _name: str, equality: bool, step_method: str
+    ) -> None:
+        problem, x0 = self._problem(equality)
+        reference = PrimalDualSolver().solve(problem, x0)
+        self.assertIs(reference.status, SolveStatus.OPTIMAL)
+
+        # Break down two steps before the uninterrupted run converges, when the
+        # iterate is close but not yet within the strict tolerance.
+        with self._failing_after(step_method, k=reference.n_iterations - 2):
+            result = PrimalDualSolver().solve(problem, x0)
+
+        self.assertIs(result.status, SolveStatus.ACCEPTABLE, result.message)
+        self.assertIn("the Newton system broke down", result.message)
+        np.testing.assert_allclose(result.solution, reference.solution, atol=1e-2)
+
+    @parameterized.expand(
+        [
+            ("inequality_only", False, "_mpc_solve_step"),
+            ("equality", True, "_solve_damped_step_equality"),
+        ]
+    )
+    def test_an_early_breakdown_still_raises(
+        self, _name: str, equality: bool, step_method: str
+    ) -> None:
+        problem, x0 = self._problem(equality)
+
+        with self._failing_after(step_method, k=0), self.assertRaises(NewtonStepError):
+            PrimalDualSolver().solve(problem, x0)
