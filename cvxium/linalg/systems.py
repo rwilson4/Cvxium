@@ -1324,6 +1324,16 @@ class LowRankUpdatedSystem(MatrixSystem):
         """
         return self._base.dimension
 
+    def positive_gram_factor(self) -> npt.NDArray[np.float64] | None:
+        """Return columns defining the nullspace of a PSD update over zero."""
+        if not isinstance(self._base, ZeroSystem):
+            return None
+        if self._d is None:
+            return self._kappa
+        if np.all(self._d >= 0.0):
+            return self._kappa[:, self._d > 0.0]
+        return None
+
     def _ensure_prep(
         self,
     ) -> _RankOneUpdatePrep | _RankPUpdatePrep | _SemidefiniteDiagonalBase:

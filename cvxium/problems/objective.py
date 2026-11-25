@@ -26,6 +26,7 @@ import numpy.typing as npt
 from ..linalg.systems import (
     BlockDiagonalSystem,
     DiagonalSystem,
+    LowRankUpdatedSystem,
     MatrixSystem,
     ZeroSystem,
 )
@@ -170,6 +171,28 @@ class Objective(ABC):
     wrapped value per instance.
 
     """
+
+    def recession_slope(
+        self, x: npt.NDArray[np.float64], d: npt.NDArray[np.float64]
+    ) -> float | None:
+        """Return a verified slope along an affine ray, if available.
+
+        Zero means the objective is constant along the ray. Subclasses may
+        return a strictly negative asymptotic slope as an unboundedness witness.
+        """
+        if self.is_linear:
+            return float(np.dot(self.gradient(x), d))
+        return None
+
+    def prepare_recession_direction(
+        self, d: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Prepare a candidate direction for subsequent recession checks."""
+        return d
+
+    def recession_nullspace_rows(self) -> npt.NDArray[np.float64] | None:
+        """Return rows defining a subspace on which the objective is affine."""
+        return None
 
     feasibility_threshold: float | None = None
     """Stop threshold for a feasibility solve, or ``None`` for ordinary minimization.
@@ -514,6 +537,40 @@ class QuadraticObjective(Objective):
         """
         return self._hessian_contribution
 
+    def recession_nullspace_rows(self) -> npt.NDArray[np.float64] | None:
+        """Return the transposed Gram factor for a structured quadratic."""
+        Q = self._hessian_contribution
+        if isinstance(Q, LowRankUpdatedSystem):
+            factor = Q.positive_gram_factor()
+            if factor is not None:
+                return factor.T
+        return None
+
+    def recession_slope(
+        self, x: npt.NDArray[np.float64], d: npt.NDArray[np.float64]
+    ) -> float | None:
+        """Return the linear slope when d lies in the Hessian's nullspace."""
+        # Even tiny positive curvature eventually dominates the linear term.
+        Q = self._hessian_contribution
+        if isinstance(Q, DiagonalSystem):
+            in_nullspace = np.all(d[Q.eta != 0.0] == 0.0)
+        else:
+            rows = self.recession_nullspace_rows()
+            residual = rows @ d if rows is not None else self._q_multiply(d)
+            in_nullspace = np.all(residual == 0.0)
+        if in_nullspace:
+            return float(np.dot(self.c, d))
+        return None
+
+    def prepare_recession_direction(
+        self, d: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Remove curved coordinates when the Hessian is diagonal."""
+        Q = self._hessian_contribution
+        if isinstance(Q, DiagonalSystem):
+            return np.where(Q.eta == 0.0, d, 0.0)
+        return d
+
     def _q_multiply(self, v: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         """Multiply a vector by Q through the structured Hessian system.
 
@@ -797,6 +854,29 @@ class LiftedObjective(Objective):
         self._base_dim: int = objective.dimension
         self._extra_dim: int = extra_dimension
         self.is_linear: bool = objective.is_linear
+
+    def recession_slope(
+        self, x: npt.NDArray[np.float64], d: npt.NDArray[np.float64]
+    ) -> float | None:
+        """Verify the ray on the coordinates seen by the wrapped objective."""
+        M = self._base_dim
+        return self._objective.recession_slope(x[:M], d[:M])
+
+    def prepare_recession_direction(
+        self, d: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Prepare the leading coordinates and preserve the auxiliary ones."""
+        M = self._base_dim
+        return np.concatenate(
+            (self._objective.prepare_recession_direction(d[:M]), d[M:])
+        )
+
+    def recession_nullspace_rows(self) -> npt.NDArray[np.float64] | None:
+        """Extend the wrapped nullspace equations with zero columns."""
+        rows = self._objective.recession_nullspace_rows()
+        if rows is not None:
+            return np.pad(rows, ((0, 0), (0, self._extra_dim)))
+        return None
 
     @property
     def objective(self) -> Objective:

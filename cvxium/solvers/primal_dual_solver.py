@@ -358,21 +358,19 @@ def _verify_recession_direction(
     feasibility_error: float,
     tolerance: float,
 ) -> npt.NDArray[np.float64] | None:
-    """Verify a descending affine ray from a feasible iterate."""
+    """Verify a descending recession ray from a feasible iterate."""
     if not feasibility_error <= tolerance:
         return None
+    delta_x = adapter.prepare_recession_direction(delta_x)
     norm = float(np.linalg.norm(delta_x))
-    if not math.isfinite(norm) or norm == 0.0:
-        return None
-    d = delta_x / norm
-    slope = adapter.recession_slope(x, d)
-    # Even a small positive component eventually violates an affine inequality.
-    if (
-        slope is not None
-        and slope < 0.0
-        and np.all(adapter.grad_constraints_multiply(x, d) <= 0.0)
-    ):
-        return d
+    if 0.0 < norm < math.inf:
+        d = delta_x / norm
+        slope = adapter.recession_slope(x, d)
+        if slope is not None and slope < 0.0:
+            return d
+    witness = adapter.find_structured_recession_direction(x)
+    if witness is not None:
+        return witness[0]
     return None
 
 
@@ -893,7 +891,7 @@ class PrimalDualSolver(Solver):
         feasibility_threshold = none_throws(problem.obj).feasibility_threshold
 
         adapter = _BarrierAdapter(problem, settings)
-        check_ray = feasibility_threshold is None and adapter._all_linear()
+        check_ray = feasibility_threshold is None
         direction = None
         nit = 0
         for nit in range(max_iter):
@@ -1891,7 +1889,7 @@ class PrimalDualSolver(Solver):
         feasibility_threshold = none_throws(problem.obj).feasibility_threshold
 
         adapter = _BarrierAdapter(problem, settings)
-        check_ray = feasibility_threshold is None and adapter._all_linear()
+        check_ray = feasibility_threshold is None
         direction = None
         nit = 0
         for nit in range(max_iter):

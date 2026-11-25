@@ -84,6 +84,14 @@ class ConstraintLayer(ABC):
 
     """
 
+    def recession_rates(
+        self, x: npt.NDArray[np.float64], d: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64] | None:
+        """Return verified constraint rates along d, if available."""
+        if self.is_linear:
+            return self.grad_constraints_multiply(x, d)
+        return None
+
     @property
     @abstractmethod
     def dimension(self) -> int:

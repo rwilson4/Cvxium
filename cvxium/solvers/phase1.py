@@ -180,6 +180,13 @@ class LiftedConstraintLayer(SlackConstraintLayer):
         """
         return self._base.num_constraints(self._base_dim)
 
+    def recession_rates(
+        self, x: npt.NDArray[np.float64], d: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64] | None:
+        """Verify recession on the coordinates seen by the wrapped layer."""
+        M = self._base_dim
+        return self._base.recession_rates(x[:M], d[:M])
+
     def constraints(
         self,
         w: npt.NDArray[np.float64],

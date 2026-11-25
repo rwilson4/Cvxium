@@ -2114,8 +2114,17 @@ class BaseInteriorPointMethodSolver(Optimizer):
             grew = x_norm > 0.0 and step_norm >= _RAY_GROWTH * x_norm
             ray_steps = ray_steps + 1 if grew else 0
             if ray_steps >= _RAY_PATIENCE:
-                d = delta_x / float(np.linalg.norm(delta_x))
-                slope = self.recession_slope(x, d)
+                d = self.prepare_recession_direction(delta_x)
+                d_norm = float(np.linalg.norm(d))
+                if 0.0 < d_norm < math.inf:
+                    d = d / d_norm
+                    slope = self.recession_slope(x, d)
+                else:
+                    slope = None
+                if slope is None:
+                    witness = self.find_structured_recession_direction(x)
+                    if witness is not None:
+                        d, slope = witness
                 if slope is not None:
                     kind = (
                         "the objective decreases along it, so the problem is "
@@ -2125,8 +2134,8 @@ class BaseInteriorPointMethodSolver(Optimizer):
                         "is unbounded and the central path does not exist"
                     )
                     raise RecessionDirectionError(
-                        "Centering followed a recession direction of the feasible "
-                        f"set to infinity (|x| = {step_norm:.3g}): {kind}.",
+                        "Centering found a recession direction of the feasible "
+                        f"set (|x| = {step_norm:.3g}): {kind}.",
                         suboptimality=suboptimality,
                         last_iterate=x.copy(),
                         direction=d,
@@ -2478,6 +2487,18 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
         """
 
+    def find_structured_recession_direction(
+        self, x: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], float] | None:
+        """Search for a certified descent direction using model structure."""
+        return None
+
+    def prepare_recession_direction(
+        self, d: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Prepare a step for recession verification."""
+        return d
+
     def recession_slope(
         self,
         x: npt.NDArray[np.float64],
@@ -2487,8 +2508,8 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
         The centering problem has no minimizer when d satisfies A d = 0, no constraint
         increases along d, and the objective does not increase either. Implementations
-        verify those conditions where they can (``BarrierSolver`` does for affine
-        problems) and return the objective's slope along d. The base class verifies
+        verify those conditions where they can and return the objective's slope
+        along d. The base class verifies
         nothing.
 
         Parameters
