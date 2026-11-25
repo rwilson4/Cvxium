@@ -1444,7 +1444,9 @@ class PrimalDualSolver(Solver):
         r_dual: npt.NDArray[np.float64],
         eta: float,
         wrapped: Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]],
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], float]:
+    ) -> tuple[
+        npt.NDArray[np.float64], npt.NDArray[np.float64], float, npt.NDArray[np.float64]
+    ]:
         """Compute the Mehrotra predictor-corrector direction from a prebuilt solve.
 
         With slacks s = -f and μ = η / m:
@@ -1484,6 +1486,8 @@ class PrimalDualSolver(Solver):
             Corrector dual step, of length m.
          sigma : float
             The centering parameter σ.
+         r_cent_cor : npt.NDArray[np.float64]
+            Corrector centering residual, including the affine cross term.
 
         References
         ----------
@@ -1506,7 +1510,7 @@ class PrimalDualSolver(Solver):
         delta_x, delta_lmbda = self._direction_from_rcent(
             problem, x, lmbda, f, r_dual, r_cent_cor, wrapped
         )
-        return delta_x, delta_lmbda, sigma
+        return delta_x, delta_lmbda, sigma, r_cent_cor
 
     @staticmethod
     def _feasible_step(
@@ -1661,9 +1665,10 @@ class PrimalDualSolver(Solver):
         undamped step). When no feasible step exists (``_feasible_step`` returns
         ``None``), it grows the damping and re-solves, up to ``lm.max_attempts`` times.
         After a damped success, the ratio
-           ρ = (‖r_t‖ - ‖r_t(trial)‖) / (step ‖r_t‖),
+           ρ = (‖r_t‖ - ‖r_t(trial)‖) / (‖r_t‖ - ‖r_t(model)‖),
         with r_t = (r_dual, r_cent) at the fixed t, decides how far ``_relax_damping``
-        relaxes the damping for the next iteration.
+        relaxes the damping for the next iteration. The linear model uses the
+        residual change induced by the damped predictor-corrector direction.
 
         Parameters
         ----------
@@ -1713,7 +1718,7 @@ class PrimalDualSolver(Solver):
         r_norm0 = float(np.sqrt(np.dot(r_dual, r_dual) + np.dot(r_cent, r_cent)))
         for attempt in range(lm.max_attempts):
             wrapped = self._build_pd_solve(problem, x, lmbda, f, damping)
-            dx, dlam, sigma = self._mpc_direction(
+            dx, dlam, sigma, r_cent_cor = self._mpc_direction(
                 problem, x, lmbda, f, r_dual, eta, wrapped
             )
             step = self._feasible_step(
@@ -1730,9 +1735,19 @@ class PrimalDualSolver(Solver):
                 r_norm_new = self._residual_norm(
                     problem, x + step * dx, lmbda + step * dlam, t
                 )
-                rho = (
-                    (r_norm0 - r_norm_new) / (step * r_norm0) if r_norm0 > 0.0 else 0.0
+                # The damped KKT equations give J_dual d = -r_dual - damping dx
+                # and J_cent d = -r_cent_cor. The merit residual still uses 1 / t
+                # as its target, so its baseline centering block is r_cent.
+                r_dual_model = (1.0 - step) * r_dual - (step * damping) * dx
+                r_cent_model = r_cent - step * r_cent_cor
+                r_norm_model = math.sqrt(
+                    float(
+                        np.dot(r_dual_model, r_dual_model)
+                        + np.dot(r_cent_model, r_cent_model)
+                    )
                 )
+                predicted = r_norm0 - r_norm_model
+                rho = (r_norm0 - r_norm_new) / predicted if predicted > 0.0 else 0.0
                 next_damping = self._relax_damping(damping, rho, x_scale, lm)
             return _PdStepInfo(
                 delta_x=dx,
