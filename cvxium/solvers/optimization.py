@@ -52,6 +52,7 @@ from ..solvers.line_search import (
 )
 from ..solvers.settings import (
     OptimizationSettings,
+    OuterSettings,
 )
 
 logger: logging.Logger = logging.getLogger("cvxium.optimization")
@@ -106,6 +107,107 @@ def _weak_duality_slack(objective_value: float) -> float:
 
     """
     return _WEAK_DUALITY_RTOL * max(1.0, abs(objective_value))
+
+
+def _gap_scale(
+    outer: OuterSettings,
+    objective_value: float,
+    gradient: npt.NDArray[np.float64],
+    x: npt.NDArray[np.float64],
+) -> float:
+    """Return the scale S of the duality-gap test, gap ≤ tolerance S.
+
+    See ``OuterSettings.objective_scale`` for the three choices.
+
+    Parameters
+    ----------
+     outer : OuterSettings
+        The settings carrying ``objective_scale``.
+     objective_value : float
+        f0 at the point the gap is measured at.
+     gradient : npt.NDArray[np.float64]
+        ∇f0 there.
+     x : npt.NDArray[np.float64]
+        The point.
+
+    Returns
+    -------
+     scale : float
+        S, positive and finite.
+
+    """
+    choice = outer.objective_scale
+    if choice is None:
+        return 1.0
+    if choice == "relative":
+        scale = max(1.0, abs(objective_value))
+    elif choice == "auto":
+        scale = max(
+            abs(objective_value),
+            float(np.linalg.norm(gradient)) * float(np.linalg.norm(x)),
+        )
+    else:
+        scale = float(choice)
+    return scale if math.isfinite(scale) and scale > 0.0 else 1.0
+
+
+def _dual_scale(outer: OuterSettings, gradient: npt.NDArray[np.float64]) -> float:
+    """Return the scale of a dual-residual test, ‖r_dual‖ ≤ tolerance S.
+
+    Parameters
+    ----------
+     outer : OuterSettings
+        The settings carrying ``objective_scale``.
+     gradient : npt.NDArray[np.float64]
+        ∇f0 at the point.
+
+    Returns
+    -------
+     scale : float
+        1 by default or for a fixed scale, max(1, ‖∇f0‖) under ``"relative"``, and
+        ‖∇f0‖ under ``"auto"``; positive and finite.
+
+    """
+    choice = outer.objective_scale
+    if choice not in ("relative", "auto"):
+        return 1.0
+    norm = float(np.linalg.norm(gradient))
+    scale = norm if choice == "auto" else max(1.0, norm)
+    return scale if math.isfinite(scale) and scale > 0.0 else 1.0
+
+
+def _primal_scale(
+    outer: OuterSettings,
+    b: npt.NDArray[np.float64],
+    row_scale: npt.NDArray[np.float64],
+) -> float:
+    """Return the scale of an equality-residual test, ‖A x - b‖ ≤ tolerance S.
+
+    Parameters
+    ----------
+     outer : OuterSettings
+        The settings carrying ``objective_scale``.
+     b : npt.NDArray[np.float64]
+        The right-hand side.
+     row_scale : npt.NDArray[np.float64]
+        |A| |x|, the scale of each row's products.
+
+    Returns
+    -------
+     scale : float
+        1 by default or for a fixed scale, max(1, ‖b‖∞) under ``"relative"``, and
+        max(‖b‖∞, ‖|A| |x|‖∞) under ``"auto"``; positive and finite.
+
+    """
+    choice = outer.objective_scale
+    if choice not in ("relative", "auto"):
+        return 1.0
+    b_norm = float(np.max(np.abs(b), initial=0.0))
+    if choice == "auto":
+        scale = max(b_norm, float(np.max(np.abs(row_scale), initial=0.0)))
+    else:
+        scale = max(1.0, b_norm)
+    return scale if math.isfinite(scale) and scale > 0.0 else 1.0
 
 
 def _legacy_solve_status(status: Literal[0, 1, 2]) -> SolveStatus:
@@ -821,13 +923,16 @@ class BaseInteriorPointMethodSolver(Optimizer):
             return phase1_res
 
         t = self.initialize_barrier_parameter(x0=x)
+        # Plan the schedule for the gap tolerance, scaled down (never up) by the
+        # starting point's scale: far from the optimum |f0| can dwarf |p*|, and a
+        # schedule cut short there ends above the tolerance the incumbent is judged
+        # by. A large scale is honored by the certificate test below, which stops the
+        # schedule early. With the default (absolute) scale the plan is unchanged.
+        tolerance = self.settings.outer.tolerance * min(1.0, self._gap_scale_at(x))
         num_steps = (
             int(
                 np.ceil(
-                    (
-                        np.log(self.num_ineq_constraints)
-                        - np.log(t * self.settings.outer.tolerance)
-                    )
+                    (np.log(self.num_ineq_constraints) - np.log(t * tolerance))
                     / np.log(self.settings.outer.barrier_multiplier)
                 )
             )
@@ -994,7 +1099,11 @@ class BaseInteriorPointMethodSolver(Optimizer):
                 best_bounds_gap = max(
                     0.0, best_primal.objective_value - best_dual.dual_value
                 )
-                if best_bounds_gap <= self.settings.outer.tolerance:
+                if (
+                    best_bounds_gap
+                    <= self.settings.outer.tolerance
+                    * self._gap_scale_at(best_primal.solution)
+                ):
                     self.settings.trace.on_converged(nit + 1, best_bounds_gap)
                     break
 
@@ -1155,6 +1264,34 @@ class BaseInteriorPointMethodSolver(Optimizer):
         if self.is_feasible(x):
             return replace(feasibility_result, status=SolveStatus.FEASIBLE)
         return feasibility_result
+
+    def _gap_scale_at(self, x: npt.NDArray[np.float64]) -> float:
+        """Return the gap test's scale S at x (see ``OuterSettings.objective_scale``).
+
+        A feasibility (Phase I) solve stops at its first feasible point, and its
+        gap is only a diagnostic, so its scale is 1.
+
+        Parameters
+        ----------
+         x : npt.NDArray[np.float64]
+            The point, strictly feasible.
+
+        Returns
+        -------
+         scale : float
+            S, positive and finite.
+
+        """
+        if self._feasibility_threshold() is not None:
+            return 1.0
+        if self.settings.outer.objective_scale is None:
+            return 1.0
+        return _gap_scale(
+            self.settings.outer,
+            float(self.evaluate_objective(x)),
+            self.gradient(x),
+            x,
+        )
 
     def _feasibility_threshold(self) -> float | None:
         """Return the objective's feasibility threshold, or None for an ordinary solve.
@@ -1416,13 +1553,14 @@ class BaseInteriorPointMethodSolver(Optimizer):
         # should never see an "acceptable tolerance" claim on a result that
         # failed the hard requirement.
         outer = self.settings.outer
-        if gap <= outer.tolerance:
+        scale = self._gap_scale_at(best_primal.solution)
+        if gap <= outer.tolerance * scale:
             status: Literal[0, 1, 2] = 0
             message = (
                 "Interior Point Method converged to the desired tolerance "
                 f"(duality gap {gap:.3g})."
             )
-        elif gap <= outer.tolerance_soft:
+        elif gap <= outer.tolerance_soft * scale:
             status = 1
             message = (
                 "Interior Point Method reached an acceptable tolerance "

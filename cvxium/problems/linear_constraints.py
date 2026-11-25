@@ -51,6 +51,10 @@ from ..solvers.settings import (
 logger: logging.Logger = logging.getLogger("cvxium.linear_constraints")
 
 
+EQUALITY_RTOL: float = 1e-10
+"""Relative tolerance of ``EqualityConstraintLayer.is_satisfied``."""
+
+
 class EqualityConstraintLayer:
     """Linear equality constraints A w = b, with a cached SVD of A.
 
@@ -139,6 +143,39 @@ class EqualityConstraintLayer:
 
         """
         return self._saddle_factory
+
+    def is_satisfied(
+        self, w: npt.NDArray[np.float64], rtol: float = EQUALITY_RTOL
+    ) -> bool:
+        """Test whether A w = b holds to rounding, relative to the row's scale.
+
+        Row i passes when
+           |(A w - b)_i| ≤ rtol max(1, |b_i|, (|A| |w|)_i),
+        where (|A| |w|)_i is the scale of the products the row sums, and so of its
+        rounding error. An absolute test fails at any point once |b| is large: near
+        |b_i| = 1e6 adjacent doubles are 1e-10 apart, so no w passes an absolute
+        1e-10 gate, and the Phase I cascade, which only accepts an on-manifold start,
+        recursed without end (issue #48). The floor of 1 keeps the test absolute for
+        data of unit size, as before.
+
+        Parameters
+        ----------
+         w : npt.NDArray[np.float64]
+            The point to test, of length M.
+         rtol : float
+            The relative tolerance; ``EQUALITY_RTOL`` (1e-10) by default.
+
+        Returns
+        -------
+         satisfied : bool
+            True when every row passes.
+
+        """
+        A = self.A
+        residual = np.abs(A @ w - self.b)
+        row_scale = np.abs(A) @ np.abs(w)
+        scale = np.maximum(np.maximum(1.0, np.abs(self.b)), np.asarray(row_scale))
+        return bool(np.all(residual <= rtol * scale))
 
     def saddle_system(self, hessian: MatrixSystem) -> SaddleSystem:
         """Build the per-step KKT saddle for this equality over a Hessian block.

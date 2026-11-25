@@ -376,8 +376,9 @@ class NormConstraintLayer(DirectConstraintLayer):
            [    A       0  ] [ ν ] = [    b    ].
 
         The point is returned only when it is strictly interior (‖B w_star - c‖ < φ)
-        and, with equality constraints, satisfies |A w_star - b| < 1e-10 componentwise,
-        the same gate ``Solver._solve_feasibility`` applies before accepting it.
+        and, with equality constraints, satisfies A w_star = b to rounding
+        (``EqualityConstraintLayer.is_satisfied``), the same gate
+        ``Solver._solve_feasibility`` applies before accepting it.
         Otherwise, including when the saddle solve raises ``NewtonStepError`` (as it can
         for a rank-deficient B), the method returns ``None`` and the caller falls back
         to the iterative Phase I.
@@ -425,7 +426,7 @@ class NormConstraintLayer(DirectConstraintLayer):
             # The saddle solve lands on the manifold only when b is consistent
             # and the system well-posed; verify before claiming the point lies
             # on it (the same gate the caller applies).
-            if not bool(np.all(np.abs(equality.A @ w_star - equality.b) < 1e-10)):
+            if not equality.is_satisfied(w_star):
                 return None
         v = B @ w_star - c
         r_squared = float(np.dot(v, v))
