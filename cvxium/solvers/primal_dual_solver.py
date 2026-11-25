@@ -220,6 +220,19 @@ class _StallWatch:
         )
 
     @property
+    def within_soft_tolerance(self) -> bool:
+        """Return whether the best iterate seen is good enough to return.
+
+        Returns
+        -------
+         within : bool
+            True when an iterate has been recorded and its metric is below the soft
+            tolerance.
+
+        """
+        return self.best_x is not None and self._best < self._soft_tolerance
+
+    @property
     def best_metric(self) -> float:
         """Return the best metric seen so far.
 
@@ -1809,28 +1822,43 @@ class PrimalDualSolver(Solver):
             t = mu * m / eta
             r_cent = -lmbda * f - 1.0 / t
 
-            delta_x, delta_lmbda, delta_nu, step, damping = (
-                self._solve_damped_step_equality(
-                    problem,
-                    x,
-                    lmbda,
-                    nu,
-                    f,
-                    r_dual,
-                    r_cent,
-                    r_pri,
-                    A_eq,
-                    b_eq,
-                    eta=eta,
-                    t=t,
-                    alpha=alpha,
-                    beta=beta,
-                    min_step=min_step,
-                    tau_min=tau_min,
-                    damping=damping,
-                    lm=lm,
+            try:
+                delta_x, delta_lmbda, delta_nu, step, damping = (
+                    self._solve_damped_step_equality(
+                        problem,
+                        x,
+                        lmbda,
+                        nu,
+                        f,
+                        r_dual,
+                        r_cent,
+                        r_pri,
+                        A_eq,
+                        b_eq,
+                        eta=eta,
+                        t=t,
+                        alpha=alpha,
+                        beta=beta,
+                        min_step=min_step,
+                        tau_min=tau_min,
+                        damping=damping,
+                        lm=lm,
+                    )
                 )
-            )
+            except NewtonStepError as e:
+                if not stall.within_soft_tolerance:
+                    raise
+                status = 1
+                message = (
+                    f"the Newton system broke down ({e}); returning best iterate "
+                    f"from iteration {stall.best_nit} "
+                    f"(max(gap, ||r_dual||, ||r_pri||)={stall.best_metric:.3e})"
+                )
+                x = none_throws(stall.best_x)
+                lmbda = none_throws(stall.best_lmbda)
+                nu = none_throws(stall.best_nu)
+                trace.on_early_stop(nit + 1)
+                break
             step_sizes.append(step)
             x = x + step * delta_x
             lmbda = _clamp_dual_after_update(lmbda + step * delta_lmbda)
