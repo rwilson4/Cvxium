@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
+from scipy.sparse import csr_array
 
 from ..linalg.systems import (
     MatrixSystem,
@@ -83,6 +84,10 @@ class ConstraintLayer(ABC):
     one. ``SlackConstraintLayer`` overrides it to True.
 
     """
+
+    def recession_constraint_rows(self) -> npt.NDArray[np.float64] | csr_array | None:
+        """Return homogeneous equations for this layer's recession directions."""
+        return None
 
     def recession_rates(
         self, x: npt.NDArray[np.float64], d: npt.NDArray[np.float64]
