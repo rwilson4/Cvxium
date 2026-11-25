@@ -395,6 +395,63 @@ class BoundsConstraintLayer(SlackConstraintLayer):
             return np.asarray(self.ub, dtype=np.float64)
         return np.full(M, self.ub, dtype=np.float64)
 
+    def interior_point(
+        self, equality: EqualityConstraintLayer | None = None
+    ) -> npt.NDArray[np.float64] | None:
+        """Return a point strictly inside the box, on the equality manifold if given.
+
+        Each component is the midpoint of a two-sided bound, lies one unit inside a
+        one-sided bound, and is 0 when free. When the layer is a feasibility problem's
+        only inequality, the cascade takes this point and skips Phase I. That matters
+        when some components are free: the bounds-only Phase I has no curvature on
+        them, so its Newton system is singular (issue #37).
+
+        With an equality A w = b, the point is corrected onto the manifold by a
+        weighted minimum-norm step, Δ = W A^T (A W A^T)^+ (b - A w), refined once.
+        W weights each component by the square of its room to its nearest bound
+        (half the width of a two-sided bound, 1 for a one-sided one, and 10 times the
+        largest finite room for a free one), so the components with the most room
+        absorb the correction. The corrected point may leave the box; the caller
+        rechecks strict feasibility and the equality residual, and falls back to
+        Phase I.
+
+        Parameters
+        ----------
+         equality : EqualityConstraintLayer | None
+            The problem's equality constraints A w = b, or ``None``.
+
+        Returns
+        -------
+         w : npt.NDArray[np.float64]
+            The point, of length M.
+
+        """
+        M = self.dimension
+        lb = self._lb_array(M) if self.lb is not None else np.full(M, -np.inf)
+        ub = self._ub_array(M) if self.ub is not None else np.full(M, np.inf)
+        has_lb, has_ub = np.isfinite(lb), np.isfinite(ub)
+        both, lower, upper = has_lb & has_ub, has_lb & ~has_ub, ~has_lb & has_ub
+        w = np.zeros(M)
+        w[both] = 0.5 * (lb[both] + ub[both])
+        w[lower] = lb[lower] + 1.0
+        w[upper] = ub[upper] - 1.0
+        if equality is None:
+            return w
+        room = np.ones(M)
+        room[both] = 0.5 * (ub[both] - lb[both])
+        free = ~has_lb & ~has_ub
+        room[free] = 10.0 * float(room[~free].max()) if np.any(~free) else 1.0
+        A = equality.A
+        A_dense = A.toarray() if scipy.sparse.issparse(A) else np.asarray(A)
+        weights = room**2
+        gram = (A_dense * weights) @ A_dense.T
+        for _ in range(2):  # the correction, then one step of refinement
+            residual = np.asarray(equality.b, dtype=np.float64) - A_dense @ w
+            w = w + weights * (
+                A_dense.T @ np.linalg.lstsq(gram, residual, rcond=None)[0]
+            )
+        return w
+
     def _bounded(self, M: int) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp]]:
         """Return the indices of the components with a finite lower and upper bound.
 

@@ -152,8 +152,8 @@
     0
   ],
   "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_resolve_block_flags_only_a_seed_it_took_verbatim": [
-    8,
-    1
+    0,
+    0
   ],
   "test.saddle.test_stationarity_solver.PrimalDualStationaritySolverTest.test_seed_hugging_a_face_is_recentered_and_retried": [
     2,
@@ -200,19 +200,19 @@
   ],
   "test.solvers.test_barrier_solver.BarrierSolverTest.test_phase1_with_linear_inequality_active_layer": [
     54,
-    52
+    49
   ],
   "test.solvers.test_barrier_solver.BarrierSolverTest.test_runs_phase1_when_x0_infeasible_0": [
-    22
+    23
   ],
   "test.solvers.test_barrier_solver.BarrierSolverTest.test_runs_phase1_when_x0_infeasible_1": [
-    29
+    26
   ],
   "test.solvers.test_barrier_solver.BarrierSolverTest.test_solve_without_x0_constructs_phase1_0": [
-    25
+    20
   ],
   "test.solvers.test_barrier_solver.BarrierSolverTest.test_solve_without_x0_constructs_phase1_1": [
-    31
+    26
   ],
   "test.solvers.test_barrier_solver.BarrierSolverTest.test_solves_bound_constrained_quadratic_unconstrained_optimum_0": [
     24
@@ -308,6 +308,58 @@
   ],
   "test.solvers.test_hsd_solver.HsdSolverTest.test_status_zero_on_hard_tolerance": [
     7
+  ],
+  "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_0_barrier_noeq_warm": [
+    62
+  ],
+  "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_1_barrier_noeq_cold": [
+    61
+  ],
+  "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_2_barrier_eq_warm": [
+    61
+  ],
+  "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_3_barrier_eq_cold": [
+    64
+  ],
+  "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_4_primal_dual_noeq_warm": [
+    7
+  ],
+  "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_5_primal_dual_noeq_cold": [
+    8
+  ],
+  "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_6_primal_dual_eq_warm": [
+    15
+  ],
+  "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_7_primal_dual_eq_cold": [
+    16
+  ],
+  "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_0_barrier_noeq_warm": [
+    64
+  ],
+  "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_1_barrier_noeq_cold": [
+    67
+  ],
+  "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_2_barrier_eq_warm": [
+    63
+  ],
+  "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_3_barrier_eq_cold": [
+    62
+  ],
+  "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_4_primal_dual_noeq_warm": [
+    7
+  ],
+  "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_5_primal_dual_noeq_cold": [
+    8
+  ],
+  "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_6_primal_dual_eq_warm": [
+    15
+  ],
+  "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_7_primal_dual_eq_cold": [
+    16
+  ],
+  "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_the_issues_two_variable_lp": [
+    53,
+    5
   ],
   "test.solvers.test_newton_solver.NewtonSolverTest.test_gradient_called_once_per_newton_iteration_0": [
     2

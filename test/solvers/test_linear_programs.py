@@ -20,6 +20,7 @@ from cvxium.linalg.systems import (
     SparseSaddleSystem,
 )
 from cvxium.problems.linear_constraints import (
+    BoundsConstraintLayer,
     EqualityConstraintLayer,
     LinearInequalityConstraintLayer,
 )
@@ -741,3 +742,73 @@ class InequalityFormLinearProgramTest(unittest.TestCase):
                 result = solver.solve(problem, np.array([1.0, 1.0]))
                 self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
                 self.assertAlmostEqual(result.objective_value, -1.0, delta=1e-5)
+
+
+class FreeVariableLinearProgramTest(unittest.TestCase):
+    """LPs with free variables beside bounded ones solve, warm and cold (issue #37).
+
+    The bounds layer contributes no curvature on a free variable, so the Newton
+    Hessian's diagonal base is zero on those coordinates. Two things failed. Warm, the
+    Woodbury solve lost all accuracy once t was large: the regularized base was tiny
+    on the free coordinates and the update enormous. Cold, the bounds-only stage of
+    the Phase I cascade had no curvature at all on the free coordinates, and the next
+    stage's slack-form base, a block-diagonal system, was not recognized as diagonal
+    with zeros. The reference optimum is ``scipy.optimize.linprog`` (HiGHS).
+    """
+
+    @staticmethod
+    def _lp(with_equality: bool) -> tuple[Problem, np.ndarray, float]:
+        rng = np.random.default_rng(310)
+        n, m, n_free = 10, 12, 3
+        G = rng.standard_normal((m, n))
+        x0 = rng.uniform(0.5, 1.5, n)
+        h = G @ x0 + rng.uniform(0.5, 1.5, m)  # x0 is strictly feasible
+        # Bounded below: c = -G^T y + (0, 1) with y > 0, and x >= 0 off the free part.
+        c = (
+            -G.T @ rng.uniform(0.1, 1.0, m)
+            + np.r_[np.zeros(n_free), np.ones(n - n_free)]
+        )
+        lb = np.r_[np.full(n_free, -np.inf), np.zeros(n - n_free)]
+        eq = None
+        kwargs: dict[str, Any] = {}
+        if with_equality:
+            A = rng.standard_normal((2, n))
+            eq = EqualityConstraintLayer(A=A, b=A @ x0)
+            kwargs = {"A_eq": A, "b_eq": A @ x0}
+        problem = Problem(
+            obj=LinearObjective(c=c),
+            ineq=[
+                BoundsConstraintLayer(lb=lb),
+                LinearInequalityConstraintLayer(A=G, cu=h),
+            ],
+            eq=eq,
+        )
+        bounds = [(None, None)] * n_free + [(0.0, None)] * (n - n_free)
+        reference = linprog(c, A_ub=G, b_ub=h, bounds=bounds, **kwargs)
+        return problem, x0, float(reference.fun)
+
+    @parameterized.expand(
+        [
+            (
+                f"{solver}_{'eq' if eq else 'noeq'}_{'warm' if warm else 'cold'}",
+                solver,
+                eq,
+                warm,
+            )
+            for solver in ("barrier", "primal_dual")
+            for eq in (False, True)
+            for warm in (True, False)
+        ]
+    )
+    def test_matches_highs(
+        self, _name: str, solver_name: str, with_equality: bool, warm: bool
+    ) -> None:
+        problem, x0, optimum = self._lp(with_equality)
+        solver: Solver = (
+            BarrierSolver() if solver_name == "barrier" else PrimalDualSolver()
+        )
+
+        result = solver.solve(problem, x0 if warm else None)
+
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
+        self.assertAlmostEqual(result.objective_value, optimum, delta=1e-5)

@@ -771,6 +771,48 @@ class ImbalanceInteriorPointTest(unittest.TestCase):
         self.assertFalse(reached and self.layer.is_satisfied(w))
 
 
+class BoundsInteriorPointTest(unittest.TestCase):
+    """``BoundsConstraintLayer.interior_point`` lies strictly inside the box (#37).
+
+    A sole bounds layer then skips Phase I, whose bounds-only stage has no
+    curvature on free components and a singular Newton system.
+    """
+
+    def setUp(self) -> None:
+        inf = np.inf
+        self.layer = BoundsConstraintLayer(
+            lb=np.array([0.0, -inf, -inf, -2.0, 1.0, -inf]),
+            ub=np.array([4.0, inf, 3.0, inf, 1.5, inf]),
+        )
+
+    def test_without_equality_each_kind_of_bound_has_its_point(self) -> None:
+        w = none_throws(self.layer.interior_point())
+        np.testing.assert_array_equal(w, [2.0, 0.0, 2.0, -1.0, 1.25, 0.0])
+        self.assertTrue(self.layer.is_satisfied(w))
+
+    @parameterized.expand([("dense", False), ("sparse", True)])
+    def test_with_equality_it_is_inside_and_on_the_manifold(
+        self, _name: str, sparse: bool
+    ) -> None:
+        rng = np.random.default_rng(37)
+        A = rng.standard_normal((2, 6))
+        b = A @ np.array([1.0, 5.0, -1.0, 0.0, 1.2, -3.0])
+        eq = EqualityConstraintLayer(A=scipy.sparse.csr_matrix(A) if sparse else A, b=b)
+        w = none_throws(self.layer.interior_point(eq))
+        np.testing.assert_allclose(A @ w, b, atol=1e-12)
+        self.assertTrue(self.layer.is_satisfied(w))
+
+    def test_the_free_components_absorb_the_correction(self) -> None:
+        """Weighted by room, a free component moves and a tight one barely does."""
+        eq = EqualityConstraintLayer(A=np.ones((1, 6)), b=np.array([100.0]))
+        w = none_throws(self.layer.interior_point(eq))
+        start = none_throws(self.layer.interior_point())
+        moved = np.abs(w - start)
+        self.assertAlmostEqual(float(np.sum(w)), 100.0, places=10)
+        self.assertGreater(min(moved[1], moved[5]), 100.0 * moved[4])
+        self.assertTrue(self.layer.is_satisfied(w))
+
+
 class ProblemMakePhase1ProjectionTest(unittest.TestCase):
     """``make_phase1`` projects ``x0`` onto the equality manifold ``A x = b``.
 
