@@ -51,6 +51,7 @@ from .._typing import none_throws
 from ..exceptions import NewtonStepError
 from ..linalg.systems import DiagonalSystem
 from ..problems.result import (
+    InfeasibilityCertificate,
     ObjectiveOutcome,
     PrimalDualDiagnostics,
     SolveResult,
@@ -69,10 +70,12 @@ from ..solvers.optimization import (
     ProblemCertifiablyInfeasibleError,
     _duals_from,
     _legacy_solve_status,
+    _weak_duality_slack,
 )
 from ..solvers.settings import (
     LevenbergSettings,
     OptimizationSettings,
+    OuterSettings,
 )
 from ..solvers.solver import Solver
 
@@ -348,6 +351,63 @@ def _clamp_dual_after_update(
     return lmbda
 
 
+def _verify_recession_direction(
+    adapter: _BarrierAdapter,
+    x: npt.NDArray[np.float64],
+    delta_x: npt.NDArray[np.float64],
+    feasibility_error: float,
+    tolerance: float,
+) -> npt.NDArray[np.float64] | None:
+    """Verify a descending affine ray from a feasible iterate."""
+    if not feasibility_error <= tolerance:
+        return None
+    norm = float(np.linalg.norm(delta_x))
+    if not math.isfinite(norm) or norm == 0.0:
+        return None
+    d = delta_x / norm
+    slope = adapter.recession_slope(x, d)
+    # Even a small positive component eventually violates an affine inequality.
+    if (
+        slope is not None
+        and slope < 0.0
+        and np.all(adapter.grad_constraints_multiply(x, d) <= 0.0)
+    ):
+        return d
+    return None
+
+
+def _certify_pd_status(
+    status: Literal[0, 1, 2],
+    message: str,
+    objective_value: float,
+    dual_value: float,
+    feasibility_error: float,
+    outer: OuterSettings,
+) -> tuple[Literal[0, 1, 2], str]:
+    """Require a finite bound and a feasible primal point for a success status."""
+    gap = objective_value - dual_value
+    if (
+        math.isfinite(gap)
+        and math.isfinite(feasibility_error)
+        and gap >= -_weak_duality_slack(objective_value)
+    ):
+        error = max(gap, feasibility_error)
+        if status == 0 and error <= outer.tolerance:
+            return 0, message
+        if error <= outer.tolerance_soft:
+            if status == 0:
+                return (
+                    1,
+                    f"Certified gap and primal feasibility reached soft tolerance ({error:.3e}).",
+                )
+            return 1, message
+    diagnostic = (
+        f"Optimality was not certified (primal-dual gap {gap:.3e}, "
+        f"primal feasibility error {feasibility_error:.3e})."
+    )
+    return 2, diagnostic if status == 0 else f"{message} {diagnostic}"
+
+
 def _pd_solveresult(
     *,
     solution: npt.NDArray[np.float64],
@@ -363,6 +423,7 @@ def _pd_solveresult(
     step_sizes: list[float],
     primal_residual_norms: list[float],
     dual_residual_norms: list[float],
+    direction: npt.NDArray[np.float64] | None = None,
 ) -> SolveResult:
     """Build a primal-dual ``SolveResult`` from the iteration's outputs and histories.
 
@@ -398,6 +459,8 @@ def _pd_solveresult(
         ‖A x - b‖ at each iteration (zeros without equality constraints).
      dual_residual_norms : list[float]
         ‖r_dual‖ at each iteration.
+     direction : npt.NDArray[np.float64] | None
+        Verified recession direction for an unbounded problem, if present.
 
     Returns
     -------
@@ -405,9 +468,17 @@ def _pd_solveresult(
         The result, with ``solver="primal_dual"``.
 
     """
+    certificate = None
+    result_status = _legacy_solve_status(status)
+    if direction is not None:
+        result_status = SolveStatus.UNBOUNDED
+        certificate = InfeasibilityCertificate(
+            kind="unbounded", primal_witness=direction
+        )
     return SolveResult(
         solution=solution,
-        status=_legacy_solve_status(status),
+        status=result_status,
+        certificate=certificate,
         message=message,
         solver="primal_dual",
         n_iterations=nits,
@@ -821,6 +892,9 @@ class PrimalDualSolver(Solver):
         # once the value crosses the threshold. ``None`` for an ordinary objective.
         feasibility_threshold = none_throws(problem.obj).feasibility_threshold
 
+        adapter = _BarrierAdapter(problem, settings)
+        check_ray = feasibility_threshold is None and adapter._all_linear()
+        direction = None
         nit = 0
         for nit in range(max_iter):
             iter_start = time.time()
@@ -850,8 +924,10 @@ class PrimalDualSolver(Solver):
             primal_residual_norms.append(0.0)  # no equality constraints
 
             if eta <= 0.0:
-                status = 0
-                message = f"converged: non-positive surrogate gap ({eta:.3e})"
+                status = 0 if dual_norm < outer_tol else 1
+                message = (
+                    f"Iteration stopped at non-positive surrogate gap ({eta:.3e})."
+                )
                 break
 
             if eta < outer_tol and dual_norm < outer_tol:
@@ -934,6 +1010,16 @@ class PrimalDualSolver(Solver):
             damping = info.next_damping
             if info.attempts > 0:
                 trace.on_pd_damping_engaged(nit, info.damping_used, info.attempts)
+            if check_ray:
+                direction = _verify_recession_direction(
+                    adapter, x, info.delta_x, float(np.max(f, initial=0.0)), outer_tol
+                )
+                if direction is not None:
+                    status = 2
+                    message = (
+                        "Verified a feasible recession direction with negative slope."
+                    )
+                    break
             step_sizes.append(info.step)
             x = x + info.step * info.delta_x
             lmbda = _clamp_dual_after_update(lmbda + info.step * info.delta_lmbda)
@@ -973,7 +1059,7 @@ class PrimalDualSolver(Solver):
         # multiplier, so report the meaningful primal certificate (``solution`` /
         # ``objective_value`` / ``status``) and zero the dual fields rather than
         # evaluate them on an unrefined multiplier.
-        if status == 2:
+        if status == 2 and direction is None:
             objective_value = none_throws(problem.obj).evaluate(x)
             trace.on_pd_done(
                 solver=solver_name,
@@ -1011,8 +1097,10 @@ class PrimalDualSolver(Solver):
         # bound on inf_x L, so a ``dual_value > 0`` infeasibility test built on
         # it could falsely certify a feasible problem infeasible. ``nu`` is
         # empty (no equality constraints in this solver).
-        dual_value = _BarrierAdapter(problem, settings).evaluate_dual(
-            lmbda, np.zeros(0), x
+        dual_value = (
+            adapter.evaluate_dual(lmbda, np.zeros(0), x)
+            if direction is None
+            else float("-inf")
         )
         # A positive dual value certifies infeasibility only for a Phase I problem,
         # whose objective is the slack (marked by a feasibility threshold); for any
@@ -1049,6 +1137,16 @@ class PrimalDualSolver(Solver):
                 ),
             )
 
+        if direction is None:
+            status, message = _certify_pd_status(
+                status,
+                message,
+                objective_value,
+                dual_value,
+                float(np.max(f_final, initial=0.0)),
+                settings.outer,
+            )
+
         trace.on_pd_done(
             solver=solver_name,
             nits=nit + 1,
@@ -1063,7 +1161,8 @@ class PrimalDualSolver(Solver):
             dual_value=float(dual_value),
             equality_multipliers=np.zeros(0),
             inequality_multipliers=lmbda,
-            suboptimality=eta_final,
+            suboptimality=eta_final if direction is None else float("inf"),
+            direction=direction,
             nits=nit + 1,
             status=status,
             message=message,
@@ -1776,6 +1875,9 @@ class PrimalDualSolver(Solver):
         # ``None`` for an ordinary objective.
         feasibility_threshold = none_throws(problem.obj).feasibility_threshold
 
+        adapter = _BarrierAdapter(problem, settings)
+        check_ray = feasibility_threshold is None and adapter._all_linear()
+        direction = None
         nit = 0
         for nit in range(max_iter):
             iter_start = time.time()
@@ -1816,10 +1918,9 @@ class PrimalDualSolver(Solver):
             primal_residual_norms.append(pri_norm)
 
             if eta <= 0.0:
-                status = 0
+                status = 0 if max(dual_norm, pri_norm) < outer_tol else 1
                 message = (
-                    "Equality primal-dual converged with non-positive surrogate "
-                    f"gap ({eta})."
+                    f"Iteration stopped at non-positive surrogate gap ({eta:.3e})."
                 )
                 break
 
@@ -1885,6 +1986,20 @@ class PrimalDualSolver(Solver):
                 nu = none_throws(stall.best_nu)
                 trace.on_early_stop(nit + 1)
                 break
+            if check_ray:
+                direction = _verify_recession_direction(
+                    adapter,
+                    x,
+                    delta_x,
+                    max(float(np.max(f, initial=0.0)), pri_norm),
+                    outer_tol,
+                )
+                if direction is not None:
+                    status = 2
+                    message = (
+                        "Verified a feasible recession direction with negative slope."
+                    )
+                    break
             step_sizes.append(step)
             x = x + step * delta_x
             lmbda = _clamp_dual_after_update(lmbda + step * delta_lmbda)
@@ -1910,7 +2025,7 @@ class PrimalDualSolver(Solver):
         # loop broke before ``lmbda``/``nu`` were refined past their seeds, so the
         # dual-side fields would only echo arbitrary multipliers. Report the primal
         # certificate and zero the dual fields rather than evaluate them.
-        if status == 2:
+        if status == 2 and direction is None:
             objective_value = none_throws(problem.obj).evaluate(x)
             trace.on_pd_done(
                 solver=solver_name,
@@ -1946,7 +2061,22 @@ class PrimalDualSolver(Solver):
         # ``problem.eq``) instead of the analytic per-component decomposition,
         # whose plug-in fallback (``L`` at the current ``x``) is only an UPPER
         # bound on inf_x L.
-        dual_value = _BarrierAdapter(problem, settings).evaluate_dual(lmbda, nu, x)
+        dual_value = (
+            adapter.evaluate_dual(lmbda, nu, x) if direction is None else float("-inf")
+        )
+
+        if direction is None:
+            status, message = _certify_pd_status(
+                status,
+                message,
+                objective_value,
+                dual_value,
+                max(
+                    float(np.max(f_final, initial=0.0)),
+                    float(np.linalg.norm(A_eq @ x - b_eq)),
+                ),
+                settings.outer,
+            )
 
         trace.on_pd_done(
             solver=solver_name,
@@ -1960,7 +2090,8 @@ class PrimalDualSolver(Solver):
             dual_value=float(dual_value),
             equality_multipliers=nu,
             inequality_multipliers=lmbda,
-            suboptimality=eta_final,
+            suboptimality=eta_final if direction is None else float("inf"),
+            direction=direction,
             nits=nit + 1,
             status=status,
             message=message,

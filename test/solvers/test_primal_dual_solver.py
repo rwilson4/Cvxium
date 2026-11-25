@@ -1842,3 +1842,78 @@ class NewtonBreakdownFallbackTest(unittest.TestCase):
 
         with self._failing_after(step_method, k=0), self.assertRaises(NewtonStepError):
             PrimalDualSolver().solve(problem, x0)
+
+
+class PrimalDualCertificationTest(unittest.TestCase):
+    """Check certificates through both primal-dual entry paths."""
+
+    @parameterized.expand(
+        [
+            ("equality_warm_start", True, np.ones(2)),
+            ("equality_cold_start", True, None),
+            ("equality_scaled_start", True, np.full(2, 3.0)),
+            ("mixed_bounds", False, np.array([1.0, 0.25, 0.75])),
+        ]
+    )
+    def test_certify_unbounded_linear_problem(
+        self, _name: str, equality: bool, x0: npt.NDArray[np.float64] | None
+    ) -> None:
+        A = np.array([[1.0, -1.0]])
+        if equality:
+            c = -np.ones(2)
+            bounds = BoundsConstraintLayer(lb=0.0, dimension=2)
+            eq = EqualityConstraintLayer(A=A, b=np.zeros(1))
+        else:
+            c = np.array([-1.0, 0.0, 0.0])
+            bounds = BoundsConstraintLayer(
+                lb=np.zeros(3), ub=np.array([np.inf, 1.0, 1.0])
+            )
+            eq = None
+        problem = Problem(obj=LinearObjective(c=c), ineq=[bounds], eq=eq)
+
+        result = PrimalDualSolver().solve(problem, x0)
+
+        self.assertIs(result.status, SolveStatus.UNBOUNDED, result.message)
+        self.assertEqual(result.dual_value, -np.inf)
+        certificate = none_throws(result.certificate)
+        self.assertEqual(certificate.kind, "unbounded")
+        d = np.asarray(none_throws(certificate.primal_witness))
+        self.assertTrue(problem.is_feasible(result.solution))
+        self.assertTrue(np.all(d >= 0.0))
+        if equality:
+            np.testing.assert_allclose(A @ result.solution, 0.0, atol=1e-6)
+            np.testing.assert_allclose(A @ d, 0.0, atol=1e-10)
+        else:
+            np.testing.assert_array_equal(d[1:], np.zeros(2))
+        self.assertLess(np.dot(c, d), 0.0)
+
+    @parameterized.expand(
+        [
+            (equality, dual_value)
+            for equality in (False, True)
+            for dual_value in (-np.inf, -1.0)
+        ]
+    )
+    def test_reject_uncertified_optimality(
+        self, equality: bool, dual_value: float
+    ) -> None:
+        problem = Problem(
+            obj=QuadraticObjective(
+                c=np.zeros(2), hessian_contribution=DiagonalSystem(np.ones(2))
+            ),
+            ineq=[BoundsConstraintLayer(lb=-np.ones(2), ub=np.ones(2))],
+            eq=(
+                EqualityConstraintLayer(A=np.ones((1, 2)), b=np.zeros(1))
+                if equality
+                else None
+            ),
+        )
+
+        with patch(
+            "cvxium.solvers.primal_dual_solver._BarrierAdapter.evaluate_dual",
+            return_value=dual_value,
+        ):
+            result = PrimalDualSolver().solve(problem, np.zeros(2))
+
+        self.assertIs(result.status, SolveStatus.MAX_ITERATIONS, result.message)
+        self.assertIn("Optimality was not certified", result.message)
