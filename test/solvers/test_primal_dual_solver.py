@@ -10,6 +10,7 @@ import numpy.typing as npt
 from parameterized import parameterized
 
 from cvxium._typing import none_throws
+from cvxium.diagnostics.trace import ListTrace
 from cvxium.exceptions import NewtonStepError
 from cvxium.linalg.systems import (
     DenseSystem,
@@ -49,6 +50,7 @@ from cvxium.solvers.primal_dual_solver import (
     _StallWatch,
 )
 from cvxium.solvers.settings import (
+    ArmijoSettings,
     LevenbergSettings,
     OptimizationSettings,
     OuterSettings,
@@ -518,6 +520,32 @@ class MpcStepTest(unittest.TestCase):
             min_step=0.5,
         )
         assert step is None
+
+
+def test_mpc_damping_returns_to_zero() -> None:
+    """The gain ratio releases damping after a curved constraint forces a retry."""
+    problem = Problem(
+        obj=QuadraticObjective(
+            c=np.array([-10.0]), hessian_contribution=DiagonalSystem(np.ones(1))
+        ),
+        ineq=[SquaredNormConstraintLayer(phi=1.0, dimension=1)],
+    )
+    trace = ListTrace()
+    settings = OptimizationSettings(
+        # The undamped direction overshoots the curved boundary at this floor.
+        armijo=ArmijoSettings(min_step=0.5),
+        primal_dual=PrimalDualSettings(damping=LevenbergSettings(drop_to_zero=1e-3)),
+        trace=trace,
+    )
+
+    result = PrimalDualSolver(settings=settings).solve(problem, np.array([-0.2]))
+
+    assert result.status is SolveStatus.OPTIMAL, result.message
+    assert problem.is_feasible(result.solution)
+    np.testing.assert_allclose(result.solution, [1.0], rtol=0.0, atol=1e-6)
+    iterations = [row for row in trace.records() if row["event"] == "pd_iteration"]
+    assert iterations[0]["damping"] > 0.0
+    assert iterations[-1]["damping"] == 0.0
 
 
 class PrimalDualSolverWithEqualityTest(unittest.TestCase):
