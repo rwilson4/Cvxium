@@ -1842,7 +1842,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
             newton_elapsed = 1000 * (time.time() - newton_start)
 
-            lambda_squared = self.newton_decrement_squared(x, t, delta_x)
+            lambda_squared = self.newton_decrement_squared(x, t, delta_x, nu_hat)
             suboptimality = 0.5 * lambda_squared
             suboptimalities.append(suboptimality)
 
@@ -2002,7 +2002,11 @@ class BaseInteriorPointMethodSolver(Optimizer):
             else:
                 try:
                     btls_s = self.backtracking_line_search(
-                        x=x, delta_x=delta_x, t=t, lambda_squared=lambda_squared
+                        x=x,
+                        delta_x=delta_x,
+                        t=t,
+                        lambda_squared=lambda_squared,
+                        nu_hat=nu_hat,
                     )
                 except BacktrackingLineSearchError as e:
                     nu_star = nu_hat / t
@@ -2208,12 +2212,35 @@ class BaseInteriorPointMethodSolver(Optimizer):
         self.settings.trace.on_dual_eval_done(outer_nit, dual_elapsed)
         return dual_value
 
+    def equality_residual(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Return the equality residual r = b - A x the Newton step carries.
+
+        A solver whose Newton step also solves A Δx = r (an infeasible-start step)
+        returns r, so the line search can account for the step's feasibility
+        correction (see ``backtracking_line_search``). The base class takes feasible
+        steps, A Δx = 0, and returns an empty array.
+
+        Parameters
+        ----------
+         x : npt.NDArray[np.float64]
+            The current iterate.
+
+        Returns
+        -------
+         r : npt.NDArray[np.float64]
+            The residual, of length p; empty when the step carries none.
+
+        """
+        del x
+        return np.zeros(0)
+
     def backtracking_line_search(
         self,
         x: npt.NDArray[np.float64],
         delta_x: npt.NDArray[np.float64],
         t: float,
         lambda_squared: float,
+        nu_hat: npt.NDArray[np.float64] | None = None,
     ) -> float:
         """Run the Armijo backtracking line search on the barrier objective.
 
@@ -2233,6 +2260,11 @@ class BaseInteriorPointMethodSolver(Optimizer):
             The barrier parameter.
          lambda_squared : float
             The squared Newton decrement λ^2, nonnegative.
+         nu_hat : npt.NDArray[np.float64] | None
+            The step's equality multipliers ν, from ``calculate_newton_step``. With a
+            nonzero ``equality_residual`` r, the merit becomes the exact penalty
+            f_t + μ ‖A x - b‖_1 with μ = 2 ‖ν‖_∞ (see ``ArmijoBarrierMerit``).
+            ``None`` keeps the merit f_t.
 
         Returns
         -------
@@ -2242,7 +2274,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
         Raises
         ------
          InvalidDescentDirectionError
-            Propagated from ``LineSearch.find_step`` when ∇f_t^T Δx > 0.
+            Propagated from ``LineSearch.find_step`` when the merit increases along Δx.
          ConstraintBoundaryError
             Propagated from ``LineSearch.find_step`` or ``btls_keep_feasible`` when the
             feasible step is too small.
@@ -2275,6 +2307,15 @@ class BaseInteriorPointMethodSolver(Optimizer):
             step_cap = 1.0
 
         grad_ft_dot_delta_x = float(np.dot(delta_x, self.gradient_barrier(x, t)))
+        # An infeasible-start step also restores A x = b, and its directional
+        # derivative along f_t alone, -λ^2 - ν^T r, need not be negative. The exact
+        # penalty μ ‖A x - b‖_1 with μ > ‖ν‖_∞ makes it a descent direction for any r
+        # (see ``ArmijoBarrierMerit``); μ = 2 ‖ν‖_∞ leaves a margin over the bound.
+        penalty0 = 0.0
+        residual = self.equality_residual(x)
+        if nu_hat is not None and nu_hat.size and residual.size:
+            mu = 2.0 * float(np.max(np.abs(nu_hat)))
+            penalty0 = mu * float(np.sum(np.abs(residual)))
         merit = ArmijoBarrierMerit(
             evaluate_barrier_objective=lambda x_trial: self.evaluate_barrier_objective(
                 x_trial, t
@@ -2282,6 +2323,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
             ft0=self.evaluate_barrier_objective(x, t),
             neg_alpha_grad=alpha * lambda_squared,
             grad_ft_dot_delta_x=grad_ft_dot_delta_x,
+            penalty0=penalty0,
         )
         line_search = LineSearch(
             merit=merit,
@@ -2296,6 +2338,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
         x: npt.NDArray[np.float64],
         t: float,
         delta_x: npt.NDArray[np.float64],
+        nu_hat: npt.NDArray[np.float64] | None = None,
     ) -> float:
         """Compute the squared Newton decrement λ^2 at the Newton step.
 
@@ -2305,13 +2348,17 @@ class BaseInteriorPointMethodSolver(Optimizer):
           second Hessian-vector product per iteration, on top of the Newton solve, but
           the true quadratic-model decrement and the more reliable form when high
           precision is needed.
-        - Gradient form: -∇f_t^T Δx. Since Δx solves the Newton system
-             H Δx + A^T ν = -∇f_t,   A Δx = 0,
-          the two forms are equal: the A^T ν term drops out because A Δx = 0. The
-          barrier gradient can be far cheaper than a Hessian-vector product (about 20
-          times on one large structured objective), but the identity degrades under
-          inexact solves and ill-conditioning at high t, so it suits problems that do
-          not need high precision.
+        - Gradient form: -∇f_t^T Δx - ν^T r. Since Δx solves the Newton system
+             H Δx + A^T ν = -∇f_t,   A Δx = r,   r = b - A x
+          (an infeasible-start step when r ≠ 0), Δx^T H Δx = -∇f_t^T Δx - ν^T r, so the
+          two forms are equal. Without the ν^T r term the gradient form is wrong for an
+          infeasible-start step: near convergence ν is large (it scales with t) while
+          λ^2 is small, so even a rounding-level r can drive -∇f_t^T Δx negative,
+          and the clamp below would then report convergence that has not happened.
+          The barrier gradient can be far cheaper than a Hessian-vector product
+          (about 20 times on one large structured objective), but the identity
+          degrades under inexact solves and ill-conditioning at high t, so it suits
+          problems that do not need high precision.
         With equality constraints, neither form equals ∇f_t^T H^{-1} ∇f_t.
 
         Requires Δx to be the Newton step at x, which the only caller,
@@ -2326,6 +2373,9 @@ class BaseInteriorPointMethodSolver(Optimizer):
             The barrier parameter.
          delta_x : npt.NDArray[np.float64]
             The Newton step at x.
+         nu_hat : npt.NDArray[np.float64] | None
+            The step's equality multipliers ν, used by the gradient form when the
+            ``equality_residual`` is nonzero; ``None`` omits the ν^T r term.
 
         Returns
         -------
@@ -2334,7 +2384,11 @@ class BaseInteriorPointMethodSolver(Optimizer):
 
         """
         if self.settings.inner.newton_decrement_via_gradient:
-            return max(0.0, -float(np.dot(delta_x, self.gradient_barrier(x, t))))
+            decrement = -float(np.dot(delta_x, self.gradient_barrier(x, t)))
+            residual = self.equality_residual(x)
+            if nu_hat is not None and nu_hat.size and residual.size:
+                decrement -= float(np.dot(nu_hat, residual))
+            return max(0.0, decrement)
         return max(0.0, float(np.dot(delta_x, self.hessian_multiply(x, t, delta_x))))
 
     def inequality_multipliers(

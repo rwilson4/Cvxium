@@ -10,6 +10,7 @@ import numpy as np
 import numpy.typing as npt
 import scipy.sparse
 from parameterized import parameterized
+from scipy.optimize import brentq
 
 from cvxium._typing import none_throws
 from cvxium.diagnostics.trace import ListTrace
@@ -1569,10 +1570,11 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
             delta_x: npt.NDArray[np.float64],
             t: float,
             lambda_squared: float,
+            nu_hat: npt.NDArray[np.float64] | None = None,
         ) -> float:
             nonlocal btls_calls
             btls_calls += 1
-            return original_btls(x, delta_x, t, lambda_squared)
+            return original_btls(x, delta_x, t, lambda_squared, nu_hat)
 
         t = 1e10
         x0 = np.ones(3)
@@ -1622,6 +1624,7 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
             x: npt.NDArray[np.float64],
             t: float,
             delta_x: npt.NDArray[np.float64],
+            nu_hat: npt.NDArray[np.float64] | None = None,
         ) -> float:
             # Below eta^2 (crosses into the quadratic phase) and below
             # 2 * tolerance (already converged), on the very first iterate.
@@ -1667,6 +1670,7 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
             x: npt.NDArray[np.float64],
             t: float,
             delta_x: npt.NDArray[np.float64],
+            nu_hat: npt.NDArray[np.float64] | None = None,
         ) -> float:
             return next(decrements)
 
@@ -1675,6 +1679,7 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
             delta_x: npt.NDArray[np.float64],
             t: float,
             lambda_squared: float,
+            nu_hat: npt.NDArray[np.float64] | None = None,
         ) -> float:
             btls_calls.append(len(btls_calls))
             return 0.5
@@ -1747,6 +1752,7 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
             x: npt.NDArray[np.float64],
             t: float,
             delta_x: npt.NDArray[np.float64],
+            nu_hat: npt.NDArray[np.float64] | None = None,
         ) -> float:
             val = lambda_squared_sequence[call_idx["i"]]
             call_idx["i"] += 1
@@ -1760,10 +1766,11 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
             delta_x: npt.NDArray[np.float64],
             t: float,
             lambda_squared: float,
+            nu_hat: npt.NDArray[np.float64] | None = None,
         ) -> float:
             nonlocal btls_calls
             btls_calls += 1
-            return original_btls(x, delta_x, t, lambda_squared)
+            return original_btls(x, delta_x, t, lambda_squared, nu_hat)
 
         with (
             patch.object(adapter, "calculate_newton_step", new=fake_newton_step),
@@ -1830,6 +1837,7 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
             x: npt.NDArray[np.float64],
             t: float,
             delta_x: npt.NDArray[np.float64],
+            nu_hat: npt.NDArray[np.float64] | None = None,
         ) -> float:
             val = lambda_squared_sequence[call_idx["i"]]
             call_idx["i"] += 1
@@ -1843,10 +1851,11 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
             delta_x: npt.NDArray[np.float64],
             t: float,
             lambda_squared: float,
+            nu_hat: npt.NDArray[np.float64] | None = None,
         ) -> float:
             nonlocal btls_calls
             btls_calls += 1
-            return original_btls(x, delta_x, t, lambda_squared)
+            return original_btls(x, delta_x, t, lambda_squared, nu_hat)
 
         with (
             patch.object(adapter, "calculate_newton_step", new=fake_newton_step),
@@ -1913,6 +1922,7 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
             x: npt.NDArray[np.float64],
             t: float,
             delta_x: npt.NDArray[np.float64],
+            nu_hat: npt.NDArray[np.float64] | None = None,
         ) -> float:
             val = lambda_squared_sequence[call_idx["i"]]
             call_idx["i"] += 1
@@ -1973,6 +1983,7 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
             x: npt.NDArray[np.float64],
             t: float,
             delta_x: npt.NDArray[np.float64],
+            nu_hat: npt.NDArray[np.float64] | None = None,
         ) -> float:
             val = lambda_squared_sequence[call_idx["i"]]
             call_idx["i"] += 1
@@ -3304,3 +3315,89 @@ class RecessionDirectionTest(unittest.TestCase):
 
         self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
         np.testing.assert_allclose(result.solution[0], 1e4, rtol=1e-3)
+
+
+class InfeasibleStartLineSearchTest(unittest.TestCase):
+    """The barrier's line search accepts its own infeasible-start step (issue #25).
+
+    The Newton step also solves A Δx = r, r = b - A x, so ∇f_t^T Δx = -λ^2 - ν^T r.
+    At high t, ν scales with t, and a residual of order 1e-7 makes -ν^T r outweigh
+    λ^2 even in the damped phase. The objective-based descent check then rejected the
+    step, and the gradient-form decrement -∇f_t^T Δx went negative, clamped to 0, and
+    reported convergence from a point still off A x = b.
+
+    The start is the closed-form central point of min t c^T x - ∑ log x_i subject to
+    ∑ x_i = 6, x_i = 1 / (t c_i + ν), perturbed along the manifold into the damped
+    phase (λ ≈ 0.8), then scaled off it by a relative 2e-7.
+    """
+
+    T = 1e6
+    M = 6
+
+    def _problem(self) -> Problem:
+        M = self.M
+        return Problem(
+            obj=LinearObjective(c=np.arange(1.0, M + 1)),
+            ineq=[BoundsConstraintLayer(lb=0.0, dimension=M)],
+            eq=EqualityConstraintLayer(A=np.ones((1, M)), b=np.array([float(M)])),
+        )
+
+    def _start(self) -> npt.NDArray[np.float64]:
+        t, M = self.T, self.M
+        c = np.arange(1.0, M + 1)
+        nu = brentq(
+            lambda v: float(np.sum(1.0 / (t * c + v))) - M,
+            -t * c.min() + 1e-12 * t,
+            1e3 * t,
+        )
+        center = 1.0 / (t * c + nu)
+        w = np.random.default_rng(25).standard_normal(M)
+        w -= w.mean()
+        x = center * (1.0 + 0.5 * w / np.abs(w).max())
+        return x * (M / x.sum()) * (1.0 - 2e-7)
+
+    def _adapter(self, via_gradient: bool = False) -> _BarrierAdapter:
+        settings = OptimizationSettings(
+            inner=InnerSettings(newton_decrement_via_gradient=via_gradient)
+        )
+        return _BarrierAdapter(problem=self._problem(), settings=settings)
+
+    def test_the_step_ascends_f_t_in_the_damped_phase(self) -> None:
+        """The scenario's premise: the objective-only test would reject this step."""
+        adapter, x = self._adapter(), self._start()
+        delta_x, nu = adapter.calculate_newton_step(x, self.T)
+        lambda_squared = float(delta_x @ adapter.hessian_multiply(x, self.T, delta_x))
+        r = adapter.equality_residual(x)
+
+        self.assertGreater(float(delta_x @ adapter.gradient_barrier(x, self.T)), 0.0)
+        self.assertGreater(np.sqrt(lambda_squared), 0.25)  # damped phase
+        self.assertGreater(-float(nu @ r), lambda_squared)
+
+    @parameterized.expand([("hessian_form", False), ("gradient_form", True)])
+    def test_centering_converges_onto_the_manifold(
+        self, _name: str, via_gradient: bool
+    ) -> None:
+        adapter, x = self._adapter(via_gradient), self._start()
+        reference = self._adapter()
+        projected = x * (self.M / x.sum())
+        center = reference.centering_step(
+            projected, self.T, last_step=False, outer_nit=1
+        ).solution
+
+        outcome = adapter.centering_step(x, self.T, last_step=False, outer_nit=1)
+
+        self.assertEqual(outcome.status, 0)
+        self.assertGreater(outcome.nits, 1)  # no false convergence at the start
+        np.testing.assert_allclose(np.sum(outcome.solution), self.M, rtol=1e-12)
+        np.testing.assert_allclose(outcome.solution, center, rtol=1e-6)
+
+    def test_the_gradient_form_decrement_matches_the_hessian_form(self) -> None:
+        adapter, x = self._adapter(via_gradient=True), self._start()
+        delta_x, nu = adapter.calculate_newton_step(x, self.T)
+        hessian_form = float(delta_x @ adapter.hessian_multiply(x, self.T, delta_x))
+
+        np.testing.assert_allclose(
+            adapter.newton_decrement_squared(x, self.T, delta_x, nu),
+            hessian_form,
+            rtol=1e-6,
+        )

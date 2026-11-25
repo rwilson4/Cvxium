@@ -249,6 +249,47 @@ class ArmijoBarrierMeritTest(unittest.TestCase):
         self.assertEqual(ctx.exception.grad_ft_dot_delta_x, 0.3)
 
 
+class ArmijoBarrierMeritPenaltyTest(unittest.TestCase):
+    """The exact-penalty merit for an infeasible-start step (issue #25).
+
+    The step solves A Δx = r, so the merit f_t + μ ‖A x - b‖_1 decreases its penalty
+    linearly, as (1 - s) μ ‖r‖_1, and its directional derivative is
+    ∇f_t^T Δx - μ ‖r‖_1.
+    """
+
+    @staticmethod
+    def _merit(grad_ft_dot_delta_x: float, penalty0: float) -> ArmijoBarrierMerit:
+        return ArmijoBarrierMerit(
+            evaluate_barrier_objective=lambda x: float(x[0]),
+            ft0=10.0,
+            neg_alpha_grad=0.5,
+            grad_ft_dot_delta_x=grad_ft_dot_delta_x,
+            penalty0=penalty0,
+        )
+
+    def test_the_penalty_falls_linearly_along_the_step(self) -> None:
+        merit = self._merit(-1.0, penalty0=2.0)
+        x_trial = np.array([9.0])
+        self.assertEqual(merit.evaluate(x_trial, s=0.0), 11.0)
+        self.assertEqual(merit.evaluate(x_trial, s=0.25), 10.5)
+        self.assertEqual(merit.evaluate(x_trial, s=1.0), 9.0)
+        # The base point's merit includes the penalty, and the Armijo decrease is
+        # still α s λ^2.
+        self.assertEqual(merit.accept_threshold(s=0.0), 12.0)
+        self.assertEqual(merit.accept_threshold(s=1.0), 11.5)
+        self.assertEqual(merit.actual_improvement(trial_value=9.0), 3.0)
+
+    def test_the_penalty_turns_an_ascent_on_f_t_into_descent(self) -> None:
+        """∇f_t^T Δx = 0.3 > 0, but the merit's derivative is 0.3 - 2 < 0."""
+        self._merit(0.3, penalty0=2.0).directional_derivative_sign_check()
+
+    def test_without_a_penalty_the_merit_is_f_t(self) -> None:
+        merit = self._merit(0.3, penalty0=0.0)
+        self.assertEqual(merit.evaluate(np.array([9.0]), s=0.5), 9.0)
+        with self.assertRaises(InvalidDescentDirectionError):
+            merit.directional_derivative_sign_check()
+
+
 class TestMehrotraStepCap(unittest.TestCase):
     """Mehrotra fraction-to-boundary cap: closed-form dual-positivity step."""
 
