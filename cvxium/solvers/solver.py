@@ -28,8 +28,10 @@ import scipy.sparse
 from .._typing import none_throws
 from ..exceptions import (
     BacktrackingLineSearchError,
+    InteriorPointMethodError,
     NewtonStepError,
     ProblemInfeasibleError,
+    RecessionDirectionError,
 )
 from ..linalg.numerical_helpers import (
     tikhonov_filter,
@@ -61,6 +63,40 @@ from ..solvers.optimization import (
 from ..solvers.settings import (
     OptimizationSettings,
 )
+
+_PHASE1_BOX_SCALE: float = 10.0
+"""Half-width of the first Phase I box, in units of max(1, ‖seed‖∞)."""
+
+_PHASE1_BOX_GROWTH: float = 100.0
+"""Factor by which the Phase I box widens after an infeasible boxed solve."""
+
+_PHASE1_BOX_ATTEMPTS: int = 3
+"""Boxed Phase I solves tried before the flat-ray failure is raised."""
+
+
+def _follows_flat_ray(error: BaseException) -> bool:
+    """Whether a failure was caused by a flat recession direction.
+
+    Walks the exception's cause chain for a ``RecessionDirectionError`` along which
+    the objective is constant (not ``unbounded``).
+
+    Parameters
+    ----------
+     error : BaseException
+        The failure to inspect.
+
+    Returns
+    -------
+     flat : bool
+        True when a flat recession direction caused the failure.
+
+    """
+    cause: BaseException | None = error
+    while cause is not None:
+        if isinstance(cause, RecessionDirectionError):
+            return not cause.unbounded
+        cause = cause.__cause__
+    return False
 
 
 class Solver(ABC):
@@ -182,7 +218,9 @@ class Solver(ABC):
         4. Otherwise Phase I runs on the active layer, the last in ``problem.ineq``: a
            direct-form problem when it is a ``DirectConstraintLayer`` and a slack-form
            problem when it is a ``SlackConstraintLayer``, built by
-           ``Problem.make_phase1`` and solved by ``_solve_phase1``.
+           ``Problem.make_phase1`` and solved by ``_solve_phase1``. A Phase I solve
+           that fails along a flat recession direction is retried inside a box
+           around its seed (``_solve_phase1_from``).
 
         Parameters
         ----------
@@ -329,11 +367,10 @@ class Solver(ABC):
             # Direct form: ``make_phase1`` hoists the active layer to the objective;
             # ``self.solve`` then cascades the backgrounds via its own feasibility
             # seeding (a recursion on one fewer layer).
-            phase1_problem, x0_phase1 = problem.make_phase1(
-                x0 if x0 is not None else np.zeros(problem.dimension)
-            )
-            return self._solve_phase1(
-                problem, phase1_problem, x0_phase1, on_infeasible=on_infeasible
+            return self._solve_phase1_from(
+                problem,
+                x0 if x0 is not None else np.zeros(problem.dimension),
+                on_infeasible=on_infeasible,
             )
         # Slack form: the backgrounds stay hard, so feasibilize them first (a
         # recursion on one fewer layer), then build the slack problem -- whose
@@ -369,10 +406,79 @@ class Solver(ABC):
                     solver="",
                     n_iterations=0,
                 )
-        phase1_problem, aug_x0 = problem.make_phase1(seed)
-        return self._solve_phase1(
-            problem, phase1_problem, aug_x0, on_infeasible=on_infeasible
-        )
+        return self._solve_phase1_from(problem, seed, on_infeasible=on_infeasible)
+
+    def _solve_phase1_from(
+        self,
+        problem: Problem,
+        seed: npt.NDArray[np.float64],
+        on_infeasible: OnInfeasible = "raise",
+    ) -> SolveResult:
+        """Build and solve the Phase I problem from a seed, boxing it if it is flat.
+
+        A barrier Phase I has no center when its region has a recession direction
+        along which its objective is constant and some constraint strictly
+        decreases: the log barrier falls without bound along the ray. The barrier's
+        ray watch reports this as a ``RecessionDirectionError`` that is not
+        ``unbounded``, chained under ``InteriorPointMethodError``. The original
+        problem may be perfectly well behaved (issue #28's linear program: a
+        variable bounded only below, which no constraint of the active layer
+        involves). Phase I is then rebuilt with the box |w_j - seed_j| ≤ R as a
+        background layer, which makes its region compact so the central path
+        exists. Phase I stops at its first strictly feasible point, which is
+        strictly feasible for the original problem whether or not it is in the box.
+
+        The box can make a feasible problem look infeasible when R is too small, so
+        an infeasibility verdict from a boxed solve is no verdict on the original:
+        R grows by ``_PHASE1_BOX_GROWTH`` and Phase I runs again, up to
+        ``_PHASE1_BOX_ATTEMPTS`` boxed solves in all. If none finds a point, the
+        original failure is raised. R starts at ``_PHASE1_BOX_SCALE`` times
+        max(1, ‖seed‖∞), well clear of the seed's own scale. Phase I problems
+        without a flat ray never see the box, so they are solved exactly as before.
+
+        Parameters
+        ----------
+         problem : Problem
+            The feasibility problem (``obj`` is ``None``).
+         seed : npt.NDArray[np.float64]
+            The Phase I seed, of length M, satisfying the background layers.
+         on_infeasible : OnInfeasible
+            Forwarded to ``_solve_phase1``.
+
+        Returns
+        -------
+         result : SolveResult
+            The Phase I result, as from ``_solve_phase1``.
+
+        Raises
+        ------
+         InteriorPointMethodError
+            When Phase I fails other than along a flat ray, or along one and no
+            boxed solve finds a feasible point.
+         ProblemInfeasibleError
+            Propagated from the unboxed solve. (A boxed solve's verdict is not
+            propagated, since the box may be what made it infeasible.)
+
+        """
+        phase1_problem, x0_phase1 = problem.make_phase1(seed)
+        try:
+            return self._solve_phase1(
+                problem, phase1_problem, x0_phase1, on_infeasible=on_infeasible
+            )
+        except InteriorPointMethodError as e:
+            if not _follows_flat_ray(e):
+                raise
+            failure = e
+        radius = _PHASE1_BOX_SCALE * max(1.0, float(np.max(np.abs(seed), initial=0.0)))
+        for _ in range(_PHASE1_BOX_ATTEMPTS):
+            phase1_problem, x0_phase1 = problem.make_phase1(seed, radius=radius)
+            try:
+                return self._solve_phase1(
+                    problem, phase1_problem, x0_phase1, on_infeasible=on_infeasible
+                )
+            except ProblemInfeasibleError:
+                radius *= _PHASE1_BOX_GROWTH
+        raise failure
 
     def _solve_phase1(
         self,

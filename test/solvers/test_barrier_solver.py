@@ -66,6 +66,7 @@ from cvxium.solvers.settings import (
     OuterSettings,
 )
 from cvxium.solvers.solver import EqualitySolver
+from test.solvers.test_primal_dual_solver import _minimize_max_imbalance
 
 if TYPE_CHECKING:
     from cvxium.problems.constraint_layers import (
@@ -3535,3 +3536,192 @@ class InfeasibleStartLineSearchTest(unittest.TestCase):
             hessian_form,
             rtol=1e-6,
         )
+
+
+def _flat_ray_failure() -> InteriorPointMethodError:
+    """An ``InteriorPointMethodError`` caused by a flat recession direction."""
+    error = InteriorPointMethodError(
+        message="Phase I centering step failed",
+        remaining_steps=3,
+        suboptimality=10.0,
+        last_iterate=np.zeros(2),
+    )
+    error.__cause__ = RecessionDirectionError(
+        "flat",
+        suboptimality=10.0,
+        last_iterate=np.zeros(2),
+        direction=np.array([0.0, 1.0]),
+        objective_slope=0.0,
+    )
+    return error
+
+
+def _infeasible_verdict() -> ProblemCertifiablyInfeasibleError:
+    return ProblemCertifiablyInfeasibleError(
+        message="infeasible inside the box",
+        result=SolveResult(
+            solution=np.zeros(2),
+            status=SolveStatus.INFEASIBLE,
+            message="",
+            solver="",
+            n_iterations=0,
+        ),
+    )
+
+
+class FlatPhase1BoxTest(unittest.TestCase):
+    """A barrier Phase I with a flat recession ray is retried inside a box (#49).
+
+    Along a ray where the Phase I objective is constant and some constraint strictly
+    decreases, the log barrier falls without bound, so the centering problem has no
+    minimizer. Bounding the Phase I region by a box around its seed restores the
+    central path. #42 recovered by handing the solve to ``PrimalDualSolver``; the
+    barrier now finds the point itself.
+    """
+
+    @parameterized.expand([(f"seed_{seed}", seed) for seed in (0, 3, 7)])
+    def test_issue_28_lp_is_solved_without_primal_dual(
+        self, _name: str, seed: int
+    ) -> None:
+        problem = _minimize_max_imbalance(seed)
+
+        with patch.object(
+            PrimalDualSolver, "solve", side_effect=AssertionError("primal-dual used")
+        ):
+            result = BarrierSolver().solve(problem)
+
+        self.assertEqual(result.solver, "barrier")
+        self.assertIn(
+            result.status, (SolveStatus.OPTIMAL, SolveStatus.ACCEPTABLE), result.message
+        )
+        self.assertTrue(problem.is_feasible(result.solution))
+        eq = none_throws(problem.eq)
+        np.testing.assert_allclose(eq.A @ result.solution, eq.b, rtol=0.0, atol=1e-10)
+        self.assertLess(result.solution[-1], 1e-5)
+
+    def _feasibility_problem(self) -> Problem:
+        return Problem(
+            ineq=[
+                BoundsConstraintLayer(lb=np.array([-np.inf, 0.0])),
+                LinearInequalityConstraintLayer(
+                    A=np.array([[1.0, 0.0]]), cl=np.array([1.0]), cu=np.array([2.0])
+                ),
+            ]
+        )
+
+    def _run(self, outcomes: list[object]) -> tuple[object, list[float | None]]:
+        """Solve with ``_solve_phase1`` replaced by the given outcomes, in order."""
+        problem = self._feasibility_problem()
+        radii: list[float | None] = []
+        make_phase1 = Problem.make_phase1
+
+        def recording(
+            self: Problem, x0: npt.NDArray[np.float64], radius: float | None = None
+        ) -> tuple[Problem, npt.NDArray[np.float64]]:
+            radii.append(radius)
+            return make_phase1(self, x0, radius=radius)
+
+        def outcome(*_args: object, **_kwargs: object) -> SolveResult:
+            value = outcomes.pop(0)
+            if isinstance(value, BaseException):
+                raise value
+            assert isinstance(value, SolveResult)
+            return value
+
+        found = SolveResult(
+            solution=np.array([1.5, 1.0]),
+            status=SolveStatus.FEASIBLE,
+            message="",
+            solver="",
+            n_iterations=0,
+        )
+        outcomes = [found if o == "found" else o for o in outcomes]
+        with (
+            patch.object(Problem, "make_phase1", recording),
+            patch.object(BarrierSolver, "_solve_phase1", side_effect=outcome),
+        ):
+            try:
+                return BarrierSolver()._solve_feasibility(problem), radii
+            except Exception as e:
+                return e, radii
+
+    def test_a_flat_ray_is_retried_inside_a_box(self) -> None:
+        result, radii = self._run([_flat_ray_failure(), "found"])
+
+        self.assertIsInstance(result, SolveResult)
+        # The seed is the bounds layer's interior point (0, 1), so R = 10.
+        self.assertEqual(radii, [None, 10.0])
+
+    def test_an_infeasible_box_grows_and_is_never_the_verdict(self) -> None:
+        flat = _flat_ray_failure()
+        result, radii = self._run(
+            [flat, _infeasible_verdict(), _infeasible_verdict(), "found"]
+        )
+        self.assertIsInstance(result, SolveResult)
+        self.assertEqual(radii, [None, 10.0, 1e3, 1e5])
+
+        flat = _flat_ray_failure()
+        result, radii = self._run([flat, *[_infeasible_verdict() for _ in range(3)]])
+        self.assertIs(result, flat)
+        self.assertEqual(len(radii), 4)
+
+    def test_other_failures_are_not_retried(self) -> None:
+        unboundedness = _flat_ray_failure()
+        none_throws(unboundedness.__cause__).objective_slope = -1.0  # type: ignore[attr-defined]
+        for failure in (
+            InteriorPointMethodError(
+                message="no ray",
+                remaining_steps=3,
+                suboptimality=10.0,
+                last_iterate=np.zeros(2),
+            ),
+            unboundedness,
+            _infeasible_verdict(),
+        ):
+            with self.subTest(failure=str(failure)):
+                result, radii = self._run([failure])
+                self.assertIs(result, failure)
+                self.assertEqual(radii, [None])
+
+
+class MakePhase1BoxTest(unittest.TestCase):
+    """``Problem.make_phase1(x0, radius)`` adds the box |w - x0| ≤ R (#49)."""
+
+    def _problem(self, direct: bool) -> Problem:
+        active: list[ConstraintLayer] = (
+            [SquaredNormConstraintLayer(phi=4.0, dimension=3)]
+            if direct
+            else [
+                LinearInequalityConstraintLayer(
+                    A=np.ones((1, 3)), cl=np.array([1.0]), cu=np.array([2.0])
+                )
+            ]
+        )
+        return Problem(ineq=[BoundsConstraintLayer(lb=0.0, dimension=3), *active])
+
+    @parameterized.expand([("slack", False), ("direct", True)])
+    def test_the_box_is_a_background_layer_around_the_seed(
+        self, _name: str, direct: bool
+    ) -> None:
+        problem = self._problem(direct)
+        x0 = np.array([0.5, 1.0, 1.5])
+        plain, _ = problem.make_phase1(x0)
+        boxed, start = problem.make_phase1(x0, radius=2.0)
+
+        self.assertEqual(len(boxed.ineq), len(plain.ineq) + 1)
+        self.assertTrue(boxed.is_feasible(start))
+        w = start[:3]
+        box = boxed.ineq[0]
+        if not direct:
+            self.assertIsInstance(box, LiftedConstraintLayer)
+        moved = w.copy()
+        moved[0] = x0[0] + 2.5
+        lifted = np.r_[moved, start[3:]]
+        self.assertTrue(bool(np.any(box.constraints(lifted) >= 0.0)))
+
+    @parameterized.expand([("zero", 0.0), ("negative", -1.0), ("inf", np.inf)])
+    def test_a_radius_must_be_positive_and_finite(
+        self, _name: str, radius: float
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "radius"):
+            self._problem(False).make_phase1(np.ones(3), radius=radius)
