@@ -53,6 +53,7 @@ from cvxium.solvers.optimization import (
     _CenteringOutcome,
 )
 from cvxium.solvers.phase1 import LiftedConstraintLayer
+from cvxium.solvers.primal_dual_solver import PrimalDualSolver
 from cvxium.solvers.settings import (
     BarrierInitStrategy,
     InnerSettings,
@@ -3142,3 +3143,57 @@ class DominantLowRankUpdateTest(unittest.TestCase):
 
         with self.assertRaises(ProblemCertifiablyInfeasibleError):
             BarrierSolver().solve(problem, x0)
+
+
+class UnboundedPhase1Test(unittest.TestCase):
+    """Phase I copes with a feasible set that is unbounded (issue #19).
+
+    Bounds w ≥ 0.01, 20 equality rows and a 5-row imbalance band over 100 weights
+    leave a feasible set with recession directions d ≥ 0 (A d = 0, B d = 0), and Phase I
+    drops the objective that bounds the problem. With bounds as the background, the
+    imbalance stage's barrier is unbounded below along d: every Newton step doubled w,
+    up to 5e7, where the Hessian was numerically singular. With the imbalance band
+    feasibilized alone, its Phase I has no curvature off the band's rows, so its Newton
+    system was exactly singular. Now the imbalance stage sees that the bounds stage's
+    point already satisfies it, a slack-form Phase I stops once the active layer is
+    satisfied with a margin rather than waiting for the slack to turn negative, and the
+    band alone supplies its center through ``interior_point``.
+    """
+
+    @staticmethod
+    def _problem(bounds_first: bool) -> Problem:
+        rng = np.random.default_rng(0)
+        M = 100
+        A = rng.standard_normal((20, M))
+        b = A @ (rng.random(M) + 0.1)
+        eq = EqualityConstraintLayer(A=A, b=b)
+        bounds = BoundsConstraintLayer(lb=0.01, dimension=M)
+        feasible = BarrierSolver().solve(Problem(eq=eq, ineq=[bounds])).solution
+        B = rng.standard_normal((5, M))
+        imbalance = ImbalanceConstraintLayer(B=B, c=B @ feasible, psi=0.05)
+        objective = QuadraticObjective(
+            c=np.zeros(M), hessian_contribution=DiagonalSystem(np.ones(M))
+        )
+        ineq: list[ConstraintLayer] = (
+            [bounds, imbalance] if bounds_first else [imbalance, bounds]
+        )
+        return Problem.minimize(objective).subject_to(eq=eq, ineq=ineq)
+
+    @parameterized.expand(
+        [
+            ("bounds_first_barrier", True, "barrier"),
+            ("bounds_first_primal_dual", True, "primal_dual"),
+            ("imbalance_first_barrier", False, "barrier"),
+            ("imbalance_first_primal_dual", False, "primal_dual"),
+        ]
+    )
+    def test_solves_without_a_starting_point(
+        self, _name: str, bounds_first: bool, engine: str
+    ) -> None:
+        problem = self._problem(bounds_first)
+        solver = BarrierSolver() if engine == "barrier" else PrimalDualSolver()
+
+        result = problem.solve(solver=solver)
+
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
+        self.assertTrue(problem.is_feasible(result.solution))

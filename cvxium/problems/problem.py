@@ -36,7 +36,6 @@ from ..problems.linear_constraints import (
     EqualityConstraintLayer,
 )
 from ..problems.objective import (
-    LinearObjective,
     NegatedObjective,
     Objective,
     ObjectivePoint,
@@ -44,6 +43,7 @@ from ..problems.objective import (
 from ..solvers.phase1 import (
     LiftedConstraintLayer,
     _SlackActiveLayer,
+    _SlackObjective,
     _SlackUpperBoundLayer,
 )
 
@@ -766,10 +766,12 @@ class Problem:
                 A=A_aug, b=self.eq.b, saddle_factory=self.eq.saddle_factory
             )
 
-        # Phase I objective is the slack variable: f(w_aug) = w_aug[M].
-        c_obj = np.zeros(M + 1)
-        c_obj[M] = 1.0
-        phase1_objective = LinearObjective(c=c_obj)
+        # Phase I objective is the slack variable: f(w_aug) = w_aug[M]. Its
+        # feasibility residual is the active layer's own largest value, which can
+        # turn negative while s is still positive (see ``_SlackObjective``).
+        # The stop margin is half the seed's violation, so the point Phase I hands on
+        # sits about as far inside the active layer as the seed was outside it.
+        phase1_objective = _SlackObjective(active, M, margin=0.5 * max(s0 - eps, 0.0))
 
         x0_aug = np.zeros(M + 1)
         x0_aug[:M] = x0

@@ -496,6 +496,43 @@ class ConstraintLayer(ABC):
         """
         return bool(np.all(self.constraints(w) < 0))
 
+    def interior_point(
+        self, equality: "EqualityConstraintLayer | None" = None
+    ) -> npt.NDArray[np.float64] | None:
+        """Return a strictly interior point of this layer, or None if none is known.
+
+        A layer that knows a point w with f(w) < 0 in closed form can override this
+        hook to supply it. When the layer is the only inequality of a feasibility
+        problem, ``Solver._solve_feasibility`` takes that point as the answer,
+        certifying feasibility with no Phase I solve. That sidesteps two Phase I
+        shapes that cannot be solved. A direct layer's Phase I hoists the layer to the
+        objective, leaving no inequality layer, which the barrier solver rejects. A
+        low-rank slack layer's Phase I has no curvature in the directions its rows do
+        not touch, so its Newton system is singular.
+
+        When the feasibility problem also carries equality constraints A w = b, they are
+        passed as ``equality``, so a layer that knows the equality-constrained solution
+        in closed form (for example, the minimum-residual point of an ellipsoid
+        restricted to A w = b) can return a point satisfying both. The caller rechecks
+        the strict inequality and the equality residual, and falls back to the iterative
+        Phase I if either fails. A layer that cannot satisfy the equality in closed form
+        should return ``None`` when ``equality`` is given.
+
+        Parameters
+        ----------
+         equality : EqualityConstraintLayer | None
+            The problem's equality constraints, or ``None`` for an inequality-only
+            problem.
+
+        Returns
+        -------
+         w : npt.NDArray[np.float64] | None
+            A point with f(w) < 0 that also satisfies ``equality`` when one is given;
+            ``None`` by default, since most layers know no such point.
+
+        """
+        return None
+
 
 class SlackConstraintLayer(ConstraintLayer):
     """Constraint layer whose Phase I relaxes the constraints with a slack variable.
@@ -646,42 +683,6 @@ class DirectConstraintLayer(ConstraintLayer, Objective):
         ----------
         Boyd, Stephen and Vandenberghe, Lieven, Convex Optimization, Cambridge
         University Press, 2004.
-
-        """
-        return None
-
-    def interior_point(
-        self, equality: "EqualityConstraintLayer | None" = None
-    ) -> npt.NDArray[np.float64] | None:
-        """Return a strictly interior point of this layer, or None if none is known.
-
-        A direct layer that knows a point w with f(w) < 0 in closed form can override
-        this hook to supply it. When the layer is the only inequality of a feasibility
-        problem, ``Solver._solve_feasibility`` takes that point as the answer,
-        certifying feasibility with no Phase I solve. This also sidesteps the
-        direct-form Phase I in that case, whose objective-only shape (the sole layer
-        hoisted to the objective, leaving no inequality layer) the barrier solver cannot
-        handle.
-
-        When the feasibility problem also carries equality constraints A w = b, they are
-        passed as ``equality``, so a layer that knows the equality-constrained solution
-        in closed form (for example, the minimum-residual point of an ellipsoid
-        restricted to A w = b) can return a point satisfying both. The caller rechecks
-        the strict inequality and the equality residual, and falls back to the iterative
-        Phase I if either fails. A layer that cannot satisfy the equality in closed form
-        should return ``None`` when ``equality`` is given.
-
-        Parameters
-        ----------
-         equality : EqualityConstraintLayer | None
-            The problem's equality constraints, or ``None`` for an inequality-only
-            problem.
-
-        Returns
-        -------
-         w : npt.NDArray[np.float64] | None
-            A point with f(w) < 0 that also satisfies ``equality`` when one is given;
-            ``None`` by default, since most layers know no such point.
 
         """
         return None

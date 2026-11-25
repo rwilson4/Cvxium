@@ -135,7 +135,7 @@ c = B @ feasible.solution
 imbalance = ImbalanceConstraintLayer(B=B, c=c, psi=0.05)
 
 problem = Problem.minimize(objective).subject_to(eq=eq, ineq=[bounds, imbalance])
-result = BarrierSolver().solve(problem, x0=feasible.solution)
+result = BarrierSolver().solve(problem)
 ```
 
 ### Choose an algorithm

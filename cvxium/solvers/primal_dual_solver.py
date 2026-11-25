@@ -806,7 +806,8 @@ class PrimalDualSolver(Solver):
             iter_start = time.time()
             if (
                 feasibility_threshold is not None
-                and none_throws(problem.obj).evaluate(x) < feasibility_threshold
+                and none_throws(problem.obj).feasibility_residual(x)
+                < feasibility_threshold
             ):
                 status = 2
                 message = (
@@ -1742,7 +1743,8 @@ class PrimalDualSolver(Solver):
             iter_start = time.time()
             if (
                 feasibility_threshold is not None
-                and none_throws(problem.obj).evaluate(x) < feasibility_threshold
+                and none_throws(problem.obj).feasibility_residual(x)
+                < feasibility_threshold
             ):
                 status = 2
                 message = (

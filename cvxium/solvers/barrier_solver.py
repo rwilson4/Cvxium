@@ -628,15 +628,17 @@ class _BarrierAdapter(InteriorPointMethodSolver):
 
         Notes
         -----
-        A feasibility solver's objective is its feasibility residual. For a slack-form
-        Phase I problem the objective is the slack s. For a direct-form Phase I problem
-        it is the active constraint value. The original problem is strictly feasible
-        once that residual drops below zero (the barrier keeps every constraint strictly
-        inside its domain, so a negative objective means a strictly interior iterate).
+        The test is the objective's ``feasibility_residual``. For a direct-form Phase I
+        problem that is the objective itself, the active constraint value. For a
+        slack-form one it is the active layer's largest constraint value max_i f_i(w),
+        which turns negative as soon as w is strictly feasible, even while the slack s
+        (the objective) is still positive. The barrier keeps every other constraint
+        strictly inside its domain, so a negative residual means a strictly interior
+        iterate.
         Only consulted in feasibility mode; an optimization solve never calls it.
 
         """
-        return bool(none_throws(self._problem.obj).evaluate(x) < 0.0)
+        return bool(none_throws(self._problem.obj).feasibility_residual(x) < 0.0)
 
     def solve(
         self,

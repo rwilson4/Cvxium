@@ -298,35 +298,34 @@ class Solver(ABC):
                     n_iterations=0,
                 )
         active = problem.ineq[-1]
-        if isinstance(active, DirectConstraintLayer):
-            # When the active layer is the *only inequality* it may know a
-            # strictly interior point in closed form (e.g. an ellipsoid's center,
-            # or -- given the equality manifold -- its equality-constrained
-            # least-squares point). Taking that point certifies feasibility with no
-            # Phase I solve, and sidesteps the direct-form Phase I whose
-            # objective-only shape (the sole layer hoisted to the objective,
-            # leaving zero inequality layers) the barrier engine cannot solve. The
-            # equality manifold is handed to the layer so it can return a point on
-            # it; ``is_feasible`` checks only the inequalities, so the manifold
-            # residual is re-checked here (same ``1e-10`` gate the x0 short-circuit
-            # uses) before accepting. Fall through to the iterative Phase I when the
-            # layer offers no such point. The one structural guard that remains is
-            # ``len(ineq) == 1``: with background inequalities the layer's own
-            # point need not satisfy them, so it cannot be returned verbatim.
-            if len(problem.ineq) == 1:
-                interior = active.interior_point(problem.eq)
-                if interior is not None and problem.is_feasible(interior):
-                    on_manifold = problem.eq is None or bool(
-                        np.all(np.abs(problem.eq.A @ interior - problem.eq.b) < 1e-10)
+        # When the active layer is the *only inequality* it may know a strictly
+        # interior point in closed form (an ellipsoid's center, or an imbalance band's
+        # center on the equality manifold). Taking that point certifies feasibility
+        # with no Phase I solve, and sidesteps two Phase I shapes that cannot be
+        # solved: a direct layer hoisted to the objective leaves no inequality layer,
+        # which the barrier engine rejects, and a low-rank slack layer alone has no
+        # curvature off its own rows, so its Newton system is singular. The equality
+        # manifold is handed to the layer so it can return a point on it;
+        # ``is_feasible`` checks only the inequalities, so the manifold residual is
+        # re-checked here (same ``1e-10`` gate the x0 short-circuit uses) before
+        # accepting. Fall through to the iterative Phase I when the layer offers no
+        # such point. With background inequalities the layer's own point need not
+        # satisfy them, so it cannot be returned verbatim.
+        if len(problem.ineq) == 1:
+            interior = active.interior_point(problem.eq)
+            if interior is not None and problem.is_feasible(interior):
+                on_manifold = problem.eq is None or bool(
+                    np.all(np.abs(problem.eq.A @ interior - problem.eq.b) < 1e-10)
+                )
+                if on_manifold:
+                    return SolveResult(
+                        solution=interior,
+                        status=SolveStatus.FEASIBLE,
+                        message="Active layer provided strictly feasible point",
+                        solver="hook",
+                        n_iterations=0,
                     )
-                    if on_manifold:
-                        return SolveResult(
-                            solution=interior,
-                            status=SolveStatus.FEASIBLE,
-                            message="Active layer provided strictly feasible point",
-                            solver="hook",
-                            n_iterations=0,
-                        )
+        if isinstance(active, DirectConstraintLayer):
             # Direct form: ``make_phase1`` hoists the active layer to the objective;
             # ``self.solve`` then cascades the backgrounds via its own feasibility
             # seeding (a recursion on one fewer layer).
@@ -353,6 +352,23 @@ class Solver(ABC):
             )
         else:
             seed = x0 if x0 is not None else np.zeros(problem.dimension)
+        # The background solve may already have landed inside the active layer: its
+        # point is the background's analytic center, or a step past its threshold,
+        # either of which can satisfy the active layer too. Then the slack problem
+        # has nothing to do, and solving it anyway can do harm, since its barrier
+        # need not be bounded below (see ``_SlackObjective``).
+        if background:
+            on_manifold = problem.eq is None or bool(
+                np.all(np.abs(problem.eq.A @ seed - problem.eq.b) < 1e-10)
+            )
+            if problem.is_feasible(seed) and on_manifold:
+                return SolveResult(
+                    solution=seed,
+                    status=SolveStatus.FEASIBLE,
+                    message="The background layers' feasible point satisfies every layer",
+                    solver="",
+                    n_iterations=0,
+                )
         phase1_problem, aug_x0 = problem.make_phase1(seed)
         return self._solve_phase1(
             problem, phase1_problem, aug_x0, on_infeasible=on_infeasible

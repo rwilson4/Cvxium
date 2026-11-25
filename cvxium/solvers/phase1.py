@@ -38,11 +38,74 @@ from ..problems.constraint_layers import (
     ConstraintLayer,
     SlackConstraintLayer,
 )
+from ..problems.objective import LinearObjective
 
 if TYPE_CHECKING:
     from ..solvers.settings import (
         LineSearchSettings,
     )
+
+
+class _SlackObjective(LinearObjective):
+    """Slack-form Phase I objective: the slack s, with the active layer's residual.
+
+    Minimizing s over f_i(w) - s ≤ 0 is what makes the Phase I dual a certificate of
+    infeasibility, so the objective stays the linear function e_s^T [w; s]. But s only
+    bounds max_i f_i(w) from above, and the barrier keeps it strictly above, often far
+    above: s's own barrier terms pull it toward the middle of its range. The original
+    problem is strictly feasible as soon as max_i f_i(w) < 0, which can happen with s
+    still positive, so that is what the feasibility residual tests. The background
+    layers need no test, since every Phase I iterate is strictly interior to them, and
+    the equality is held by the solver.
+
+    A point barely inside the active layer is a valid answer but a poor start for the
+    solve that follows, which then spends its first iterations backing away from the
+    boundary. So the residual asks for a margin: it is negative once
+    max_i f_i(w) ≤ -``margin``, or once s < 0, the classical test, which still ends a
+    solve whose feasible set is too thin for the margin.
+
+    Parameters
+    ----------
+     active : SlackConstraintLayer
+        The original active layer, acting on w.
+     base_dimension : int
+        Dimension M of w; the slack sits at index M.
+     margin : float
+        How far inside the active layer a point must be to stop on max_i f_i(w)
+        alone; nonnegative. ``Problem.make_phase1`` passes half the seed's violation.
+
+    """
+
+    def __init__(
+        self,
+        active: SlackConstraintLayer,
+        base_dimension: int,
+        margin: float = 0.0,
+    ) -> None:
+        c = np.zeros(base_dimension + 1)
+        c[base_dimension] = 1.0
+        super().__init__(c=c)
+        self._active = active
+        self._base_dim = base_dimension
+        self._margin = margin
+
+    def feasibility_residual(self, w: npt.NDArray[np.float64]) -> float:
+        """Return min(s, max_i f_i(w) + margin) at w_aug = [w; s].
+
+        Parameters
+        ----------
+         w : npt.NDArray[np.float64]
+            Augmented point [w; s], of length M + 1.
+
+        Returns
+        -------
+         residual : float
+            Negative once w is at least ``margin`` inside the active layer, or once
+            the slack is negative; either way w satisfies the active layer strictly.
+
+        """
+        active_max = float(np.max(self._active.constraints(w[: self._base_dim])))
+        return min(float(w[self._base_dim]), active_max + self._margin)
 
 
 class LiftedConstraintLayer(SlackConstraintLayer):

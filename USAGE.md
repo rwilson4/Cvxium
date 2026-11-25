@@ -449,10 +449,14 @@ writing once the layer is correct:
   backtracks numerically; a closed form is usually available and is
   both faster and exact (return inf when no constraint binds).
 - `is_satisfied(w)`: a cheap strict-feasibility test.
-- For direct layers: `interior_point(equality)`, a strictly feasible
-  point known in closed form (it lets a feasibility solve skip Phase I),
-  and `barrier_parameter_hint`, a floor on the initial barrier
-  parameter for the direct-form Phase I.
+- `interior_point(equality)`: a strictly feasible point known in
+  closed form. When the layer is a feasibility problem's only
+  inequality, the solve takes it and skips Phase I. That matters most
+  for a low-rank slack layer, whose Phase I alone has a singular Newton
+  system (no curvature off the layer's rows). `ImbalanceConstraintLayer`
+  returns its band's center on the equality manifold.
+- For direct layers: `barrier_parameter_hint`, a floor on the initial
+  barrier parameter for the direct-form Phase I.
 
 ### 4c. Example: a squared-imbalance layer
 
