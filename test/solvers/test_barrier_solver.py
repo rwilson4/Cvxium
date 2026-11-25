@@ -3156,12 +3156,12 @@ class UnboundedPhase1Test(unittest.TestCase):
     feasibilized alone, its Phase I has no curvature off the band's rows, so its Newton
     system was exactly singular. Now the imbalance stage sees that the bounds stage's
     point already satisfies it, a slack-form Phase I stops once the active layer is
-    satisfied with a margin rather than waiting for the slack to turn negative, and the
-    band alone supplies its center through ``interior_point``.
+    satisfied rather than waiting for the slack to turn negative, and the band alone
+    supplies its center through ``interior_point``.
     """
 
     @staticmethod
-    def _problem(bounds_first: bool) -> Problem:
+    def _problem(bounds_first: bool, shift: float = 0.0) -> Problem:
         rng = np.random.default_rng(0)
         M = 100
         A = rng.standard_normal((20, M))
@@ -3170,7 +3170,7 @@ class UnboundedPhase1Test(unittest.TestCase):
         bounds = BoundsConstraintLayer(lb=0.01, dimension=M)
         feasible = BarrierSolver().solve(Problem(eq=eq, ineq=[bounds])).solution
         B = rng.standard_normal((5, M))
-        imbalance = ImbalanceConstraintLayer(B=B, c=B @ feasible, psi=0.05)
+        imbalance = ImbalanceConstraintLayer(B=B, c=B @ feasible + shift, psi=0.05)
         objective = QuadraticObjective(
             c=np.zeros(M), hessian_contribution=DiagonalSystem(np.ones(M))
         )
@@ -3197,3 +3197,23 @@ class UnboundedPhase1Test(unittest.TestCase):
 
         self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
         self.assertTrue(problem.is_feasible(result.solution))
+
+    @parameterized.expand([(f"shift_{shift:g}", shift) for shift in (0.5, 5.0, 50.0)])
+    def test_solves_when_phase1_must_cross_into_the_band(
+        self, _name: str, shift: float
+    ) -> None:
+        """A seed outside the band still reaches OPTIMAL, bounds first, barrier.
+
+        Shifting the band's target puts the bounds stage's point outside it, so the
+        imbalance stage's Phase I must work, along a feasible set with recession
+        directions. It reaches the band within a few steps, which then holds w
+        inside it by only up to ψ = 0.05 while the barrier pulls w out along the
+        ray. Stopping on max_i f_i(w) < 0 ends Phase I there. A stop margin of half
+        the seed's violation, about 1.1, could never be met inside a 0.05 band, and
+        neither could s < 0 on the ray, so the iterates ran off to |w| ~ 1e8.
+        """
+        problem = self._problem(bounds_first=True, shift=shift)
+
+        result = problem.solve(solver=BarrierSolver())
+
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)

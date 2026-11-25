@@ -703,12 +703,11 @@ class ProblemMakePhase1Test(unittest.TestCase):
 
 
 class SlackPhase1ResidualTest(unittest.TestCase):
-    """Slack-form Phase I stops on the active layer itself, with a margin (#19).
+    """Slack-form Phase I stops on the active layer itself (#19).
 
     The objective is still the slack s, which the dual certificate needs, but s only
     bounds max_i f_i(w) from above and can stay positive long after w is strictly
-    feasible. The feasibility residual a solver stops on is
-    min(s, max_i f_i(w) + margin), the margin being half the seed's violation.
+    feasible, so the feasibility residual a solver stops on is max_i f_i(w).
     """
 
     def _phase1(self) -> tuple[Problem, npt.NDArray[np.float64]]:
@@ -716,7 +715,6 @@ class SlackPhase1ResidualTest(unittest.TestCase):
             obj=LinearObjective(c=np.zeros(2)),
             ineq=[BoundsConstraintLayer(lb=0.0, dimension=2)],
         )
-        # Violation max f(x0) = 0.4, so the margin is 0.2.
         return problem.make_phase1(x0=np.array([-0.4, 1.0]))
 
     def test_the_objective_is_still_the_slack(self) -> None:
@@ -726,13 +724,12 @@ class SlackPhase1ResidualTest(unittest.TestCase):
 
     @parameterized.expand(
         [
-            ("barely_inside", [0.1, 1.0], 0.5, False),  # max f = -0.1 > -margin
-            ("past_the_margin", [0.3, 1.0], 0.5, True),  # max f = -0.3 <= -margin
-            ("slack_negative", [0.05, 1.0], -0.01, True),  # classical s < 0
-            ("still_outside", [-0.1, 1.0], 0.5, False),
+            ("barely_inside_with_positive_slack", [1e-6, 1.0], 0.5, True),
+            ("inside_with_negative_slack", [0.05, 1.0], -0.01, True),
+            ("outside", [-0.1, 1.0], 0.5, False),
         ]
     )
-    def test_the_residual_tests_the_active_layer_with_a_margin(
+    def test_the_residual_is_the_active_layers_largest_value(
         self, _name: str, w: list[float], s: float, feasible: bool
     ) -> None:
         phase1, _ = self._phase1()

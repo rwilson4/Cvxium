@@ -54,15 +54,18 @@ class _SlackObjective(LinearObjective):
     bounds max_i f_i(w) from above, and the barrier keeps it strictly above, often far
     above: s's own barrier terms pull it toward the middle of its range. The original
     problem is strictly feasible as soon as max_i f_i(w) < 0, which can happen with s
-    still positive, so that is what the feasibility residual tests. The background
-    layers need no test, since every Phase I iterate is strictly interior to them, and
-    the equality is held by the solver.
+    still positive, so that is the feasibility residual a solver stops on. Stopping on
+    s < 0 instead can be fatal: when the background layers leave the feasible set
+    unbounded, Phase I's barrier is unbounded below along a recession direction, and
+    the iterates follow it to infinity with s held positive. The background layers
+    need no test, since every Phase I iterate is strictly interior to them, and the
+    equality is held by the solver.
 
-    A point barely inside the active layer is a valid answer but a poor start for the
-    solve that follows, which then spends its first iterations backing away from the
-    boundary. So the residual asks for a margin: it is negative once
-    max_i f_i(w) ≤ -``margin``, or once s < 0, the classical test, which still ends a
-    solve whose feasible set is too thin for the margin.
+    The residual asks for no margin inside the active layer. A margin would give the
+    solve that follows a start farther from the boundary, but no margin is safe
+    without knowing how far inside any point can be: an imbalance band admits at most
+    its width ψ, and a margin above that is never met, which leaves the iterates on
+    the runaway ray above.
 
     Parameters
     ----------
@@ -70,27 +73,18 @@ class _SlackObjective(LinearObjective):
         The original active layer, acting on w.
      base_dimension : int
         Dimension M of w; the slack sits at index M.
-     margin : float
-        How far inside the active layer a point must be to stop on max_i f_i(w)
-        alone; nonnegative. ``Problem.make_phase1`` passes half the seed's violation.
 
     """
 
-    def __init__(
-        self,
-        active: SlackConstraintLayer,
-        base_dimension: int,
-        margin: float = 0.0,
-    ) -> None:
+    def __init__(self, active: SlackConstraintLayer, base_dimension: int) -> None:
         c = np.zeros(base_dimension + 1)
         c[base_dimension] = 1.0
         super().__init__(c=c)
         self._active = active
         self._base_dim = base_dimension
-        self._margin = margin
 
     def feasibility_residual(self, w: npt.NDArray[np.float64]) -> float:
-        """Return min(s, max_i f_i(w) + margin) at w_aug = [w; s].
+        """Return the active layer's largest constraint value at w = w_aug[:M].
 
         Parameters
         ----------
@@ -100,12 +94,12 @@ class _SlackObjective(LinearObjective):
         Returns
         -------
          residual : float
-            Negative once w is at least ``margin`` inside the active layer, or once
-            the slack is negative; either way w satisfies the active layer strictly.
+            max_i f_i(w), negative exactly when w satisfies the active layer strictly.
+            It never exceeds the slack s, which bounds it from above at every
+            interior iterate.
 
         """
-        active_max = float(np.max(self._active.constraints(w[: self._base_dim])))
-        return min(float(w[self._base_dim]), active_max + self._margin)
+        return float(np.max(self._active.constraints(w[: self._base_dim])))
 
 
 class LiftedConstraintLayer(SlackConstraintLayer):

@@ -769,9 +769,7 @@ class Problem:
         # Phase I objective is the slack variable: f(w_aug) = w_aug[M]. Its
         # feasibility residual is the active layer's own largest value, which can
         # turn negative while s is still positive (see ``_SlackObjective``).
-        # The stop margin is half the seed's violation, so the point Phase I hands on
-        # sits about as far inside the active layer as the seed was outside it.
-        phase1_objective = _SlackObjective(active, M, margin=0.5 * max(s0 - eps, 0.0))
+        phase1_objective = _SlackObjective(active, M)
 
         x0_aug = np.zeros(M + 1)
         x0_aug[:M] = x0
