@@ -266,6 +266,12 @@
   "test.solvers.test_barrier_solver.BarrierSolverWithEqualityTest.test_solves_bound_constrained_quadratic_with_equality_1": [
     18
   ],
+  "test.solvers.test_barrier_solver.FeasibilitySolveStatusTest.test_a_found_point_is_feasible_0_BarrierSolver_phase1": [
+    1
+  ],
+  "test.solvers.test_barrier_solver.FeasibilitySolveStatusTest.test_a_found_point_is_feasible_4_PrimalDualSolver_phase1": [
+    2
+  ],
   "test.solvers.test_barrier_solver.FeasibilityThresholdEarlyStopTest.test_stops_at_threshold_above_the_optimum": [
     57,
     2

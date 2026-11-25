@@ -2816,7 +2816,9 @@ class FeasibilityThresholdEarlyStopTest(unittest.TestCase):
             ),
             x0=x0,
         )
-        assert feasible.status is SolveStatus.MAX_ITERATIONS
+        # The early stop answered the feasibility question (#52).
+        assert feasible.status is SolveStatus.FEASIBLE
+        assert feasible.succeeded
         assert feasible.objective_value < 0.0  # crossed the threshold
         # Stopped short of the optimum that the plain solve reaches.
         assert feasible.objective_value > plain.objective_value
@@ -3784,3 +3786,58 @@ class LongNewtonStepTest(unittest.TestCase):
 
         self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
         self.assertAlmostEqual(result.objective_value / lo, 1.0, delta=1e-8)
+
+
+class FeasibilitySolveStatusTest(unittest.TestCase):
+    """A feasibility solve that finds a point reports ``FEASIBLE`` (#52).
+
+    The barrier and primal-dual loops stop early once a feasibility objective
+    crosses its threshold. They recorded that stop as the integer status 2, which
+    maps to ``MAX_ITERATIONS``, so a solve that answered its question read as a
+    failure (``succeeded`` false). Each path that ends at a feasible point now
+    reports ``FEASIBLE``: Phase I, a feasible start, and a layer's interior point.
+    """
+
+    _free_and_band = Problem(
+        ineq=[
+            BoundsConstraintLayer(lb=np.array([-np.inf, 0.0])),
+            LinearInequalityConstraintLayer(
+                A=np.array([[1.0, 0.0]]), cl=np.array([1.0]), cu=np.array([2.0])
+            ),
+        ]
+    )
+
+    @parameterized.expand(
+        [
+            (f"{solver.__name__}_{label}", solver, label)
+            for solver in (BarrierSolver, PrimalDualSolver)
+            for label in ("phase1", "feasible_start", "interior_point", "equality")
+        ]
+    )
+    def test_a_found_point_is_feasible(
+        self,
+        _name: str,
+        solver: "type[BarrierSolver] | type[PrimalDualSolver]",
+        label: str,
+    ) -> None:
+        problem = self._free_and_band
+        x0 = None
+        if label == "feasible_start":
+            x0 = np.array([1.5, 1.0])
+        elif label == "interior_point":
+            problem = Problem(ineq=[BoundsConstraintLayer(lb=0.0, dimension=2)])
+        elif label == "equality":
+            problem = Problem(
+                ineq=problem.ineq,
+                eq=EqualityConstraintLayer(A=np.array([[1.0, 1.0]]), b=np.array([3.0])),
+            )
+
+        result = solver().solve(problem, x0)
+
+        self.assertIs(result.status, SolveStatus.FEASIBLE, result.message)
+        self.assertTrue(result.succeeded)
+        self.assertTrue(problem.is_feasible(result.solution))
+        if problem.eq is not None:
+            np.testing.assert_allclose(
+                problem.eq.A @ result.solution, problem.eq.b, atol=1e-9
+            )

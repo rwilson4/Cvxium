@@ -1515,7 +1515,9 @@ class PrimalDualFeasibilityThresholdEarlyStopTest(unittest.TestCase):
             ),
             x0=x0,
         )
-        assert feasible.status is SolveStatus.MAX_ITERATIONS
+        # The early stop answered the feasibility question (#52).
+        assert feasible.status is SolveStatus.FEASIBLE
+        assert feasible.succeeded
         assert feasible.objective_value < 0.0  # crossed the threshold
         assert feasible.objective_value > plain.objective_value  # short of the optimum
         # The loop broke the moment the objective crossed its threshold, before the
