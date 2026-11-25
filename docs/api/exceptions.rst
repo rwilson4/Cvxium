@@ -5,7 +5,7 @@ Solver Exceptions
 -----------------
 
 .. automodule:: cvxium.exceptions
-   :members: OptimizationError, CenteringStepError, InteriorPointMethodError, ProblemInfeasibleError, NewtonStepError, BacktrackingLineSearchError, ConstraintBoundaryError, InvalidDescentDirectionError, SevereCurvatureError
+   :members: OptimizationError, CenteringStepError, RecessionDirectionError, InteriorPointMethodError, ProblemInfeasibleError, NewtonStepError, BacktrackingLineSearchError, ConstraintBoundaryError, InvalidDescentDirectionError, SevereCurvatureError
 
 Infeasibility
 -------------

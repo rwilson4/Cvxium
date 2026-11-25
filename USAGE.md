@@ -677,6 +677,37 @@ drive Phase I to its optimum before raising, so that `result` holds the
 least-infeasible point; the other solvers raise `NotImplementedError`
 for it.
 
+### 5d. Unbounded problems and recession directions
+
+A barrier solve has nothing to converge to when the feasible set has a
+recession direction d (A d = 0, no constraint increases along d) on
+which the objective does not increase: the centering problem
+t f0(x) + φ(x) is unbounded below, and Newton's method follows d,
+roughly doubling x each step. `BarrierSolver` watches for that growth
+and, on problems whose objective and layers are all affine, checks the
+step as such a d. A verified d settles the solve either way:
+- c^T d < 0: the problem is unbounded below. The result has status
+  `UNBOUNDED`, and its `certificate` (kind `"unbounded"`) carries d as
+  `primal_witness`: x + α d is feasible for every α ≥ 0.
+- c^T d = 0: an optimum may exist, but the optimal set is unbounded
+  along d and the central path does not exist. The solve fails with a
+  `RecessionDirectionError` (a `CenteringStepError`) naming the cause,
+  usually chained beneath an `InteriorPointMethodError`. Bound the
+  variables, or add an objective term that grows along d.
+
+```python
+from cvxium import LinearObjective, SolveStatus
+
+ray = Problem(
+    obj=LinearObjective(c=np.array([-1.0, -1.0])),
+    ineq=[BoundsConstraintLayer(lb=0.0, dimension=2)],
+    eq=EqualityConstraintLayer(A=np.array([[1.0, -1.0]]), b=np.zeros(1)),
+)
+ray_result = BarrierSolver().solve(ray, np.ones(2))
+assert ray_result.status is SolveStatus.UNBOUNDED
+d = ray_result.certificate.primal_witness  # along (1, 1)
+```
+
 ## 6. Initialize the barrier parameter to match the problem
 
 Fast solvers come from two things: cheap Newton steps (sections 2
