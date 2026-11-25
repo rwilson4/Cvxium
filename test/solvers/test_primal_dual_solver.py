@@ -1797,6 +1797,21 @@ class DegenerateOptimumTest(unittest.TestCase):
         self.assertLess(result.solution[-1], 1e-6)  # φ* = 0
         self.assertTrue(problem.is_feasible(result.solution))
 
+    @parameterized.expand([(f"seed_{seed}", seed) for seed in (0, 3, 7)])
+    def test_barrier_finds_a_feasible_start(self, _name: str, seed: int) -> None:
+        problem = _minimize_max_imbalance(seed)
+
+        result = BarrierSolver().solve(problem)
+
+        self.assertEqual(result.solver, "barrier")
+        self.assertIn(
+            result.status, (SolveStatus.OPTIMAL, SolveStatus.ACCEPTABLE), result.message
+        )
+        self.assertTrue(problem.is_feasible(result.solution))
+        eq = none_throws(problem.eq)
+        np.testing.assert_allclose(eq.A @ result.solution, eq.b, rtol=0.0, atol=1e-10)
+        self.assertLess(result.solution[-1], 1e-5)
+
 
 class NewtonBreakdownFallbackTest(unittest.TestCase):
     """Both primal-dual loops return the best iterate on a late Newton breakdown.
