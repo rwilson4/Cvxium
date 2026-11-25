@@ -24,6 +24,7 @@ from cvxium.linalg.systems import (
     DiagonalSystem,
     MatrixSystem,
     SparseSaddleFactory,
+    ZeroSystem,
 )
 from cvxium.problems.linear_constraints import (
     BoundsConstraintLayer,
@@ -32,6 +33,7 @@ from cvxium.problems.linear_constraints import (
     LinearInequalityConstraintLayer,
 )
 from cvxium.problems.objective import (
+    LiftedObjective,
     LinearObjective,
     Objective,
     QuadraticObjective,
@@ -3301,8 +3303,90 @@ class RecessionDirectionTest(unittest.TestCase):
         np.testing.assert_allclose(cause.direction, [0.0, 1.0], atol=1e-6)
         self.assertIn("central path does not exist", str(cause))
 
+    @parameterized.expand(
+        [
+            ("barrier_bounds", BarrierSolver, False),
+            ("barrier_norm", BarrierSolver, True),
+            ("primal_dual_bounds", PrimalDualSolver, False),
+            ("primal_dual_norm", PrimalDualSolver, True),
+        ]
+    )
+    def test_certify_quadratic_recession(
+        self,
+        _name: str,
+        solver: type[BarrierSolver] | type[PrimalDualSolver],
+        add_norm: bool,
+    ) -> None:
+        Q = DiagonalSystem(np.array([0.0, 1.0]))
+        c = np.array([-1.0, 0.0])
+        layers: list[ConstraintLayer] = [BoundsConstraintLayer(lb=0.0, dimension=2)]
+        if add_norm:
+            layers.append(
+                NormConstraintLayer(B=np.array([[0.0, 1.0]]), c=np.zeros(1), phi=2.0)
+            )
+        problem = Problem(obj=QuadraticObjective(c, Q), ineq=layers)
+
+        result = solver().solve(problem, np.ones(2))
+
+        self.assertIs(result.status, SolveStatus.UNBOUNDED, result.message)
+        self.assertTrue(problem.is_feasible(result.solution))
+        certificate = none_throws(result.certificate)
+        self.assertEqual(certificate.kind, "unbounded")
+        d = np.asarray(none_throws(certificate.primal_witness))
+        np.testing.assert_array_equal(Q.multiply(d), np.zeros(2))
+        self.assertLess(np.dot(c, d), 0.0)
+        self.assertTrue(problem.is_feasible(np.asarray(result.solution) + 1e6 * d))
+
+    @parameterized.expand(
+        [("barrier", BarrierSolver), ("primal_dual", PrimalDualSolver)]
+    )
+    def test_search_low_rank_nullspace(
+        self, _name: str, solver: type[BarrierSolver] | type[PrimalDualSolver]
+    ) -> None:
+        B = np.array([[1.0], [-1.0]])
+        obj = QuadraticObjective(
+            np.array([-1.0, 0.0]), ZeroSystem(2).low_rank_update(B)
+        )
+        problem = Problem(
+            obj=LiftedObjective(obj, extra_dimension=1),
+            ineq=[
+                BoundsConstraintLayer(lb=0.0, ub=np.array([np.inf, np.inf, 2.0])),
+                LinearInequalityConstraintLayer(
+                    A=np.array([[1.0, -1.0, 0.0]]), cu=np.array([2.0])
+                ),
+            ],
+        )
+        x0 = np.array([2.0, 1.0, 1.0])
+
+        result = solver().solve(problem, x0)
+
+        self.assertIs(result.status, SolveStatus.UNBOUNDED, result.message)
+        d = np.asarray(none_throws(none_throws(result.certificate).primal_witness))
+        np.testing.assert_allclose(d, np.array([1.0, 1.0, 0.0]) / np.sqrt(2))
+        np.testing.assert_array_equal(B.T @ d[:2], np.zeros(1))
+        self.assertTrue(problem.is_feasible(np.asarray(result.solution) + 1e6 * d))
+
+    def test_lifted_curved_layer_checks_only_its_coordinates(self) -> None:
+        layer = LiftedConstraintLayer(SquaredNormConstraintLayer(2.0, 2), 2)
+        x = np.zeros(3)
+
+        rates = layer.recession_rates(x, np.array([0.0, 0.0, 1.0]))
+
+        np.testing.assert_array_equal(rates, np.zeros(1))
+        self.assertIsNone(layer.recession_rates(x, np.array([0.0, 1.0, 0.0])))
+
+    def test_reject_tiny_positive_curvature(self) -> None:
+        Q = DiagonalSystem(np.array([1e-16, 1.0]))
+        problem = Problem(
+            obj=QuadraticObjective(np.array([-1.0, 0.0]), Q),
+            ineq=[BoundsConstraintLayer(lb=0.0, dimension=2)],
+        )
+
+        adapter = _BarrierAdapter(problem)
+        self.assertIsNone(adapter.recession_slope(np.ones(2), np.array([1.0, 0.0])))
+
     def test_a_curved_objective_is_never_certified(self) -> None:
-        """Only affine problems are checked: a quadratic grows along any ray."""
+        """A positive definite objective grows along every ray."""
         problem = Problem(
             obj=QuadraticObjective(
                 c=np.array([-10.0, 0.0]),

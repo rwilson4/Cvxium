@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
+import scipy.optimize
 import scipy.sparse
 import scipy.sparse.linalg
 
@@ -34,6 +35,7 @@ from ..exceptions import (
 from ..problems.constraint_layers import (
     DirectConstraintLayer,
 )
+from ..problems.linear_constraints import BoundsConstraintLayer
 from ..problems.result import (
     SolveResult,
     SolveStatus,
@@ -284,6 +286,7 @@ class _BarrierAdapter(InteriorPointMethodSolver):
             settings=settings,
         )
         self._problem = problem
+        self._searched_recession = False
         # An `equality` collaborator only makes sense when the Problem actually carries
         # an equality layer; otherwise the equality-aware methods would thread a real A
         # while ``problem.eq`` reads as absent -- a latent inconsistency that would
@@ -643,43 +646,93 @@ class _BarrierAdapter(InteriorPointMethodSolver):
             return np.zeros(0)
         return np.asarray(self.b - self.A @ x, dtype=np.float64)
 
+    def prepare_recession_direction(
+        self, d: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Use objective structure to improve a candidate recession direction."""
+        return none_throws(self._problem.obj).prepare_recession_direction(d)
+
+    def find_structured_recession_direction(
+        self, x: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], float] | None:
+        """Search once for a verified ray in a quadratic nullspace."""
+        obj = none_throws(self._problem.obj)
+        if self._searched_recession or obj.feasibility_threshold is not None:
+            return None
+        rows = obj.recession_nullspace_rows()
+        if rows is None or not all(layer.is_linear for layer in self._problem.ineq):
+            self._searched_recession = True
+            return None
+        if not self._problem.is_feasible(x):
+            return None
+
+        eq = self._problem.eq
+        if eq is not None:
+            if not np.all(np.abs(eq.A @ x - eq.b) < 1e-10):
+                return None
+            rows = scipy.sparse.vstack((rows, eq.A), format="csr")
+
+        lo = np.full(x.size, -1.0)
+        hi = np.ones(x.size)
+        inequalities = []
+        for layer in self._problem.ineq:
+            if isinstance(layer, BoundsConstraintLayer):
+                # Encode coordinate bounds directly to avoid a dense identity.
+                if layer.lb is not None:
+                    lo[np.broadcast_to(np.isfinite(layer.lb), x.shape)] = 0.0
+                if layer.ub is not None:
+                    hi[np.broadcast_to(np.isfinite(layer.ub), x.shape)] = 0.0
+            else:
+                inequalities.append(layer.grad_constraints(x))
+        G = (
+            scipy.sparse.vstack(
+                [scipy.sparse.csr_matrix(block) for block in inequalities], format="csr"
+            )
+            if inequalities
+            else None
+        )
+        self._searched_recession = True
+        result = scipy.optimize.linprog(
+            obj.gradient(x),
+            A_eq=rows,
+            b_eq=np.zeros(rows.shape[0]),
+            A_ub=G,
+            b_ub=np.zeros(G.shape[0]) if G is not None else None,
+            bounds=np.column_stack((lo, hi)),
+            method="highs",
+        )
+        if not result.success:
+            return None
+        d = np.asarray(result.x, dtype=np.float64)
+        norm = float(np.linalg.norm(d))
+        if not 0.0 < norm < np.inf:
+            return None
+        d = d / norm
+        # The LP generates a candidate. Check the original equations before
+        # accepting it, since a small residual can grow without bound on a ray.
+        if eq is not None and not np.all(eq.A @ d == 0.0):
+            return None
+        slope = self.recession_slope(x, d)
+        if slope is not None and slope < 0.0:
+            return d, slope
+        return None
+
     def recession_slope(
         self,
         x: npt.NDArray[np.float64],
         d: npt.NDArray[np.float64],
     ) -> float | None:
-        """Verify d as a recession direction of an affine problem.
-
-        Checks, to the relative tolerance ``_RECESSION_RTOL`` (τ):
-        - A d = 0: ‖A d‖ ≤ τ ‖A‖_F;
-        - no inequality increases along d: max_i (G d)_i ≤ τ max_i |(G d)_i|, where G
-          stacks every layer's constraint Jacobian;
-        - the objective does not increase along d: c^T d ≤ τ ‖c‖.
-        Each layer and the objective must be affine (``is_linear``), so that G and c
-        do not depend on x and one direction holds along the whole ray. Otherwise
-        nothing is verified.
-
-        Parameters
-        ----------
-         x : npt.NDArray[np.float64]
-            The current iterate.
-         d : npt.NDArray[np.float64]
-            The candidate direction, of unit length.
-
-        Returns
-        -------
-         slope : float | None
-            c^T d when it is below -τ ‖c‖ (unbounded below), 0.0 when |c^T d| ≤ τ ‖c‖
-            (the objective is constant along d), and ``None`` when d is not verified
-            or the objective increases along it.
-
-        """
+        """Verify a unit recession direction using the model's global structure."""
         obj = none_throws(self._problem.obj)
-        if not obj.is_linear or not all(
-            layer.is_linear for layer in self._problem.ineq
-        ):
+        slope = obj.recession_slope(x, d)
+        if slope is None or not np.isfinite(slope):
             return None
         tol = _RECESSION_RTOL
+        slope_slack = (
+            tol * float(np.linalg.norm(obj.gradient(x))) if obj.is_linear else 0.0
+        )
+        if not np.isfinite(slope_slack) or slope > slope_slack:
+            return None
         if self._equality is not None:
             A = self.A
             a_norm = float(
@@ -687,22 +740,23 @@ class _BarrierAdapter(InteriorPointMethodSolver):
                 if scipy.sparse.issparse(A)
                 else np.linalg.norm(A)
             )
-            if float(np.linalg.norm(A @ d)) > tol * a_norm:
+            if not float(np.linalg.norm(A @ d)) <= tol * a_norm:
                 return None
-        gd = np.concatenate(
-            [layer.grad_constraints_multiply(x, d) for layer in self._problem.ineq]
-            if self._problem.ineq
-            else [np.zeros(0)]
-        )
-        scale = float(np.max(np.abs(gd))) if gd.size else 0.0
-        if gd.size and float(np.max(gd)) > tol * scale:
-            return None
-        c = obj.gradient(x)
-        c_norm = float(np.linalg.norm(c))
-        slope = float(c @ d)
-        if slope > tol * c_norm:
-            return None
-        return slope if slope < -tol * c_norm else 0.0
+        descending = slope < -slope_slack
+        rates_by_layer = []
+        for layer in self._problem.ineq:
+            rates = layer.recession_rates(x, d)
+            if rates is None or not np.all(np.isfinite(rates)):
+                return None
+            rates_by_layer.append(rates)
+        if rates_by_layer:
+            rates = np.concatenate(rates_by_layer)
+            # A positive rate eventually violates a constraint. Keep the
+            # roundoff allowance for diagnosing flat centering directions only.
+            slack = 0.0 if descending else tol * np.max(np.abs(rates), initial=0.0)
+            if np.any(rates > slack):
+                return None
+        return slope if descending else 0.0
 
     def is_feasible(self, x: npt.NDArray[np.float64]) -> bool:
         r"""Test whether x is feasible enough to stop a feasibility (Phase I) solve.

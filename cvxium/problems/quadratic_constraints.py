@@ -132,6 +132,14 @@ class NormConstraintLayer(DirectConstraintLayer):
         """
         return self.B.shape[1]
 
+    def recession_rates(
+        self, x: npt.NDArray[np.float64], d: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64] | None:
+        """Verify that the direction leaves the norm constraint constant."""
+        if np.all(self.B @ d == 0.0):
+            return np.zeros(1)
+        return None
+
     def constraints(
         self,
         w: npt.NDArray[np.float64],
@@ -567,6 +575,14 @@ class SquaredNormConstraintLayer(DirectConstraintLayer):
 
         """
         return self._dimension
+
+    def recession_rates(
+        self, x: npt.NDArray[np.float64], d: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64] | None:
+        """Verify that the direction leaves the bounded coordinates fixed."""
+        if np.all(d == 0.0):
+            return np.zeros(1)
+        return None
 
     def constraints(
         self,
