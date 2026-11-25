@@ -747,7 +747,8 @@ class PrimalDualSolver(Solver):
             When the dual value at the final iterate is positive, certifying
             infeasibility; the exception carries a result with status ``INFEASIBLE``.
          NewtonStepError
-            Propagated from ``_mpc_solve_step`` and ``_clamp_dual_after_update``.
+            Propagated from ``_mpc_solve_step`` and ``_clamp_dual_after_update``, unless
+            the best iterate seen is already within the soft tolerance (see Notes).
 
         Notes
         -----
@@ -759,6 +760,12 @@ class PrimalDualSolver(Solver):
         - η < tol and ‖r_dual‖ < tol (status 0);
         - a stall detected by ``_StallWatch`` on max(η, ‖r_dual‖), which returns the
           best iterate seen (status 1);
+        - a Newton system that breaks down (``NewtonStepError``) once the best
+          iterate seen is within the soft tolerance, which returns that iterate
+          (status 1). Near a degenerate optimum, where λ_i / s_i diverges on several
+          constraints at once, the low-rank update's capacitance matrix can lose
+          definiteness in floating point after the iterates are already good; before
+          that point the error propagates;
         - the iteration cap (status 1).
         After the loop, the dual value is evaluated with the barrier method's
         warm-started mini-Newton (``_BarrierAdapter.evaluate_dual``), a lower bound on
@@ -891,21 +898,38 @@ class PrimalDualSolver(Solver):
             rt_norm = float(np.sqrt(dual_norm * dual_norm + cent_norm * cent_norm))
 
             dir_start = time.time()
-            info = self._mpc_solve_step(
-                problem,
-                x,
-                lmbda,
-                f,
-                r_dual,
-                r_cent,
-                eta=eta,
-                t=t,
-                beta=beta,
-                min_step=min_step,
-                tau_min=tau_min,
-                damping=damping,
-                lm=lm,
-            )
+            try:
+                info = self._mpc_solve_step(
+                    problem,
+                    x,
+                    lmbda,
+                    f,
+                    r_dual,
+                    r_cent,
+                    eta=eta,
+                    t=t,
+                    beta=beta,
+                    min_step=min_step,
+                    tau_min=tau_min,
+                    damping=damping,
+                    lm=lm,
+                )
+            except NewtonStepError as e:
+                # Near a degenerate optimum the Newton system can break down
+                # after the iterates are already good enough. Hand back the best
+                # one, as a stall would, rather than discard it.
+                if not stall.within_soft_tolerance:
+                    raise
+                status = 1
+                message = (
+                    f"the Newton system broke down ({e}); returning best iterate "
+                    f"from iteration {stall.best_nit} "
+                    f"(max(gap, ||r_dual||)={stall.best_metric:.3e})"
+                )
+                x = none_throws(stall.best_x)
+                lmbda = none_throws(stall.best_lmbda)
+                trace.on_early_stop(nit + 1)
+                break
             dir_ms = 1000.0 * (time.time() - dir_start)
             damping = info.next_damping
             if info.attempts > 0:
@@ -1684,7 +1708,8 @@ class PrimalDualSolver(Solver):
             here).
          NewtonStepError
             Propagated from ``_solve_damped_step_equality`` and
-            ``_clamp_dual_after_update``.
+            ``_clamp_dual_after_update``, unless the best iterate seen is already within
+            the soft tolerance, which is then returned (as in ``_run``).
 
         Notes
         -----
@@ -1846,6 +1871,7 @@ class PrimalDualSolver(Solver):
                     )
                 )
             except NewtonStepError as e:
+                # Same fallback as the inequality-only path (see ``_run``).
                 if not stall.within_soft_tolerance:
                     raise
                 status = 1
