@@ -679,21 +679,12 @@ for it.
 
 ### 5d. Unbounded problems and recession directions
 
-A barrier solve has nothing to converge to when the feasible set has a
-recession direction d (A d = 0, no constraint increases along d) on
-which the objective does not increase: the centering problem
-t f0(x) + φ(x) is unbounded below, and Newton's method follows d,
-roughly doubling x each step. `BarrierSolver` watches for that growth
-and, on problems whose objective and layers are all affine, checks the
-step as such a d. A verified d settles the solve either way:
-- c^T d < 0: the problem is unbounded below. The result has status
-  `UNBOUNDED`, and its `certificate` (kind `"unbounded"`) carries d as
-  `primal_witness`: x + α d is feasible for every α ≥ 0.
-- c^T d = 0: an optimum may exist, but the optimal set is unbounded
-  along d and the central path does not exist. The solve fails with a
-  `RecessionDirectionError` (a `CenteringStepError`) naming the cause,
-  usually chained beneath an `InteriorPointMethodError`. Bound the
-  variables, or add an objective term that grows along d.
+When `BarrierSolver` or `PrimalDualSolver` verifies a feasible direction
+along which the objective tends to minus infinity, it returns status
+`UNBOUNDED`. The result's `certificate.primal_witness` holds the ray
+direction. The [unbounded problems guide](docs/user_guides/unbounded_problems.md)
+covers the supported model structures, conic certificates, and cases
+that can end without a certificate.
 
 ```python
 from cvxium import LinearObjective, SolveStatus

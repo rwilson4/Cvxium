@@ -43,6 +43,9 @@ class DocumentationExamplesTest(unittest.TestCase):
     def test_linear_programs_guide_examples_run(self) -> None:
         self._run("docs/user_guides/linear_programs.md")
 
+    def test_unbounded_problems_guide_examples_run(self) -> None:
+        self._run("docs/user_guides/unbounded_problems.md")
+
     def test_banded_quadratic_programs_guide_examples_run(self) -> None:
         # At the guide's M = 100,000, cvxpy's compilation allocates a dense
         # (M + 1) x (M + 1) array (75 GB), which Linux CI runners refuse.

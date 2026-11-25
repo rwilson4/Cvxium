@@ -17,9 +17,13 @@ power readings with a tridiagonal quadratic, compares Cvxium with a
 steel-manned cvxpy across five solvers, and shows how a band structure
 carries through every Newton step.
 
+The guide to unbounded problems shows how to read a recession-ray
+certificate and explains which problems the solvers can certify.
+
 .. toctree::
    :maxdepth: 1
 
    usage
    linear_programs
    banded_quadratic_programs
+   unbounded_problems
