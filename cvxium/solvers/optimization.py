@@ -1132,7 +1132,7 @@ class BaseInteriorPointMethodSolver(Optimizer):
             logger.debug("Dual evaluation failed, using bound: %s", e)
             dual_value = obj_value - sub
 
-        return _barrier_solveresult(
+        feasibility_result = _barrier_solveresult(
             solution=self.finalize_solution(x),
             objective_value=obj_value,
             dual_value=dual_value,
@@ -1149,6 +1149,12 @@ class BaseInteriorPointMethodSolver(Optimizer):
             message=message,
             phase1=phase1_res,
         )
+        # A feasibility solve that ends at a feasible point has answered its
+        # question; its integer status (2 for the early stop) would otherwise map to
+        # MAX_ITERATIONS (issue #52).
+        if self.is_feasible(x):
+            return replace(feasibility_result, status=SolveStatus.FEASIBLE)
+        return feasibility_result
 
     def _feasibility_threshold(self) -> float | None:
         """Return the objective's feasibility threshold, or None for an ordinary solve.

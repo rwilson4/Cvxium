@@ -1066,20 +1066,26 @@ class PrimalDualSolver(Solver):
                 elapsed_ms=1000.0 * (time.time() - overall_start_time),
                 reason=message,
             )
-            return _pd_solveresult(
-                solution=x,
-                objective_value=float(objective_value),
-                dual_value=0.0,
-                equality_multipliers=np.zeros(0),
-                inequality_multipliers=lmbda,
-                suboptimality=0.0,
-                nits=nit + 1,
-                status=status,
-                message=message,
-                surrogate_gaps=surrogate_gaps,
-                step_sizes=step_sizes,
-                primal_residual_norms=primal_residual_norms,
-                dual_residual_norms=dual_residual_norms,
+            # The objective crossed its feasibility threshold: report the point as
+            # FEASIBLE, not by the integer code 2, which maps to MAX_ITERATIONS
+            # (issue #52).
+            return replace(
+                _pd_solveresult(
+                    solution=x,
+                    objective_value=float(objective_value),
+                    dual_value=0.0,
+                    equality_multipliers=np.zeros(0),
+                    inequality_multipliers=lmbda,
+                    suboptimality=0.0,
+                    nits=nit + 1,
+                    status=status,
+                    message=message,
+                    surrogate_gaps=surrogate_gaps,
+                    step_sizes=step_sizes,
+                    primal_residual_norms=primal_residual_norms,
+                    dual_residual_norms=dual_residual_norms,
+                ),
+                status=SolveStatus.FEASIBLE,
             )
 
         # Surrogate-gap proxy at the solution (r_dual and r_primal not re-evaluated).
@@ -2046,20 +2052,26 @@ class PrimalDualSolver(Solver):
                 status=status,
                 elapsed_ms=1000.0 * (time.time() - overall_start_time),
             )
-            return _pd_solveresult(
-                solution=x,
-                objective_value=float(objective_value),
-                dual_value=0.0,
-                equality_multipliers=nu,
-                inequality_multipliers=lmbda,
-                suboptimality=0.0,
-                nits=nit + 1,
-                status=status,
-                message=message,
-                surrogate_gaps=surrogate_gaps,
-                step_sizes=step_sizes,
-                primal_residual_norms=primal_residual_norms,
-                dual_residual_norms=dual_residual_norms,
+            # The objective crossed its feasibility threshold: report the point as
+            # FEASIBLE, not by the integer code 2, which maps to MAX_ITERATIONS
+            # (issue #52).
+            return replace(
+                _pd_solveresult(
+                    solution=x,
+                    objective_value=float(objective_value),
+                    dual_value=0.0,
+                    equality_multipliers=nu,
+                    inequality_multipliers=lmbda,
+                    suboptimality=0.0,
+                    nits=nit + 1,
+                    status=status,
+                    message=message,
+                    surrogate_gaps=surrogate_gaps,
+                    step_sizes=step_sizes,
+                    primal_residual_norms=primal_residual_norms,
+                    dual_residual_norms=dual_residual_norms,
+                ),
+                status=SolveStatus.FEASIBLE,
             )
 
         # Surrogate-gap proxy at the solution (r_dual and r_primal not re-evaluated).
