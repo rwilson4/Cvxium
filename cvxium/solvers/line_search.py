@@ -147,6 +147,20 @@ class ArmijoBarrierMerit(MeritFunction):
     the barrier objective. ``BarrierSolver`` also uses it, with a Lagrangian in place of
     f_t, when it evaluates the dual.
 
+    An infeasible-start Newton step (one that also solves A Δx = r, r = b - A x) is not
+    a descent direction for f_t alone: its directional derivative is
+       ∇f_t^T Δx = -λ^2 - ν^T r,
+    where ν are the step's equality multipliers, and -ν^T r can outweigh λ^2. For that
+    step the merit is the exact penalty
+       φ(x) = f_t(x) + μ ‖A x - b‖_1,   μ > ‖ν‖_∞,
+    passed as ``penalty0`` = μ ‖r‖_1. Since A Δx = r, the residual along the step is
+    exactly (1 - s) r, so the penalty is applied in that closed form rather than by
+    recomputing A x at each trial point, and
+       φ'(0) = ∇f_t^T Δx - μ ‖r‖_1 ≤ -λ^2 + (‖ν‖_∞ - μ) ‖r‖_1 ≤ -λ^2.
+    The step is therefore a descent direction for φ for any r, and the Armijo decrease
+    α s λ^2 is required of φ as it is of f_t when r = 0 (Nocedal and Wright, 2006,
+    section 15.4).
+
     Parameters
     ----------
      evaluate_barrier_objective : Callable[[npt.NDArray[np.float64]], float]
@@ -158,6 +172,14 @@ class ArmijoBarrierMerit(MeritFunction):
         The product α λ^2, the required decrease per unit step.
      grad_ft_dot_delta_x : float
         The directional derivative ∇f_t(x)^T Δx, used only by the descent check.
+     penalty0 : float
+        The penalty μ ‖r‖_1 at the base point, nonnegative; 0 (the default) for a step
+        that keeps A x = b, which leaves the merit f_t itself.
+
+    References
+    ----------
+    Nocedal, Jorge and Wright, Stephen J., Numerical Optimization, 2nd ed., Springer,
+    2006.
 
     """
 
@@ -167,11 +189,14 @@ class ArmijoBarrierMerit(MeritFunction):
         ft0: float,
         neg_alpha_grad: float,
         grad_ft_dot_delta_x: float,
+        penalty0: float = 0.0,
     ) -> None:
         self._evaluate_barrier_objective = evaluate_barrier_objective
-        self._ft0 = ft0
+        self._penalty0 = penalty0
+        # The base-point merit, f_t(x) + μ ‖r‖_1, and its directional derivative.
+        self._ft0 = ft0 + penalty0
         self._neg_alpha_grad = neg_alpha_grad
-        self._grad_ft_dot_delta_x = grad_ft_dot_delta_x
+        self._grad_ft_dot_delta_x = grad_ft_dot_delta_x - penalty0
 
     def evaluate(self, x_trial: npt.NDArray[np.float64], s: float) -> float:
         """Evaluate the barrier objective at a trial point.
@@ -185,12 +210,12 @@ class ArmijoBarrierMerit(MeritFunction):
 
         Returns
         -------
-         ft : float
-            The barrier objective f_t(x_trial).
+         phi : float
+            The merit f_t(x_trial) + (1 - s) μ ‖r‖_1; f_t(x_trial) when the step keeps
+            A x = b.
 
         """
-        del s
-        return self._evaluate_barrier_objective(x_trial)
+        return self._evaluate_barrier_objective(x_trial) + (1.0 - s) * self._penalty0
 
     def accept_threshold(self, s: float) -> float:
         """Return the largest barrier value accepted at a trial step.
@@ -203,7 +228,7 @@ class ArmijoBarrierMerit(MeritFunction):
         Returns
         -------
          threshold : float
-            The bound f_t(x) - α s λ^2.
+            The bound φ(x) - α s λ^2.
 
         """
         return self._ft0 - s * self._neg_alpha_grad
@@ -214,7 +239,8 @@ class ArmijoBarrierMerit(MeritFunction):
         Raises
         ------
          InvalidDescentDirectionError
-            When ∇f_t(x)^T Δx > 0. A zero directional derivative passes.
+            When the merit's directional derivative ∇f_t(x)^T Δx - μ ‖r‖_1 is
+            positive. A zero directional derivative passes.
 
         """
         if self._grad_ft_dot_delta_x > 0:
@@ -245,12 +271,12 @@ class ArmijoBarrierMerit(MeritFunction):
         Parameters
         ----------
          trial_value : float
-            The barrier objective at the trial step.
+            The merit at the trial step.
 
         Returns
         -------
          actual : float
-            The decrease f_t(x) - ``trial_value``.
+            The decrease φ(x) - ``trial_value``.
 
         """
         return self._ft0 - trial_value

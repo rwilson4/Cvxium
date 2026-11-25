@@ -619,6 +619,28 @@ class _BarrierAdapter(InteriorPointMethodSolver):
             offset += n_c
         return result
 
+    def equality_residual(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Return r = b - A x, the residual the infeasible-start Newton step carries.
+
+        ``calculate_newton_step`` solves A Δx = r, so the line search and the
+        gradient-form decrement account for it (see
+        ``BaseInteriorPointMethodSolver.backtracking_line_search``).
+
+        Parameters
+        ----------
+         x : npt.NDArray[np.float64]
+            The current iterate.
+
+        Returns
+        -------
+         r : npt.NDArray[np.float64]
+            The residual, of length p; empty without equality constraints.
+
+        """
+        if self._equality is None:
+            return np.zeros(0)
+        return np.asarray(self.b - self.A @ x, dtype=np.float64)
+
     def recession_slope(
         self,
         x: npt.NDArray[np.float64],
