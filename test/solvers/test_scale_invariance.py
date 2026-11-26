@@ -121,6 +121,13 @@ class ObjectiveScaleTest(unittest.TestCase):
     barrier failed outright; scaling it by 1e-6 made the test pass at once. With
     ``"relative"`` the test is gap ≤ tolerance max(1, |f0|); with ``"auto"`` it is
     relative to the size of the objective's terms, invariant in both directions.
+
+    The primal-dual cases at c x 1e6 sit at the edge of double precision: a relative
+    tolerance of 1e-6 on gradients of size 1e6, reached by stalling toward the soft
+    tolerance over a hundred or more iterations. Their iteration counts are
+    deterministic on a machine but not across machines (102 here, 189 on CI for one
+    seed), so they are listed under the perf baseline's ``__ignore__``; their
+    assertions still run.
     """
 
     @parameterized.expand(

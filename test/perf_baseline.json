@@ -1,6 +1,9 @@
 {
   "__ignore__": [
-    "test.solvers.test_hsd_solver.HsdSolverTest.test_status_one_on_soft_tolerance"
+    "test.solvers.test_hsd_solver.HsdSolverTest.test_status_one_on_soft_tolerance",
+    "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_relative_solves_a_large_objective_09_primal_dual_1e_06_seed_0",
+    "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_relative_solves_a_large_objective_10_primal_dual_1e_06_seed_1",
+    "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_relative_solves_a_large_objective_11_primal_dual_1e_06_seed_2"
   ],
   "test.diagnostics.test_trace.DataFrameTraceTest.test_dataframe_has_sparse_columns": [
     23
@@ -623,15 +626,6 @@
   ],
   "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_relative_solves_a_large_objective_08_primal_dual_1000_seed_2": [
     21
-  ],
-  "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_relative_solves_a_large_objective_09_primal_dual_1e_06_seed_0": [
-    121
-  ],
-  "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_relative_solves_a_large_objective_10_primal_dual_1e_06_seed_1": [
-    123
-  ],
-  "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_relative_solves_a_large_objective_11_primal_dual_1e_06_seed_2": [
-    102
   ],
   "test.solvers.test_solve_second_order_cone_program.SolveSecondOrderConeProgramTest.test_a_soc_diag_hint_agrees_with_runtime_detection": [
     15,
