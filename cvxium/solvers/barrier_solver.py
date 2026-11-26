@@ -237,6 +237,15 @@ def _raise_to_objective_hint(
 # step's deviation from d decays like |x0| / α, so a step from |x| ~ 1e6 |x0| passes.
 _RECESSION_RTOL = 1e-6
 
+# How far the corrected multipliers of an all-linear Lagrangian may miss stationarity,
+# relative to the magnitudes the residual cancels: rounding level, a few hundred ulps
+# of a modest condition number (see ``_BarrierAdapter._corrected_linear_dual``).
+_DUAL_RESIDUAL_RTOL = 1e-8
+
+# The widest spread of weights the last-resort dual correction keeps (see
+# ``_BarrierAdapter._corrected_linear_dual``).
+_DUAL_WEIGHT_RANGE = 1e8
+
 
 class _BarrierAdapter(InteriorPointMethodSolver):
     """Bridge from a ``Problem`` to ``InteriorPointMethodSolver``, auto-dispatching.
@@ -667,7 +676,7 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         equalities = [scipy.sparse.csr_matrix(rows)]
         eq = self._problem.eq
         if eq is not None:
-            if not np.all(np.abs(eq.A @ x - eq.b) < 1e-10):
+            if not eq.is_satisfied(x):
                 return None
             equalities.append(scipy.sparse.csr_matrix(eq.A))
 
@@ -972,20 +981,24 @@ class _BarrierAdapter(InteriorPointMethodSolver):
                 "the Problem has none; use UNIT or GRADIENT_BALANCE, or attach "
                 "an equality layer (eq=...) to the Problem."
             )
+        # The schedule is planned for the tolerance scaled down by the start's scale
+        # (see ``BaseInteriorPointMethodSolver.solve``), and t0 is capped against the
+        # same; with the default (absolute) scale both are as before.
+        tolerance = self.settings.outer.tolerance * min(1.0, self._gap_scale_at(x0))
         if strategy is BarrierInitStrategy.OBJECTIVE_VALUE_GAP:
             t0 = _objective_value_gap_t0(
                 float(self.evaluate_objective(x0)),
                 self.settings.outer.objective_value_estimate,
                 self.num_ineq_constraints,
                 self.settings.outer.barrier_multiplier,
-                self.settings.outer.tolerance,
+                tolerance,
             )
             return _raise_to_objective_hint(
                 t0,
                 self._problem,
                 x0,
                 self.num_ineq_constraints,
-                self.settings.outer.tolerance,
+                tolerance,
             )
         grad_f0 = self.gradient(x0)
         constraints_x0 = self.constraints(x0)
@@ -1005,7 +1018,7 @@ class _BarrierAdapter(InteriorPointMethodSolver):
                 gradient=grad_f0,
                 grad_phi=grad_phi,
                 num_ineq=self.num_ineq_constraints,
-                outer_tol=self.settings.outer.tolerance,
+                outer_tol=tolerance,
                 super_init=super().initialize_barrier_parameter(x0),
             )
         # A direct-form Phase I hoists its active layer to the objective; honor its
@@ -1015,7 +1028,7 @@ class _BarrierAdapter(InteriorPointMethodSolver):
             self._problem,
             x0,
             self.num_ineq_constraints,
-            self.settings.outer.tolerance,
+            tolerance,
         )
 
     def calculate_newton_step(
@@ -1156,14 +1169,7 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         atnu = self.A.T @ nu if self._equality is not None else None
         dual_nu = nu if self._equality is not None else None
         if self._all_linear():
-            r = self._lagrangian_gradient(x_star, lmbda, atnu)
-            # Use a loose atol=1e-3: the barrier central-path multipliers are only
-            # ~1e-3-stationary, so a 1e-10 gate returns -inf at every iterate and never
-            # certifies an infeasible all-linear (slack-form) Phase I. Accepting the
-            # near-stationary multipliers reports the finite certificate.
-            if not np.allclose(r, 0.0, atol=1e-3):
-                return float("-inf")
-            return self._evaluate_lagrangian(x_star, lmbda, dual_nu)
+            return self._corrected_linear_dual(x_star, lmbda, dual_nu)
         x_min, delta2 = self._minimize_lagrangian(x_star, lmbda, atnu=atnu, nu=dual_nu)
         if x_min is None:
             # mini-Newton could not even take a step; fall back to x_star + a
@@ -1179,6 +1185,182 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         if delta2 is None or delta2 > _DUAL_REGION_DECREMENT_SQ_MAX:
             return float("-inf")
         return self._evaluate_lagrangian(x_min, lmbda, dual_nu) - delta2
+
+    def _corrected_linear_dual(
+        self,
+        x: npt.NDArray[np.float64],
+        lmbda: npt.NDArray[np.float64],
+        nu: npt.NDArray[np.float64] | None,
+    ) -> float:
+        r"""Return a valid dual bound for an all-linear Lagrangian (issue #48).
+
+        With an affine objective and affine constraints, L(x, λ, ν) is affine in x, so
+        inf_x L is L itself when ∇_x L = 0 and -inf otherwise. Barrier and primal-dual
+        multipliers are only approximately stationary: the residual
+        r = ∇f0 + J^T λ + A^T ν is the centering error over t, small in the local norm
+        but not in the Euclidean one, and near the boundary it can reach 1e-3 or more.
+        Accepting such multipliers at face value (the former absolute 1e-3 gate)
+        reports a number that bounds nothing; refusing them leaves no bound at all.
+
+        Instead the multipliers are corrected to stationarity. The smallest change in
+        the weighted norm ∑ δλ_i^2 / w_i, with w_i = λ_i / (-f_i) and δν free, that
+        makes the residual vanish solves
+               _          _     _    _     _    _
+              |  J^T W J   A^T |   |  y   |   |  -r  |
+              |_   A        0 _|   |_ δν _| = |_  0 _|,      δλ = W J y.
+        J^T W J is the Newton system's own Hessian for these weights
+        (``Problem.build_hessian_system`` with zero objective scale), and with
+        equality constraints the system is the Newton step's saddle, so the
+        correction costs one structured solve and keeps its structure. The relative
+        change δλ_i / λ_i = (J y)_i / (-f_i) is small when r is. The corrected
+        multipliers are then dual feasible up to rounding, and the bound is
+        L(x, λ + δλ, ν + δν), exact for any x. The remaining residual must sit at
+        rounding level, ``_DUAL_RESIDUAL_RTOL`` of the magnitudes it cancels
+        (‖∇f0‖ + ‖J^T λ‖ + ‖A^T ν‖). A corrected λ_i below zero is clamped to zero
+        and the clamped set re-checked, so the bound is always taken at
+        nonnegative, stationary multipliers; when no weighting passes, nothing is
+        certified and the bound is -inf.
+
+        Parameters
+        ----------
+         x : npt.NDArray[np.float64]
+            The iterate, strictly feasible for the inequalities.
+         lmbda : npt.NDArray[np.float64]
+            Inequality multipliers, nonnegative.
+         nu : npt.NDArray[np.float64] | None
+            Equality multipliers, or ``None`` without equality constraints.
+
+        Returns
+        -------
+         g : float
+            A lower bound on the optimal value, or -inf.
+
+        """
+        atnu = self.A.T @ nu if nu is not None else None
+        r = self._lagrangian_gradient(x, lmbda, atnu)
+        f = self.constraints(x)
+        if not (np.all(np.isfinite(r)) and np.all(f < 0.0) and np.all(lmbda >= 0.0)):
+            return float("-inf")
+        # Multipliers that are already stationary to rounding need no correction;
+        # primal-dual's usually are, and their weights can be too spread to solve.
+        if self._stationary(x, lmbda, atnu, r):
+            return self._evaluate_lagrangian(x, lmbda, nu)
+        # Any positive weights give a correction that is exactly stationary; they
+        # decide only how well conditioned J^T W J is and whether λ + δλ stays
+        # nonnegative. The local weights λ / (-f) first. Near the boundary they can
+        # span thirty orders of magnitude and leave J^T W J singular in floating
+        # point, so the fallbacks are the relative weights λ^2 (minimizing
+        # ∑ (δλ_i / λ_i)^2) and the local weights clipped to ``_DUAL_WEIGHT_RANGE``
+        # below their largest, which bounds the conditioning the weights add.
+        local = lmbda / (-f)
+        clipped = np.maximum(local, float(np.max(local)) / _DUAL_WEIGHT_RANGE)
+        for weights in (local, lmbda**2, clipped):
+            bound = self._dual_after_correction(x, lmbda, nu, f, r, weights)
+            if bound is not None:
+                return bound
+        return float("-inf")
+
+    def _dual_after_correction(
+        self,
+        x: npt.NDArray[np.float64],
+        lmbda: npt.NDArray[np.float64],
+        nu: npt.NDArray[np.float64] | None,
+        f: npt.NDArray[np.float64],
+        r: npt.NDArray[np.float64],
+        weights: npt.NDArray[np.float64],
+    ) -> float | None:
+        """Correct the multipliers with one weighting and return the bound, if valid.
+
+        Parameters
+        ----------
+         x : npt.NDArray[np.float64]
+            The iterate.
+         lmbda : npt.NDArray[np.float64]
+            Inequality multipliers.
+         nu : npt.NDArray[np.float64] | None
+            Equality multipliers, or ``None``.
+         f : npt.NDArray[np.float64]
+            Constraint values at x, all negative.
+         r : npt.NDArray[np.float64]
+            The Lagrangian gradient at the uncorrected multipliers.
+         weights : npt.NDArray[np.float64]
+            The weights w of the correction's norm ∑ δλ_i^2 / w_i, positive.
+
+        Returns
+        -------
+         g : float | None
+            L at the corrected multipliers, clamped at zero, when they are stationary
+            to ``_DUAL_RESIDUAL_RTOL``; ``None`` otherwise.
+
+        """
+        if not np.all(np.isfinite(weights)) or not np.any(weights > 0.0):
+            return None
+        # ``build_hessian_system`` weights each constraint by λ_i / (-f_i), so these
+        # pseudo-multipliers give it the weights w.
+        pseudo = weights * (-f)
+        try:
+            system = self._problem.build_hessian_system(x, self._point(x), 0.0, pseudo)
+            if nu is None:
+                y = system.solve(-r)
+                delta_nu = None
+            else:
+                y, delta_nu = (
+                    none_throws(self._problem.eq)
+                    .saddle_system(system)
+                    .solve(-r, np.zeros(nu.size))
+                )
+        except NewtonStepError:
+            return None
+        # A multiplier the correction pushes just below zero is clamped back; the
+        # stationarity check below decides whether the clamped set still certifies.
+        lmbda_corrected = np.maximum(
+            lmbda + weights * self.grad_constraints_multiply(x, y), 0.0
+        )
+        nu_corrected = None if nu is None else nu + none_throws(delta_nu)
+        atnu_corrected = None if nu_corrected is None else self.A.T @ nu_corrected
+        residual = self._lagrangian_gradient(x, lmbda_corrected, atnu_corrected)
+        if not self._stationary(x, lmbda_corrected, atnu_corrected, residual):
+            return None
+        return self._evaluate_lagrangian(x, lmbda_corrected, nu_corrected)
+
+    def _stationary(
+        self,
+        x: npt.NDArray[np.float64],
+        lmbda: npt.NDArray[np.float64],
+        atnu: npt.NDArray[np.float64] | None,
+        residual: npt.NDArray[np.float64],
+    ) -> bool:
+        """Whether a Lagrangian gradient vanishes to rounding.
+
+        The test is ‖residual‖ ≤ ``_DUAL_RESIDUAL_RTOL`` (‖∇f0‖ + ‖J^T λ‖ + ‖A^T ν‖),
+        relative to the magnitudes the residual is the cancellation of, so it is
+        invariant to scaling the objective or the constraints.
+
+        Parameters
+        ----------
+         x : npt.NDArray[np.float64]
+            The iterate.
+         lmbda : npt.NDArray[np.float64]
+            Inequality multipliers.
+         atnu : npt.NDArray[np.float64] | None
+            A^T ν, or ``None`` without equality constraints.
+         residual : npt.NDArray[np.float64]
+            ∇f0 + J^T λ + A^T ν.
+
+        Returns
+        -------
+         stationary : bool
+            True when the residual is at rounding level.
+
+        """
+        scale = float(np.linalg.norm(self.gradient(x))) + float(
+            np.linalg.norm(self.grad_constraints_transpose_multiply(x, lmbda))
+        )
+        if atnu is not None:
+            scale += float(np.linalg.norm(atnu))
+        return float(np.linalg.norm(residual)) <= _DUAL_RESIDUAL_RTOL * max(
+            scale, np.finfo(np.float64).tiny
+        )
 
     def _all_linear(self) -> bool:
         r"""Determine whether every term contributing to L is affine in x.

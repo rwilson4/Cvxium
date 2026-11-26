@@ -68,8 +68,11 @@ from ..solvers.line_search import (
 )
 from ..solvers.optimization import (
     ProblemCertifiablyInfeasibleError,
+    _dual_scale,
     _duals_from,
+    _gap_scale,
     _legacy_solve_status,
+    _primal_scale,
     _weak_duality_slack,
 )
 from ..solvers.settings import (
@@ -374,6 +377,49 @@ def _verify_recession_direction(
     return None
 
 
+def _pd_scales(
+    outer: OuterSettings,
+    problem: Problem,
+    x: npt.NDArray[np.float64],
+    A: npt.NDArray[np.float64] | None = None,
+    b: npt.NDArray[np.float64] | None = None,
+) -> tuple[float, float, float]:
+    """Return the scales of the gap, dual-residual and equality-residual tests.
+
+    All three are 1 under the default absolute ``objective_scale`` (``None``), so
+    nothing is evaluated; see ``OuterSettings.objective_scale`` for the others.
+
+    Parameters
+    ----------
+     outer : OuterSettings
+        The settings carrying ``objective_scale``.
+     problem : Problem
+        The problem, whose objective sets the gap and dual scales.
+     x : npt.NDArray[np.float64]
+        The iterate.
+     A : npt.NDArray[np.float64] | None
+        The equality matrix, or ``None`` without equality constraints.
+     b : npt.NDArray[np.float64] | None
+        The equality right-hand side, or ``None``.
+
+    Returns
+    -------
+     scales : tuple[float, float, float]
+        The gap, dual-residual and equality-residual scales, each positive.
+
+    """
+    if outer.objective_scale is None:
+        return 1.0, 1.0, 1.0
+    obj = none_throws(problem.obj)
+    gradient = obj.gradient(x)
+    gap = _gap_scale(outer, float(obj.evaluate(x)), gradient, x)
+    dual = _dual_scale(outer, gradient)
+    if A is None or b is None:
+        return gap, dual, 1.0
+    row_scale = np.asarray(abs(A) @ np.abs(x), dtype=np.float64)
+    return gap, dual, _primal_scale(outer, b, row_scale)
+
+
 def _certify_pd_status(
     status: Literal[0, 1, 2],
     message: str,
@@ -381,15 +427,21 @@ def _certify_pd_status(
     dual_value: float,
     feasibility_error: float,
     outer: OuterSettings,
+    gap_scale: float = 1.0,
+    feasibility_scale: float = 1.0,
 ) -> tuple[Literal[0, 1, 2], str]:
-    """Require a finite bound and a feasible primal point for a success status."""
+    """Require a finite bound and a feasible primal point for a success status.
+
+    The gap and the feasibility error are measured against their scales (see
+    ``OuterSettings.objective_scale``), both 1 by default.
+    """
     gap = objective_value - dual_value
     if (
         math.isfinite(gap)
         and math.isfinite(feasibility_error)
         and gap >= -_weak_duality_slack(objective_value)
     ):
-        error = max(gap, feasibility_error)
+        error = max(gap / gap_scale, feasibility_error / feasibility_scale)
         if status == 0 and error <= outer.tolerance:
             return 0, message
         if error <= outer.tolerance_soft:
@@ -920,15 +972,16 @@ class PrimalDualSolver(Solver):
             surrogate_gaps.append(eta)
             dual_residual_norms.append(dual_norm)
             primal_residual_norms.append(0.0)  # no equality constraints
+            gap_scale, dual_scale, _ = _pd_scales(settings.outer, problem, x)
 
             if eta <= 0.0:
-                status = 0 if dual_norm < outer_tol else 1
+                status = 0 if dual_norm < outer_tol * dual_scale else 1
                 message = (
                     f"Iteration stopped at non-positive surrogate gap ({eta:.3e})."
                 )
                 break
 
-            if eta < outer_tol and dual_norm < outer_tol:
+            if eta < outer_tol * gap_scale and dual_norm < outer_tol * dual_scale:
                 status = 0
                 message = (
                     f"converged: surrogate gap {eta:.3e} and ||r_dual|| "
@@ -941,7 +994,9 @@ class PrimalDualSolver(Solver):
             # on the worse of the two, and hand back the best iterate rather
             # than the last, which is not the same thing once dual feasibility
             # starts drifting back up.
-            if stall.observe(max(eta, dual_norm), nit, x, lmbda):
+            if stall.observe(
+                max(eta / gap_scale, dual_norm / dual_scale), nit, x, lmbda
+            ):
                 status = 1
                 message = (
                     f"stalled: no relative improvement in max(gap, ||r_dual||) "
@@ -1142,6 +1197,7 @@ class PrimalDualSolver(Solver):
             )
 
         if direction is None:
+            gap_scale, _, _ = _pd_scales(settings.outer, problem, x)
             status, message = _certify_pd_status(
                 status,
                 message,
@@ -1149,6 +1205,7 @@ class PrimalDualSolver(Solver):
                 dual_value,
                 float(np.max(f_final, initial=0.0)),
                 settings.outer,
+                gap_scale=gap_scale,
             )
 
         trace.on_pd_done(
@@ -1935,21 +1992,39 @@ class PrimalDualSolver(Solver):
             surrogate_gaps.append(eta)
             dual_residual_norms.append(dual_norm)
             primal_residual_norms.append(pri_norm)
+            gap_scale, dual_scale, pri_scale = _pd_scales(
+                settings.outer, problem, x, A_eq, b_eq
+            )
 
             if eta <= 0.0:
-                status = 0 if max(dual_norm, pri_norm) < outer_tol else 1
+                status = (
+                    0
+                    if dual_norm < outer_tol * dual_scale
+                    and pri_norm < outer_tol * pri_scale
+                    else 1
+                )
                 message = (
                     f"Iteration stopped at non-positive surrogate gap ({eta:.3e})."
                 )
                 break
 
-            if eta < outer_tol and dual_norm < outer_tol and pri_norm < outer_tol:
+            if (
+                eta < outer_tol * gap_scale
+                and dual_norm < outer_tol * dual_scale
+                and pri_norm < outer_tol * pri_scale
+            ):
                 status = 0
                 break
 
             # Same stall guard as the inequality-only path (see ``_StallWatch``),
             # over the three quantities this loop must drive down together.
-            if stall.observe(max(eta, dual_norm, pri_norm), nit, x, lmbda, nu):
+            if stall.observe(
+                max(eta / gap_scale, dual_norm / dual_scale, pri_norm / pri_scale),
+                nit,
+                x,
+                lmbda,
+                nu,
+            ):
                 status = 1
                 message = (
                     f"stalled: no relative improvement in "
@@ -2091,6 +2166,7 @@ class PrimalDualSolver(Solver):
         )
 
         if direction is None:
+            gap_scale, _, pri_scale = _pd_scales(settings.outer, problem, x, A_eq, b_eq)
             status, message = _certify_pd_status(
                 status,
                 message,
@@ -2101,6 +2177,8 @@ class PrimalDualSolver(Solver):
                     float(np.linalg.norm(A_eq @ x - b_eq)),
                 ),
                 settings.outer,
+                gap_scale=gap_scale,
+                feasibility_scale=pri_scale,
             )
 
         trace.on_pd_done(

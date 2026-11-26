@@ -48,8 +48,8 @@ class Trace:
     def on_feasible_initial_guess(self) -> None:
         """Report that the initial guess already satisfies the equality constraints.
 
-        Emitted by ``EqualitySolver`` when the supplied x0 satisfies A x = b to within
-        1e-10 in every component, so it is returned unchanged.
+        Emitted by ``EqualitySolver`` when the supplied x0 satisfies A x = b to rounding
+        (``EqualityConstraintLayer.is_satisfied``), so it is returned unchanged.
 
         """
 

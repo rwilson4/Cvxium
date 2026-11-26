@@ -897,6 +897,16 @@ and exits gracefully at the former. Many applications do not need high
 precision; raising `tolerance` toward `tolerance_soft` stops the solver
 before the ill-conditioned late steps.
 
+**An objective far from unit size.** Both tolerances bound an absolute
+duality gap by default. For an objective of size 1e6 that asks for
+twelve significant digits, more than double precision can give, and
+the solve stalls or fails; for one of size 1e-6 the test passes at
+once, far from the optimum. Set `OuterSettings(objective_scale=...)`
+to measure the gap against a scale S instead, gap at most
+`tolerance` S: `"relative"` for S = max(1, |f0|), `"auto"` for the
+size of the objective's terms, max(|f0|, ‖∇f0‖ ‖x‖), which is invariant
+to rescaling in either direction, or a number for a known unit.
+
 **`IncompatibleStructureError`.** Two contributions cannot be summed
 without densifying (section 2c). Re-express one, usually as a low-rank
 update on a `ZeroSystem`.

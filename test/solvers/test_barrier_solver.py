@@ -1434,21 +1434,64 @@ class AllLinearDispatchTest(unittest.TestCase):
 
         assert adapter._all_linear() is False
 
-    def test_evaluate_dual_returns_minus_inf_when_residual_nonzero(self) -> None:
-        r"""LP with `r = c + (-I)^T lambda \ne 0` => dual is `-\infty`."""
+    def test_a_nonzero_residual_is_corrected_to_a_valid_bound(self) -> None:
+        r"""Non-stationary multipliers are corrected, not rejected (#48).
+
+        With r = c - λ ≠ 0 the Lagrangian is unbounded below in x, so λ itself
+        certifies nothing. The smallest weighted correction makes λ' = c, dual
+        feasible, and the bound is inf L = 0 = p* for minimize 1^T x over x ≥ 0.
+        """
         M = 3
         problem = Problem(
             obj=LinearObjective(c=np.ones(M)),
             ineq=[BoundsConstraintLayer(lb=0.0, dimension=M)],
         )
         adapter = _BarrierAdapter(problem=problem, settings=OptimizationSettings())
-        # gradient residual = ones - lambda; lambda != ones => residual != 0.
         lmbda = np.array([0.3, 0.5, 0.8])
         x_star = np.ones(M)
 
         dual = adapter.evaluate_dual(lmbda=lmbda, nu=np.zeros(0), x_star=x_star)
 
-        assert dual == float("-inf")
+        self.assertAlmostEqual(dual, 0.0, delta=1e-12)
+
+    def test_no_nonnegative_correction_gives_minus_inf(self) -> None:
+        r"""Minimize -1^T x over x ≥ 0 is unbounded: no λ ≥ 0 is stationary."""
+        M = 3
+        problem = Problem(
+            obj=LinearObjective(c=-np.ones(M)),
+            ineq=[BoundsConstraintLayer(lb=0.0, dimension=M)],
+        )
+        adapter = _BarrierAdapter(problem=problem, settings=OptimizationSettings())
+
+        dual = adapter.evaluate_dual(
+            lmbda=np.ones(M), nu=np.zeros(0), x_star=np.ones(M)
+        )
+
+        self.assertEqual(dual, float("-inf"))
+
+    @parameterized.expand([("c", 1e6, 1.0), ("constraints", 1.0, 1e6)])
+    def test_the_stationarity_gate_is_scale_invariant(
+        self, _name: str, c_scale: float, data_scale: float
+    ) -> None:
+        """Rescaling the objective or the constraints leaves a valid bound valid."""
+        M = 3
+        c = c_scale * np.array([1.0, 2.0, 3.0])
+        problem = Problem(
+            obj=LinearObjective(c=c),
+            ineq=[
+                LinearInequalityConstraintLayer(
+                    A=-data_scale * np.eye(M), cu=np.zeros(M)
+                )
+            ],
+        )
+        adapter = _BarrierAdapter(problem=problem, settings=OptimizationSettings())
+        # Stationary to rounding: J^T λ = -data_scale λ = -c.
+        lmbda = c / data_scale * (1.0 + 1e-12)
+
+        dual = adapter.evaluate_dual(lmbda=lmbda, nu=np.zeros(0), x_star=np.ones(M))
+
+        self.assertTrue(np.isfinite(dual))
+        self.assertLessEqual(dual, 1e-9 * float(np.sum(c)))
 
     def test_evaluate_dual_returns_lagrangian_when_residual_zero(self) -> None:
         r"""LP with stationary ``lambda`` (`r = 0`) => dual equals `-b^T lambda` at any x."""
@@ -1469,10 +1512,8 @@ class AllLinearDispatchTest(unittest.TestCase):
         # L(x) = c^T x + lambda^T (-x) = (c - lambda)^T x = 0 (since lambda = c).
         self.assertAlmostEqual(dual, 0.0, delta=1e-12)
 
-    def test_evaluate_dual_for_equality_lp_returns_minus_inf_when_residual_nonzero(
-        self,
-    ) -> None:
-        r"""Equality LP with `r = c + A_eq^T nu - lambda \ne 0` => dual is `-\infty`."""
+    def test_an_equality_lp_residual_is_corrected_to_a_valid_bound(self) -> None:
+        r"""Equality LP with r = c + A^T ν - λ ≠ 0: the corrected bound is ≤ p* = 1."""
         M = 3
         A_eq = np.array([[1.0, 1.0, 1.0]])
         b_eq = np.array([1.0])
@@ -1484,12 +1525,12 @@ class AllLinearDispatchTest(unittest.TestCase):
         adapter = _BarrierAdapter(problem=problem, settings=OptimizationSettings())
         lmbda = np.array([0.1, 0.1, 0.1])
         nu = np.array([0.0])
-        # r = ones + A^T*0 - 0.1*ones = 0.9*ones != 0.
         x_star = np.full(M, 1.0 / 3.0)  # feasible: sum = 1.
 
         dual = adapter.evaluate_dual(lmbda=lmbda, nu=nu, x_star=x_star)
 
-        assert dual == float("-inf")
+        self.assertTrue(np.isfinite(dual))
+        self.assertLessEqual(dual, 1.0 + 1e-12)
 
     def test_evaluate_dual_for_equality_lp_returns_finite_when_residual_zero(
         self,

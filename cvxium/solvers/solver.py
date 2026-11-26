@@ -209,8 +209,8 @@ class Solver(ABC):
         1. Equality only (no inequality layers): one projection of ``x0`` onto
            A x = b by ``EqualitySolver.solve``, with no barrier and no iteration.
         2. A supplied ``x0`` that strictly satisfies every inequality layer and lies on
-           the equality manifold (every component of A x0 - b below 1e-10 in absolute
-           value, the gate ``EqualitySolver.solve`` uses) is returned as is.
+           the equality manifold (``EqualityConstraintLayer.is_satisfied``, the gate
+           ``EqualitySolver.solve`` uses) is returned as is.
         3. When the active layer is the only inequality layer and is a
            ``DirectConstraintLayer`` whose ``interior_point`` supplies a point (given
            the equality constraints), that point is returned after the inequality and
@@ -318,15 +318,13 @@ class Solver(ABC):
             # be returned verbatim as a "feasible" solution that violates the
             # equality constraints, skipping the solve that drives the residual to
             # zero.
-            # Use the same absolute residual threshold ``EqualitySolver.solve``
-            # applies when deciding ``x0`` already lies on the manifold
-            # (``|A x0 - b| < 1e-10``), not ``np.allclose``'s looser defaults
-            # (atol=1e-8, rtol=1e-5). Otherwise this gate could accept an ``x0``
-            # that ``EqualitySolver`` would still refine, returning a point with a
-            # larger equality residual than an actual solve would.
-            on_manifold = problem.eq is None or bool(
-                np.all(np.abs(problem.eq.A @ x0 - problem.eq.b) < 1e-10)
-            )
+            # Use the same gate ``EqualitySolver.solve`` applies when deciding
+            # ``x0`` already lies on the manifold (``is_satisfied``: relative to
+            # each row's scale, so it can pass at any |b|), not ``np.allclose``'s
+            # looser defaults. Otherwise this gate could accept an ``x0`` that
+            # ``EqualitySolver`` would still refine, returning a point with a larger
+            # equality residual than an actual solve would.
+            on_manifold = problem.eq is None or bool(problem.eq.is_satisfied(x0))
             if problem.is_feasible(x0) and on_manifold:
                 return SolveResult(
                     solution=x0,
@@ -345,15 +343,15 @@ class Solver(ABC):
         # curvature off its own rows, so its Newton system is singular. The equality
         # manifold is handed to the layer so it can return a point on it;
         # ``is_feasible`` checks only the inequalities, so the manifold residual is
-        # re-checked here (same ``1e-10`` gate the x0 short-circuit uses) before
-        # accepting. Fall through to the iterative Phase I when the layer offers no
+        # re-checked here (the same ``is_satisfied`` gate as the x0 short-circuit)
+        # before accepting. Fall through to the iterative Phase I when the layer offers no
         # such point. With background inequalities the layer's own point need not
         # satisfy them, so it cannot be returned verbatim.
         if len(problem.ineq) == 1:
             interior = active.interior_point(problem.eq)
             if interior is not None and problem.is_feasible(interior):
                 on_manifold = problem.eq is None or bool(
-                    np.all(np.abs(problem.eq.A @ interior - problem.eq.b) < 1e-10)
+                    problem.eq.is_satisfied(interior)
                 )
                 if on_manifold:
                     return SolveResult(
@@ -395,9 +393,7 @@ class Solver(ABC):
         # has nothing to do, and solving it anyway can do harm, since its barrier
         # need not be bounded below (see ``_SlackObjective``).
         if background:
-            on_manifold = problem.eq is None or bool(
-                np.all(np.abs(problem.eq.A @ seed - problem.eq.b) < 1e-10)
-            )
+            on_manifold = problem.eq is None or bool(problem.eq.is_satisfied(seed))
             if problem.is_feasible(seed) and on_manifold:
                 return SolveResult(
                     solution=seed,
@@ -479,6 +475,33 @@ class Solver(ABC):
             except ProblemInfeasibleError:
                 radius *= _PHASE1_BOX_GROWTH
         raise failure
+
+    @staticmethod
+    def _phase1_start_is_accepted(
+        phase1_problem: Problem, x0_phase1: npt.NDArray[np.float64]
+    ) -> bool:
+        """Whether the feasibility short-circuit accepts a Phase I start.
+
+        The same test ``_solve_feasibility`` applies to a supplied start: strictly
+        feasible for every inequality layer and on the equality manifold.
+
+        Parameters
+        ----------
+         phase1_problem : Problem
+            The Phase I problem.
+         x0_phase1 : npt.NDArray[np.float64]
+            Its start.
+
+        Returns
+        -------
+         accepted : bool
+            True when the start short-circuits the inner feasibility solve.
+
+        """
+        on_manifold = phase1_problem.eq is None or phase1_problem.eq.is_satisfied(
+            x0_phase1
+        )
+        return bool(phase1_problem.is_feasible(x0_phase1) and on_manifold)
 
     def _solve_phase1(
         self,
@@ -570,6 +593,27 @@ class Solver(ABC):
             phase1_problem,
             obj=none_throws(phase1_problem.obj).with_feasibility_threshold(0.0),
         )
+        # A slack-form start (the variable gains a trailing slack) is feasible by
+        # construction, so the inner solve's own feasibility seeding returns it at
+        # once. A start that fails that test, from rounding the construction could
+        # not absorb, would instead be transformed again, each level adding a slack,
+        # without end (issue #48): stop here. A direct-form start need only satisfy
+        # the background layers, which the inner solve cascades with one layer fewer.
+        slack_form = np.asarray(x0_phase1).size > problem.dimension
+        if slack_form and not self._phase1_start_is_accepted(transformed, x0_phase1):
+            raise ProblemMarginallyFeasibleError(
+                message=(
+                    "Phase I could not find a feasible point: its constructed start "
+                    "is not strictly feasible to working precision."
+                ),
+                result=SolveResult(
+                    solution=np.asarray(x0_phase1)[: problem.dimension],
+                    status=SolveStatus.INFEASIBLE,
+                    message="Phase I's start failed its own feasibility test.",
+                    solver=type(self).__name__,
+                    n_iterations=0,
+                ),
+            )
         try:
             result = self.solve(transformed, x0_phase1, on_infeasible=on_infeasible)
         except (NewtonStepError, BacktrackingLineSearchError) as e:
@@ -799,8 +843,9 @@ class EqualitySolver(FeasibilitySolver):
     ) -> SolveResult:
         """Solve A x = b, projecting x0 onto the solution set when one is given.
 
-        A supplied x0 that already satisfies A x = b (every component of A x0 - b below
-        1e-10 in absolute value) is returned unchanged. Otherwise the result is the
+        A supplied x0 that already satisfies A x = b to rounding
+        (``EqualityConstraintLayer.is_satisfied``) is returned unchanged. Otherwise the
+        result is the
         Euclidean projection of x0 onto {x : A x = b}, or the minimum-norm solution when
         x0 is ``None``. A dense A uses the cached SVD (see Notes); a sparse A goes
         through ``_project_via_saddle``.
@@ -858,7 +903,7 @@ class EqualitySolver(FeasibilitySolver):
         products with A, O(p M).
 
         """
-        if x0 is not None and np.all(np.abs(self.A @ x0 - self.b) < 1e-10):
+        if x0 is not None and self.constraint.is_satisfied(x0):
             self.settings.trace.on_feasible_initial_guess()
             return SolveResult(
                 solution=x0,

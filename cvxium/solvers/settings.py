@@ -19,8 +19,10 @@ without importing the solver engine.
 
 """
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Literal
 
 from ..diagnostics.trace import (
     LoggingTrace,
@@ -157,6 +159,26 @@ class OuterSettings:
         ``SolveStatus.MAX_ITERATIONS``. Used by ``StationaritySolver``, whose outer loop
         runs until a gap test passes and so needs an explicit cap; the barrier method
         instead computes its step count from the barrier schedule. Default 30.
+     objective_scale : float | Literal["relative", "auto"] | None
+        The scale S against which the barrier and primal-dual methods measure their
+        duality gap: a solve is converged when the gap is at most ``tolerance`` S
+        (acceptable at ``tolerance_soft`` S). The choices (issue #48):
+        - ``None`` (the default): S = 1, an absolute gap. Right when the objective
+          is of moderate size and an absolute answer is wanted; with an objective of
+          size 1e6 it demands twelve significant digits, more than double precision
+          can deliver, and with one of size 1e-6 it is met at once.
+        - ``"relative"``: S = max(1, |f0(x)|), the usual "1 + |p|" rule: absolute for
+          objectives of unit size or less and relative above.
+        - A positive number: S itself, fixed; the objective's natural unit.
+        - ``"auto"``: S = max(|f0(x)|, ‖∇f0(x)‖ ‖x‖), the size of the objective's
+          terms rather than of its value, so the test is invariant to rescaling the
+          objective in either direction and meaningful when the optimal value is
+          near zero.
+        Under ``"relative"`` and ``"auto"`` the primal-dual method's residual tests
+        scale alike: the dual residual by max(1, ‖∇f0‖) (``"auto"``: ‖∇f0‖) and the
+        equality residual by max(1, ‖b‖∞) (``"auto"``: max(‖b‖∞, ‖|A| |x|‖∞)); a fixed
+        number rescales the gap only. Feasibility (Phase I) solves, which stop at
+        the first feasible point, are unaffected.
 
     References
     ----------
@@ -173,6 +195,30 @@ class OuterSettings:
     barrier_init: BarrierInitStrategy | None = None
     objective_value_estimate: float | None = None
     max_outer_iterations: int = 30
+    objective_scale: float | Literal["relative", "auto"] | None = None
+
+    def __post_init__(self) -> None:
+        """Validate ``objective_scale``.
+
+        Raises
+        ------
+         ValueError
+            When ``objective_scale`` is not ``None``, ``"relative"``, ``"auto"`` or a
+            positive finite number.
+
+        """
+        scale = self.objective_scale
+        if scale is None or scale in ("relative", "auto"):
+            return
+        if isinstance(scale, bool) or not isinstance(scale, int | float):
+            raise ValueError(
+                f"objective_scale must be None, 'relative', 'auto' or a positive "
+                f"number; got {scale!r}."
+            )
+        if not (math.isfinite(scale) and scale > 0.0):
+            raise ValueError(
+                f"objective_scale must be positive and finite; got {scale!r}."
+            )
 
 
 @dataclass
