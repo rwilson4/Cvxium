@@ -5,7 +5,7 @@ Matrix Systems
 --------------
 
 .. automodule:: cvxium.linalg.systems
-   :members: MatrixSystem, ZeroSystem, DiagonalSystem, BandedSystem, DenseSystem, BlockDiagonalSystem, PermutedSystem, ArrowSystem, SparseArrowSystem, Definiteness
+   :members: MatrixSystem, ZeroSystem, DiagonalSystem, BandedSystem, DenseSystem, BlockDiagonalSystem, PermutedSystem, ArrowSystem, Definiteness
 
 Saddle Systems
 --------------

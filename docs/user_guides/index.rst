@@ -20,6 +20,11 @@ carries through every Newton step.
 The guide to unbounded problems shows how to read a recession-ray
 certificate and explains which problems the solvers can certify.
 
+The guide to radiotherapy QPs takes a clinical treatment-planning QP
+from RadOptLIB, compares Cvxium with Clarabel, and shows how to
+capture a problem's own Hessian structure in a new ``MatrixSystem``
+and ``ConstraintLayer``, and what that structure buys.
+
 .. toctree::
    :maxdepth: 1
 
@@ -27,3 +32,4 @@ certificate and explains which problems the solvers can certify.
    linear_programs
    banded_quadratic_programs
    unbounded_problems
+   radiotherapy_qps

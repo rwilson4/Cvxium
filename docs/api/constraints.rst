@@ -11,7 +11,7 @@ Linear Constraints
 ------------------
 
 .. automodule:: cvxium.problems.linear_constraints
-   :members: EqualityConstraintLayer, BoundsConstraintLayer, LinearInequalityConstraintLayer, BandedLinearInequalityLayer, ArrowLinearInequalityLayer, SparseArrowLinearInequalityLayer, ImbalanceConstraintLayer
+   :members: EqualityConstraintLayer, BoundsConstraintLayer, LinearInequalityConstraintLayer, BandedLinearInequalityLayer, ArrowLinearInequalityLayer, ImbalanceConstraintLayer
 
 Quadratic Constraints
 ---------------------
