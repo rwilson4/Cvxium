@@ -1334,6 +1334,15 @@ class PrimalDualSolver(Solver):
         for the predictor and corrector solves of one Mehrotra iteration (one
         factorization, two solves).
 
+        Each solve takes one step of iterative refinement, Δx += H^{-1} (b - H Δx),
+        reusing the factorization at the cost of one multiply and one more solve. Late
+        in a solve the duals span many orders of magnitude, and when ∇^2 f0 is singular
+        (a QP whose Q leaves some variables uncurved) the only curvature along its
+        nullspace comes from the smallest of them, so H is nearly singular there. An
+        unrefined step then carries enough error that the dual residual, which an
+        exact step can only shrink, grows from one iteration to the next and the
+        solve stalls short of its tolerance.
+
         Parameters
         ----------
          problem : Problem
@@ -1368,7 +1377,12 @@ class PrimalDualSolver(Solver):
         # Levenberg-Marquardt: add ``damping * I`` to the modified Hessian.
         if damping > 0.0:
             system = system.plus(DiagonalSystem(np.full(x.shape[0], damping)))
-        return system.solve
+
+        def refined_solve(rhs: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+            step = system.solve(rhs)
+            return step + system.solve(rhs - system.multiply(step))
+
+        return refined_solve
 
     @staticmethod
     def _direction_from_rcent(

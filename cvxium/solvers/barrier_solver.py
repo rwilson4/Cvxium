@@ -240,11 +240,11 @@ _RECESSION_RTOL = 1e-6
 
 # How far the corrected multipliers of an all-linear Lagrangian may miss stationarity,
 # relative to the magnitudes the residual cancels: rounding level, a few hundred ulps
-# of a modest condition number (see ``_BarrierAdapter._corrected_linear_dual``).
+# of a modest condition number (see ``_BarrierAdapter._corrected_dual``).
 _DUAL_RESIDUAL_RTOL = 1e-8
 
 # The widest spread of weights the last-resort dual correction keeps (see
-# ``_BarrierAdapter._corrected_linear_dual``).
+# ``_BarrierAdapter._corrected_dual``).
 _DUAL_WEIGHT_RANGE = 1e8
 
 
@@ -1202,7 +1202,7 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         atnu = self.A.T @ nu if self._equality is not None else None
         dual_nu = nu if self._equality is not None else None
         if self._all_linear():
-            return self._corrected_linear_dual(x_star, lmbda, dual_nu)
+            return self._corrected_dual(x_star, lmbda, dual_nu, objective_scale=0.0)
         x_min, delta2 = self._minimize_lagrangian(x_star, lmbda, atnu=atnu, nu=dual_nu)
         if x_min is None:
             # mini-Newton could not even take a step; fall back to x_star + a
@@ -1211,21 +1211,28 @@ class _BarrierAdapter(InteriorPointMethodSolver):
             delta2 = self._newton_decrement_sq(x_min, lmbda, atnu=atnu)
         # Region guard: the bound L - inf L <= delta^2 only holds in the
         # self-concordant quadratic region (B&V 9.50, delta <= ~0.68). Outside it
-        # (or if delta^2 is unavailable) we cannot certify a valid lower bound, so
-        # return -inf conservatively rather than a possibly-invalid bound. -inf
-        # simply defers certification to a later, better-warm-started outer
-        # iteration; it never falsely certifies convergence or infeasibility.
+        # (or if delta^2 is unavailable) the mini-Newton certifies nothing. The usual
+        # cause is a singular ∇^2 L -- a quadratic objective whose Q leaves some
+        # variables uncurved, so that L is linear along a subspace -- and there the
+        # Wolfe-dual correction still certifies a bound (issue: singular Q). When it
+        # cannot, -inf defers certification to a later outer iteration; it never
+        # falsely certifies convergence or infeasibility.
         if delta2 is None or delta2 > _DUAL_REGION_DECREMENT_SQ_MAX:
-            return float("-inf")
+            return self._corrected_dual(x_star, lmbda, dual_nu, objective_scale=1.0)
         return self._evaluate_lagrangian(x_min, lmbda, dual_nu) - delta2
 
-    def _corrected_linear_dual(
+    def _corrected_dual(
         self,
         x: npt.NDArray[np.float64],
         lmbda: npt.NDArray[np.float64],
         nu: npt.NDArray[np.float64] | None,
+        objective_scale: float,
     ) -> float:
-        r"""Return a valid dual bound for an all-linear Lagrangian (issue #48).
+        r"""Return a valid dual bound by correcting the multipliers to stationarity.
+
+        Serves two cases, chosen by ``objective_scale``: 0 for an all-linear
+        Lagrangian (issue #48), and 1 for a Lagrangian whose Hessian is singular, such
+        as a quadratic objective whose Q leaves some variables uncurved.
 
         With an affine objective and affine constraints, L(x, λ, ν) is affine in x, so
         inf_x L is L itself when ∇_x L = 0 and -inf otherwise. Barrier and primal-dual
@@ -1254,6 +1261,23 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         nonnegative, stationary multipliers; when no weighting passes, nothing is
         certified and the bound is -inf.
 
+        With a curved objective (``objective_scale`` 1) the same idea is a Wolfe dual.
+        L is convex in x, so if ∇_x L(x', λ', ν') = 0 at some x', then
+        inf_x L(·, λ', ν') = L(x', λ', ν'), whether or not ∇^2 L is invertible. The mini
+        Newton of ``evaluate_dual`` needs ∇^2 L to be positive definite and fails
+        when the objective's Hessian Q is singular, since then ∇^2 L = Q for affine
+        constraints. Instead the iterate is moved too: minimizing
+        (1/2) δx^T Q δx + (1/2) ∑ δλ_i^2 / w_i subject to stationarity at x + δx gives
+        δx = y and δλ = W J y with
+               _              _     _    _     _    _
+              |  Q + J^T W J   A^T |   |  y   |   |  -r  |
+              |_     A          0 _|   |_ δν _| = |_  0 _|,
+        the Newton system's own Hessian with unit objective scale, and the bound is
+        L(x + y, λ + δλ, ν + δν). It is exact when ∇_x L is affine in x (a quadratic
+        objective and affine constraints). For any other model the stationarity test
+        at x + y fails and the bound is -inf, as before. With Q = 0 this reduces to
+        the linear correction, up to the step in x, which then changes nothing.
+
         Parameters
         ----------
          x : npt.NDArray[np.float64]
@@ -1262,6 +1286,8 @@ class _BarrierAdapter(InteriorPointMethodSolver):
             Inequality multipliers, nonnegative.
          nu : npt.NDArray[np.float64] | None
             Equality multipliers, or ``None`` without equality constraints.
+         objective_scale : float
+            0 to correct the multipliers alone, at x; 1 to move x with them.
 
         Returns
         -------
@@ -1288,7 +1314,9 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         local = lmbda / (-f)
         clipped = np.maximum(local, float(np.max(local)) / _DUAL_WEIGHT_RANGE)
         for weights in (local, lmbda**2, clipped):
-            bound = self._dual_after_correction(x, lmbda, nu, f, r, weights)
+            bound = self._dual_after_correction(
+                x, lmbda, nu, f, r, weights, objective_scale
+            )
             if bound is not None:
                 return bound
         return float("-inf")
@@ -1301,6 +1329,7 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         f: npt.NDArray[np.float64],
         r: npt.NDArray[np.float64],
         weights: npt.NDArray[np.float64],
+        objective_scale: float = 0.0,
     ) -> float | None:
         """Correct the multipliers with one weighting and return the bound, if valid.
 
@@ -1318,6 +1347,10 @@ class _BarrierAdapter(InteriorPointMethodSolver):
             The Lagrangian gradient at the uncorrected multipliers.
          weights : npt.NDArray[np.float64]
             The weights w of the correction's norm ∑ δλ_i^2 / w_i, positive.
+         objective_scale : float
+            Weight of the objective's Hessian in the correction system: 0 corrects the
+            multipliers at x, 1 also moves x by the correction y (see
+            ``_corrected_dual``).
 
         Returns
         -------
@@ -1332,7 +1365,9 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         # pseudo-multipliers give it the weights w.
         pseudo = weights * (-f)
         try:
-            system = self._problem.build_hessian_system(x, self._point(x), 0.0, pseudo)
+            system = self._problem.build_hessian_system(
+                x, self._point(x), objective_scale, pseudo
+            )
             if nu is None:
                 y = system.solve(-r)
                 delta_nu = None
@@ -1351,10 +1386,23 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         )
         nu_corrected = None if nu is None else nu + none_throws(delta_nu)
         atnu_corrected = None if nu_corrected is None else self.A.T @ nu_corrected
-        residual = self._lagrangian_gradient(x, lmbda_corrected, atnu_corrected)
-        if not self._stationary(x, lmbda_corrected, atnu_corrected, residual):
+        # A linear correction is stationary at x itself; a curved one at x + y.
+        x_eval = x if objective_scale == 0.0 else x + y
+        if not np.all(np.isfinite(x_eval)):
             return None
-        return self._evaluate_lagrangian(x, lmbda_corrected, nu_corrected)
+        # x + y can leave the objective's domain (a log term, say); the model is then
+        # not quadratic, and the finiteness and stationarity tests reject it.
+        with np.errstate(all="ignore"):
+            residual = self._lagrangian_gradient(
+                x_eval, lmbda_corrected, atnu_corrected
+            )
+            if not (
+                np.all(np.isfinite(residual))
+                and self._stationary(x_eval, lmbda_corrected, atnu_corrected, residual)
+            ):
+                return None
+            bound = self._evaluate_lagrangian(x_eval, lmbda_corrected, nu_corrected)
+        return bound if np.isfinite(bound) else None
 
     def _stationary(
         self,
