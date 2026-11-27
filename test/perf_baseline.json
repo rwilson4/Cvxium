@@ -280,13 +280,13 @@
     2
   ],
   "test.solvers.test_barrier_solver.FlatPhase1BoxTest.test_issue_28_lp_is_solved_without_primal_dual_0_seed_0": [
-    68
+    85
   ],
   "test.solvers.test_barrier_solver.FlatPhase1BoxTest.test_issue_28_lp_is_solved_without_primal_dual_1_seed_3": [
-    73
+    91
   ],
   "test.solvers.test_barrier_solver.FlatPhase1BoxTest.test_issue_28_lp_is_solved_without_primal_dual_2_seed_7": [
-    69
+    86
   ],
   "test.solvers.test_barrier_solver.LongNewtonStepTest.test_phase1_finds_the_far_band_0_lo_1000_2d": [
     4
@@ -364,7 +364,7 @@
     61
   ],
   "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_3_barrier_eq_cold": [
-    64
+    73
   ],
   "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_4_primal_dual_noeq_warm": [
     7
@@ -382,13 +382,13 @@
     64
   ],
   "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_1_barrier_noeq_cold": [
-    67
+    76
   ],
   "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_2_barrier_eq_warm": [
     63
   ],
   "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_3_barrier_eq_cold": [
-    62
+    71
   ],
   "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_4_primal_dual_noeq_warm": [
     7
@@ -550,7 +550,7 @@
     55
   ],
   "test.solvers.test_scale_invariance.LargeEqualityDataTest.test_solves_03_barrier_seed_4_cold": [
-    66
+    73
   ],
   "test.solvers.test_scale_invariance.LargeEqualityDataTest.test_solves_04_barrier_seed_7_warm": [
     63

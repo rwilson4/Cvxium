@@ -835,14 +835,19 @@ class PrimalDualSolver(Solver):
                 lifted,
                 solver="primal_dual",
                 diagnostics=PrimalDualDiagnostics(),
+                phase1=result.phase1,  # keep the earlier layers' cascade
             )
 
-        x = self._solve_feasibility(replace(problem, obj=None), x0).solution
-        # Dispatch on equality presence: the two algorithms are distinct (MPC vs
-        # damped-Newton + residual line search) and each is preserved verbatim.
-        if problem.eq is None:
-            return self._run(problem, np.asarray(x))
-        return self._run_equality(problem, np.asarray(x))
+        feasibility = self._solve_feasibility(replace(problem, obj=None), x0)
+        x = np.asarray(feasibility.solution)
+        # Dispatch on equality presence: the no-equality Mehrotra step, or its
+        # infeasible-start form that also drives A x - b to zero.
+        result = (
+            self._run(problem, x)
+            if problem.eq is None
+            else self._run_equality(problem, x)
+        )
+        return replace(result, phase1=self._phase1_part(feasibility))
 
     def _run(
         self,

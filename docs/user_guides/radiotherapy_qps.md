@@ -21,15 +21,18 @@ that capture it, and measure the payoff:
 |---|---|---|
 | Clarabel (sparse LDL interior point) | Clarabel | 67 s |
 | Cvxium, stock layers | — | runs out of memory |
-| Cvxium, a 10-line custom layer (dense Newton system) | `PrimalDualSolver` | 272 s |
+| Cvxium, a 10-line custom layer (dense Newton system) | `PrimalDualSolver` | 270–400 s |
 | Cvxium, a custom sparse arrow system and layer | `PrimalDualSolver` | 60 s |
 
 Every solve that finishes matches RadOptLIB's reference solution, to
 a relative duality gap of about 2e-9. Writing the structure down makes
-Cvxium about 4.5 times faster than its first working formulation, and
+Cvxium 4.5 to 6.5 times faster than its first working formulation, and
 puts it level with Clarabel. (All timings come from a 4-core
 Intel Xeon at 2.1 GHz with 15 GB of memory, NumPy 2.4, SciPy 1.17, and
-Clarabel 0.11; expect different absolute numbers elsewhere.)
+Clarabel 0.11, in a shared virtual machine; expect different absolute
+numbers elsewhere. The dense formulation, dominated by a large
+multithreaded Cholesky factorization, varied most from run to run: we
+give the range of three runs.)
 
 The instance file is 15 MB and is downloaded separately, so the
 documentation tests cannot run on it. Instead, every `python` block
@@ -325,9 +328,10 @@ np.testing.assert_allclose(dense.solution, stock.solution, atol=1e-5)
 The sum of the objective's `DenseSystem`, the bounds' `DiagonalSystem`
 and this layer's `DenseSystem` is one `DenseSystem`, factored by
 Cholesky at every Newton step. On rt-qp-0062 `PrimalDualSolver` solves
-it in 26 iterations after Phase I and 272 seconds (`BarrierSolver`:
-981 seconds), about 4 seconds per Newton step, of which the
-8,665 × 8,665 Cholesky factorization is the largest part. That
+it in 18 Phase I iterations and 26 main iterations, in 270 to 400
+seconds over three runs (`BarrierSolver`: 981 seconds), about 6 to 9
+seconds per iteration, of which the 8,665 × 8,665 Cholesky
+factorization is the largest part. That
 is the cost of treating the Newton system as dense. To do better, we
 look at its structure.
 
@@ -562,6 +566,16 @@ np.testing.assert_allclose(x_arrow, stock.solution, atol=1e-5)
 np.testing.assert_allclose(arrow.objective_value, objective_clarabel, rtol=1e-6)
 ```
 
+A result carries the Phase I solve that found its strictly feasible
+start as `result.phase1` (and that one, the Phase I that seeded it,
+when Phase I cascaded over several layers), so the split between the
+two phases is a field away:
+
+```python
+assert arrow.phase1 is not None
+print(f"Phase I: {arrow.phase1.n_iterations} iterations; main: {arrow.n_iterations}")
+```
+
 Nothing else changes. Phase I lifts the problem with one extra slack
 variable and wraps each layer's contribution in an `ArrowSystem` with
 a border of width one; that wrapper solves through our system's
@@ -572,26 +586,26 @@ the same two classes unchanged.
 
 On rt-qp-0062:
 
-| Formulation | Solver | Iterations (after Phase I) | Time | Rel. duality gap |
+| Formulation | Solver | Iterations (Phase I + main) | Time | Rel. duality gap |
 |---|---|---|---|---|
-| Clarabel | Clarabel | 26 | 67 s | 2.2e-9 |
+| Clarabel | Clarabel | 26 (no Phase I) | 67 s | 2.2e-9 |
 | Stock layers | — | — | out of memory | — |
-| Dense custom layer | `PrimalDualSolver` | 26 | 272 s | 1.8e-9 |
+| Dense custom layer | `PrimalDualSolver` | 18 + 26 | 270–400 s | 1.8e-9 |
 | Dense custom layer | `BarrierSolver` | 10 outer | 981 s | 3.8e-9 |
-| Sparse arrow system | `PrimalDualSolver` | 26 | 60 s | 1.7e-9 |
+| Sparse arrow system | `PrimalDualSolver` | 18 + 26 | 60 s | 1.7e-9 |
 | Sparse arrow system | `BarrierSolver` | 10 outer | 272 s | 3.8e-9 |
 
 For each solver the two Cvxium formulations take the same number of
 iterations to the same objective value, to all printed digits: the
 arrow system solves the same Newton system as the dense one, only
-faster, so the speedup is the linear algebra alone (4.5 times for
-`PrimalDualSolver`, 3.6 times for `BarrierSolver`). The relative
+faster, so the speedup is the linear algebra alone (4.5 to 6.5 times
+for `PrimalDualSolver`, 3.6 times for `BarrierSolver`). The relative
 duality gaps follow RadOptLIB's definition; its reference solution
 scores 6.2e-9. `PrimalDualSolver` is the faster of Cvxium's solvers
 here: it needs far fewer Newton steps than the barrier method's
 nested centering.
 
-Where the remaining time goes, about one second per Newton step: mostly
+Where the remaining time goes, about 1.4 seconds per iteration: mostly
 forming the dense corner G_b^T D G_b, a sparse product over the
 21,717 dose rows with a 3,135 × 3,135 dense result, and then the
 3,135 × 3,135 Cholesky factorization. Both are the intrinsically dense
@@ -606,9 +620,9 @@ beamlet block, so this is close to the floor for a direct method.
   corner iteratively (conjugate gradients with a low-rank
   preconditioner, using the decay of the dose matrix's singular
   values) would be the next structure to write.
-- **Phase I** took about 40% of the primal-dual time in our runs. A
-  cheaper strictly feasible start would help more than further linear
-  algebra.
+- **Phase I** is 18 of the 44 primal-dual iterations here, about 40%
+  of the time. A cheaper strictly feasible start would help more than
+  further linear algebra.
 - **One instance.** These numbers are for rt-qp-0062 alone.
 
 ## Summary

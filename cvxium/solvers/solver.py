@@ -374,19 +374,25 @@ class Solver(ABC):
         # recursion on one fewer layer), then build the slack problem -- whose
         # augmented start is feasible by construction -- and solve it.
         background = problem.ineq[:-1]
+        background_result: SolveResult | None = None
         if background:
-            seed = np.asarray(
-                self._solve_feasibility(
-                    Problem(
-                        eq=problem.eq,
-                        ineq=background,
-                    ),
-                    x0,
-                    on_infeasible=on_infeasible,
-                ).solution
+            background_result = self._solve_feasibility(
+                Problem(
+                    eq=problem.eq,
+                    ineq=background,
+                ),
+                x0,
+                on_infeasible=on_infeasible,
             )
+            seed = np.asarray(background_result.solution)
         else:
             seed = x0 if x0 is not None else np.zeros(problem.dimension)
+        # The background solve is this layer's own Phase I seed, so its result nests
+        # under this layer's: result.phase1 is the background cascade, one level per
+        # layer (``_phase1_part`` drops it when no Phase I ran there).
+        background_phase1 = (
+            None if background_result is None else self._phase1_part(background_result)
+        )
         # The background solve may already have landed inside the active layer: its
         # point is the background's analytic center, or a step past its threshold,
         # either of which can satisfy the active layer too. Then the slack problem
@@ -401,8 +407,39 @@ class Solver(ABC):
                     message="The background layers' feasible point satisfies every layer",
                     solver="",
                     n_iterations=0,
+                    phase1=background_phase1,
                 )
-        return self._solve_phase1_from(problem, seed, on_infeasible=on_infeasible)
+        result = self._solve_phase1_from(problem, seed, on_infeasible=on_infeasible)
+        if result.phase1 is None and background_phase1 is not None:
+            result = replace(result, phase1=background_phase1)
+        return result
+
+    @staticmethod
+    def _phase1_part(result: SolveResult) -> SolveResult | None:
+        """Return a feasibility result for a ``phase1`` part, or ``None`` if no Phase I ran.
+
+        ``_solve_feasibility`` returns a full Phase I result (it carries an
+        objective, the Phase I problem's) when a Phase I solve ran, and a bare
+        FEASIBLE result (no objective) when it found a point without one: a supplied
+        ``x0`` that was already feasible, the equality-only projection, or a layer's
+        closed-form interior point. A bare result that itself carries a ``phase1``
+        (the background layers needed a Phase I, the active layer none) is kept, so
+        that cascade is not lost.
+
+        Parameters
+        ----------
+         result : SolveResult
+            A result returned by ``_solve_feasibility``.
+
+        Returns
+        -------
+         phase1 : SolveResult | None
+            ``result`` when it records a Phase I solve, otherwise ``None``.
+
+        """
+        if result.objective is None and result.phase1 is None:
+            return None
+        return result
 
     def _solve_phase1_from(
         self,

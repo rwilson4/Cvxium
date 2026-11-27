@@ -1925,12 +1925,22 @@ class BarrierSolver(Solver):
             result = self._solve_feasibility(problem, x0, on_infeasible=on_infeasible)
             if result.objective is not None:
                 return result
-            return self._feasible_result(problem, np.asarray(result.solution))
+            # Lifting keeps the cascade: a level that needed no Phase I of its own
+            # still carries the earlier layers' Phase I.
+            return replace(
+                self._feasible_result(problem, np.asarray(result.solution)),
+                phase1=result.phase1,
+            )
 
-        x0_feasible = self._solve_feasibility(
+        feasibility = self._solve_feasibility(
             replace(problem, obj=None), x0, on_infeasible=on_infeasible
-        ).solution
+        )
         adapter = _BarrierAdapter(
             problem=problem, settings=self.settings, equality=equality
         )
-        return adapter.solve(x0=np.asarray(x0_feasible), on_infeasible=on_infeasible)
+        result = adapter.solve(
+            x0=np.asarray(feasibility.solution), on_infeasible=on_infeasible
+        )
+        # The adapter's own Phase I is a trivial pass-through (feasibility was found
+        # above), so its ``phase1`` part records nothing; report the real one.
+        return replace(result, phase1=self._phase1_part(feasibility))
