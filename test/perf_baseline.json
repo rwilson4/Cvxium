@@ -69,7 +69,7 @@
     23
   ],
   "test.diagnostics.test_trace.PdEventsTest.test_equality_pd_emits_full_event_set": [
-    11
+    7
   ],
   "test.diagnostics.test_trace.PdEventsTest.test_pd_brackets_run_exactly_once": [
     7
@@ -108,7 +108,7 @@
     23
   ],
   "test.diagnostics.test_trace.SolverLabelTest.test_label_overrides_equality_pd_solver_name": [
-    11
+    7
   ],
   "test.diagnostics.test_trace.SolverLabelTest.test_label_overrides_hsd_solver_name": [
     7
@@ -373,10 +373,10 @@
     8
   ],
   "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_6_primal_dual_eq_warm": [
-    15
+    6
   ],
   "test.solvers.test_linear_programs.FreeVariableLinearProgramTest.test_matches_highs_7_primal_dual_eq_cold": [
-    16
+    7
   ],
   "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_0_barrier_noeq_warm": [
     64
@@ -397,10 +397,10 @@
     8
   ],
   "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_6_primal_dual_eq_warm": [
-    15
+    8
   ],
   "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_matches_highs_7_primal_dual_eq_cold": [
-    16
+    8
   ],
   "test.solvers.test_linear_programs.InequalityFormLinearProgramTest.test_the_issues_two_variable_lp": [
     53,
@@ -501,10 +501,10 @@
     6
   ],
   "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_solves_problem_with_equality": [
-    8
+    4
   ],
   "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_converges_on_near_singular_hessian_via_damping": [
-    15
+    5
   ],
   "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_dual_value_is_sound_and_matches_barrier_0": [
     12,
@@ -515,7 +515,7 @@
     66
   ],
   "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_infeasible_start_drives_equality_to_zero": [
-    15
+    6
   ],
   "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_matches_equality_barrier_solver_0": [
     12,
@@ -526,7 +526,7 @@
     56
   ],
   "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_matches_equality_barrier_solver_2": [
-    16,
+    6,
     59
   ],
   "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_matches_equality_barrier_solver_3": [
@@ -538,7 +538,7 @@
     53
   ],
   "test.solvers.test_primal_dual_solver.PrimalDualSolverWithEqualityTest.test_returns_pd_specific_diagnostics": [
-    17
+    7
   ],
   "test.solvers.test_scale_invariance.LargeEqualityDataTest.test_solves_00_barrier_seed_1_warm": [
     63
@@ -559,28 +559,28 @@
     68
   ],
   "test.solvers.test_scale_invariance.LargeEqualityDataTest.test_solves_06_primal_dual_seed_1_warm": [
-    21
+    7
   ],
   "test.solvers.test_scale_invariance.LargeEqualityDataTest.test_solves_07_primal_dual_seed_1_cold": [
-    22
+    10
   ],
   "test.solvers.test_scale_invariance.LargeEqualityDataTest.test_solves_08_primal_dual_seed_4_warm": [
-    21
+    6
   ],
   "test.solvers.test_scale_invariance.LargeEqualityDataTest.test_solves_09_primal_dual_seed_4_cold": [
-    22
+    8
   ],
   "test.solvers.test_scale_invariance.LargeEqualityDataTest.test_solves_10_primal_dual_seed_7_warm": [
-    20
+    6
   ],
   "test.solvers.test_scale_invariance.LargeEqualityDataTest.test_solves_11_primal_dual_seed_7_cold": [
-    21
+    7
   ],
   "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_a_fixed_scale_scales_the_gap_0_barrier": [
     43
   ],
   "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_a_fixed_scale_scales_the_gap_1_primal_dual": [
-    20
+    8
   ],
   "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_auto_solves_a_small_objective_0_barrier_seed_0": [
     49
@@ -592,13 +592,13 @@
     48
   ],
   "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_auto_solves_a_small_objective_3_primal_dual_seed_0": [
-    21
+    7
   ],
   "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_auto_solves_a_small_objective_4_primal_dual_seed_1": [
-    19
+    6
   ],
   "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_auto_solves_a_small_objective_5_primal_dual_seed_2": [
-    20
+    5
   ],
   "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_relative_solves_a_large_objective_00_barrier_1000_seed_0": [
     43
@@ -619,13 +619,13 @@
     46
   ],
   "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_relative_solves_a_large_objective_06_primal_dual_1000_seed_0": [
-    20
+    8
   ],
   "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_relative_solves_a_large_objective_07_primal_dual_1000_seed_1": [
-    23
+    7
   ],
   "test.solvers.test_scale_invariance.ObjectiveScaleTest.test_relative_solves_a_large_objective_08_primal_dual_1000_seed_2": [
-    21
+    7
   ],
   "test.solvers.test_solve_second_order_cone_program.SolveSecondOrderConeProgramTest.test_a_soc_diag_hint_agrees_with_runtime_detection": [
     15,
