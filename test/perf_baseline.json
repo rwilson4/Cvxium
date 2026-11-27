@@ -460,7 +460,7 @@
     22
   ],
   "test.solvers.test_primal_dual_solver.PdResultDiagnosticsAndPlotsTest.test_equality_residual_histories_populated": [
-    10
+    6
   ],
   "test.solvers.test_primal_dual_solver.PdResultDiagnosticsAndPlotsTest.test_residual_norm_histories_populated_no_equality": [
     7
@@ -470,7 +470,7 @@
     1
   ],
   "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_converges_on_near_singular_hessian_via_damping": [
-    8
+    12
   ],
   "test.solvers.test_primal_dual_solver.PrimalDualSolverTest.test_dual_value_is_sound_and_matches_barrier_0": [
     6,

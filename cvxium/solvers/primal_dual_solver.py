@@ -58,7 +58,6 @@ from ..problems.result import (
 )
 from ..solvers.barrier_solver import (
     _BarrierAdapter,
-    _gradient_balance_t0,
 )
 from ..solvers.line_search import (
     ResidualNormMerit,
@@ -103,6 +102,14 @@ if TYPE_CHECKING:
 # no-equality solver takes a Mehrotra predictor-corrector step on this
 # (optionally damped) factorization, the equality solver a single damped Newton
 # step with a residual line search.
+
+
+# The unit dual start is rescaled when its constraint force ‖G^T 1‖ and the
+# objective's ‖∇f0‖ differ by more than this factor either way (see
+# ``PrimalDualSolver._central_path_duals``). A heuristic threshold: a ratio of 0.04
+# (a one-dimensional test problem whose unit start is fine) must not trigger it, and
+# 1e-3 (an LP with its objective scaled by 1e3) must.
+_DUAL_SCALE_RANGE: float = 100.0
 
 
 class _StallWatch:
@@ -844,7 +851,10 @@ class PrimalDualSolver(Solver):
     ) -> SolveResult:
         """Run the Mehrotra predictor-corrector iteration (no equality constraints).
 
-        Starts from λ = 1 and zero damping. Each iteration evaluates the surrogate gap
+        Starts from zero damping and λ on the central path's direction at the
+        objective's scale when λ = 1 is the wrong scale (``_central_path_duals``;
+        λ = 1 in Phase I). Each iteration
+        evaluates the surrogate gap
         and the dual residual,
            η = -f^T λ,   r_dual = ∇f0(x) + G^T λ,
         sets t = μ m / η, and takes one damped Mehrotra predictor-corrector step
@@ -913,7 +923,13 @@ class PrimalDualSolver(Solver):
         lm = settings.primal_dual.damping
 
         x = x0.copy()
-        lmbda = np.ones(m)
+        # Start the duals at the objective's scale; in Phase I, whose objective is the
+        # unit-scaled slack, λ = 1 already is (see ``_run_equality``).
+        lmbda = (
+            np.ones(m)
+            if none_throws(problem.obj).feasibility_threshold is not None
+            else self._central_path_duals(problem, x)
+        )
         # Levenberg damping, carried across iterations; 0 = exact Newton step.
         damping = 0.0
 
@@ -1862,18 +1878,29 @@ class PrimalDualSolver(Solver):
 
     @staticmethod
     def _central_path_duals(
-        problem: Problem, x: npt.NDArray[np.float64], floor: float
+        problem: Problem, x: npt.NDArray[np.float64]
     ) -> npt.NDArray[np.float64]:
-        """Start the duals on the central path's direction at a gradient-balanced t.
+        """Choose starting duals: λ = 1, rescaled when that is the wrong scale.
 
-        Returns λ_i = -1 / (t0 f_i(x)), the multipliers of the barrier problem's
-        centering condition at x, with t0 from the barrier's gradient balance,
-           t0 = max(‖∇φ‖ / ‖∇f0‖, floor),   ∇φ = ∑ (-1 / f_i) ∇f_i = G^T (-1 / f),
-        so that G^T λ = ∇φ / t0 has the magnitude of ∇f0. The duals then scale with
-        the objective. The former start λ = 1 did not: on an objective scaled by 1e3
-        the dual residual began at about 5e3, and a Mehrotra step, which has no merit
-        function to pace it, spent most of its iterations escaping that start (or,
-        at 1e6, diverged).
+        The unit start λ = 1 is kept unless its constraint force ‖G^T 1‖ differs from
+        the objective's ‖∇f0‖ by more than a factor ``_DUAL_SCALE_RANGE``. Then λ = 1
+        is the wrong scale outright (on an objective scaled by 1e3 the method spent
+        most of its iterations escaping it, and at 1e6 it failed), and the start moves
+        to the barrier's centering direction λ̂ = -1 / f, with G^T λ̂ = ∇φ, at the scale
+        that matches magnitudes,
+           λ = (‖∇f0‖ / ‖∇φ‖) λ̂,   so that ‖G^T λ‖ = ‖∇f0‖.
+        Its products λ_i (-f_i) are all equal: the start is perfectly centered.
+
+        Two alternatives were tried and rejected:
+        - Rescaling whenever it helps, not only at a wrong scale: matching magnitudes
+          where ∇φ points along ∇f0 doubles the dual residual, and on a
+          one-dimensional curved test problem (ratio 0.04, inside the range) that
+          drove λ to zero before stationarity and stalled the solve.
+        - The least-squares scale κ* = -⟨∇f0, ∇φ⟩ / ‖∇φ‖^2, which minimizes the
+          starting dual residual: it is the magnitude scale times the cosine between
+          -∇f0 and ∇φ, and that cosine can be tiny (1e-5 on RadOptLIB rt-qp-0062),
+          where it collapses λ and the complementarity with it and the solve
+          stalls, while reducing the residual only by a factor sqrt(1 - cos^2).
 
         Parameters
         ----------
@@ -1881,8 +1908,6 @@ class PrimalDualSolver(Solver):
             The problem, with an objective.
          x : npt.NDArray[np.float64]
             Strictly inequality-feasible start, of length M.
-         floor : float
-            Lower bound on t0 (``OuterSettings.min_initial_barrier_parameter``).
 
         Returns
         -------
@@ -1891,9 +1916,23 @@ class PrimalDualSolver(Solver):
 
         """
         f = _PrimalDualKernel.concat_constraints(problem, x)
-        grad_phi = _PrimalDualKernel.g_transpose_times(problem, x, -1.0 / f)
-        t0 = _gradient_balance_t0(none_throws(problem.obj).gradient(x), grad_phi, floor)
-        lmbda: npt.NDArray[np.float64] = -1.0 / (t0 * f)
+        ones = np.ones(f.size)
+        norm_f0 = float(np.linalg.norm(none_throws(problem.obj).gradient(x)))
+        norm_ones = float(
+            np.linalg.norm(_PrimalDualKernel.g_transpose_times(problem, x, ones))
+        )
+        well_scaled = (
+            norm_f0 / _DUAL_SCALE_RANGE <= norm_ones <= norm_f0 * _DUAL_SCALE_RANGE
+        )
+        if well_scaled or not (norm_f0 > 0.0 and math.isfinite(norm_f0)):
+            return ones
+        direction = -1.0 / f
+        norm_phi = float(
+            np.linalg.norm(_PrimalDualKernel.g_transpose_times(problem, x, direction))
+        )
+        if not (norm_phi > 0.0 and math.isfinite(norm_phi)):
+            return ones
+        lmbda: npt.NDArray[np.float64] = (norm_f0 / norm_phi) * direction
         return lmbda
 
     def _run_equality(
@@ -1903,8 +1942,9 @@ class PrimalDualSolver(Solver):
     ) -> SolveResult:
         """Run the infeasible-start primal-dual iteration for a problem with equality.
 
-        Starts from ν = 0, zero damping, and λ on the central path's direction at the
-        objective's scale (``_central_path_duals``; λ = 1 in Phase I), and at each
+        Starts from ν = 0, zero damping, and λ = 1, moved to the central path's
+        direction at the objective's scale when λ = 1 is the wrong scale
+        (``_central_path_duals``; λ = 1 in Phase I), and at each
         iteration evaluates
            r_dual = ∇f0(x) + G^T λ + A^T ν,   r_pri = A x - b,   η = -f^T λ,
         sets t = μ m / η, and takes one Mehrotra predictor-corrector step
@@ -1985,9 +2025,7 @@ class PrimalDualSolver(Solver):
         lmbda = (
             np.ones(m)
             if none_throws(problem.obj).feasibility_threshold is not None
-            else self._central_path_duals(
-                problem, x, settings.outer.min_initial_barrier_parameter
-            )
+            else self._central_path_duals(problem, x)
         )
         # Levenberg damping, carried across iterations; 0 = exact Newton step.
         damping = 0.0
@@ -2895,7 +2933,8 @@ class PrimalDualSolver(Solver):
                 # scaled LPs of the test suite this cuts the iterations from 25 / 69 /
                 # 21 to 17 / 20 / 16. It is no substitute for a well-scaled start:
                 # from λ = 1 on those LPs the method still fails, which is why the
-                # duals start at the objective's scale (``_central_path_duals``). The fixed-t KKT residual is deliberately not the test: the
+                # duals start at the objective's scale (``_central_path_duals``).
+                # The fixed-t KKT residual is deliberately not the test: the
                 # corrector targets σ μ rather than 1 / t, so a good Mehrotra step
                 # routinely raises it (on RadOptLIB rt-qp-0062 that test rejected
                 # most steps and doubled the iteration count).

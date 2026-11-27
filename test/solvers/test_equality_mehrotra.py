@@ -3,8 +3,9 @@
 The equality path used to take one centering step with a residual line search per
 iteration. It now takes the infeasible-start Mehrotra step of the no-equality path,
 with three supports, each tested here:
-- the duals start on the central path's direction at the objective's scale, so a
-  badly scaled objective does not start far from dual feasibility;
+- the duals start at λ = 1, moved onto the central path's direction at the
+  objective's magnitude when λ = 1 is the wrong scale, so a badly scaled objective
+  does not start far from dual feasibility;
 - each direction is refined once on the full (unreduced) KKT system, whose
   elimination of Δλ divides by f and so amplifies error on near-active rows;
 - a step that would raise the surrogate gap falls back to the centering step with
@@ -18,7 +19,7 @@ import unittest
 
 import numpy as np
 
-from cvxium.linalg.systems import DenseSystem
+from cvxium.linalg.systems import DenseSystem, DiagonalSystem
 from cvxium.problems.linear_constraints import (
     BoundsConstraintLayer,
     EqualityConstraintLayer,
@@ -26,7 +27,11 @@ from cvxium.problems.linear_constraints import (
 )
 from cvxium.problems.objective import LinearObjective, QuadraticObjective
 from cvxium.problems.problem import Problem
+from cvxium.problems.quadratic_constraints import SquaredNormConstraintLayer
+from cvxium.problems.result import SolveStatus
 from cvxium.solvers.primal_dual_solver import PrimalDualSolver, _PrimalDualKernel
+from cvxium.solvers.settings import OptimizationSettings, OuterSettings
+from test.solvers.test_scale_invariance import _scaled_lp
 
 
 def _equality_lp(c_scale: float) -> tuple[Problem, np.ndarray]:
@@ -46,23 +51,50 @@ def _equality_lp(c_scale: float) -> tuple[Problem, np.ndarray]:
 
 
 class CentralPathDualsTest(unittest.TestCase):
-    """The starting duals scale with the objective."""
+    """The starting duals scale with the objective, or fall back to λ = 1."""
 
-    def test_duals_scale_linearly_with_the_objective(self) -> None:
-        base_problem, x0 = _equality_lp(1.0)
-        scaled_problem, _ = _equality_lp(1e4)
-        floor = 1e-12  # keep the floor out of the way
-        base = PrimalDualSolver._central_path_duals(base_problem, x0, floor)
-        scaled = PrimalDualSolver._central_path_duals(scaled_problem, x0, floor)
+    def test_duals_scale_linearly_with_a_large_objective(self) -> None:
+        base_problem, x0, _ = _scaled_lp(0, c_scale=1e3)
+        scaled_problem, _, _ = _scaled_lp(0, c_scale=1e5)
+        base = PrimalDualSolver._central_path_duals(base_problem, x0)
+        scaled = PrimalDualSolver._central_path_duals(scaled_problem, x0)
         self.assertTrue(np.all(base > 0.0))
-        np.testing.assert_allclose(scaled, 1e4 * base, rtol=1e-10)
+        self.assertFalse(np.allclose(base, 1.0))  # the scaled start was chosen
+        np.testing.assert_allclose(scaled, 100.0 * base, rtol=1e-10)
 
-    def test_duals_balance_the_objective_gradient(self) -> None:
-        problem, x0 = _equality_lp(37.0)
-        lmbda = PrimalDualSolver._central_path_duals(problem, x0, 1e-12)
-        gtl = _PrimalDualKernel.g_transpose_times(problem, x0, lmbda)
+    def test_a_well_scaled_problem_keeps_unit_duals(self) -> None:
+        problem, x0 = _equality_lp(1.0)
+        lmbda = PrimalDualSolver._central_path_duals(problem, x0)
+        np.testing.assert_array_equal(lmbda, np.ones(lmbda.size))
+
+    def test_keeps_unit_duals_when_they_are_merely_small(self) -> None:
+        # minimize x^2 / 2 - 10 x s.t. x^2 <= 1 from x = -0.2: ‖G^T 1‖ / ‖∇f0‖ is 0.04,
+        # inside the range. Rescaling here (∇φ points along ∇f0) would double the
+        # dual residual and stall the solve (test_mpc_damping_returns_to_zero).
+        problem = Problem(
+            obj=QuadraticObjective(
+                c=np.array([-10.0]), hessian_contribution=DiagonalSystem(np.ones(1))
+            ),
+            ineq=[SquaredNormConstraintLayer(phi=1.0, dimension=1)],
+        )
+        lmbda = PrimalDualSolver._central_path_duals(problem, np.array([-0.2]))
+        np.testing.assert_array_equal(lmbda, np.ones(1))
+
+    def test_matches_magnitudes_on_the_centering_direction(self) -> None:
+        # At c x 1e6 the unit start exerts a millionth of the objective's force.
+        problem, x0 = _equality_lp(1e6)
+        lmbda = PrimalDualSolver._central_path_duals(problem, x0)
+        f = _PrimalDualKernel.concat_constraints(problem, x0)
         grad = problem.obj.gradient(x0)  # type: ignore[union-attr]
-        self.assertAlmostEqual(np.linalg.norm(gtl), np.linalg.norm(grad), places=8)
+        gtl = _PrimalDualKernel.g_transpose_times(problem, x0, lmbda)
+        ratio = float(np.linalg.norm(gtl) / np.linalg.norm(grad))
+        self.assertAlmostEqual(ratio, 1.0, places=10)
+        # ... along the central-path direction λ̂ = -1 / f.
+        np.testing.assert_allclose(lmbda * (-f), (lmbda * (-f))[0], rtol=1e-12)
+        result = PrimalDualSolver(
+            OptimizationSettings(outer=OuterSettings(objective_scale="relative"))
+        ).solve(problem, x0)
+        self.assertIs(result.status, SolveStatus.OPTIMAL, result.message)
 
 
 class FullSystemRefinementTest(unittest.TestCase):
