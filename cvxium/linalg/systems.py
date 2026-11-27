@@ -41,6 +41,7 @@ from ..linalg.numerical_helpers import (
     _EPS,
     _apply_rank_one_update,
     _apply_rank_p_update,
+    _diagnose_nonfinite,
     _prepare_rank_one_update,
     _prepare_rank_p_update,
     _RankOneUpdatePrep,
@@ -2528,6 +2529,389 @@ class ArrowSystem(MatrixSystem):
             f"Cannot combine ArrowSystem with {type(other).__name__}; an arrow "
             "absorbs only a matching arrow, a diagonal, or a block-diagonal aligned "
             "with its interior/corner split."
+        )
+
+
+class SparseArrowSystem(MatrixSystem):
+    """Bordered (arrow) matrix whose border is sparse and whose corner may be wide.
+
+    The matrix is
+             _            _
+       H =  |  A11    A12  |
+            |_ A12^T  A22 _|
+    with A11 any ``MatrixSystem`` of order M, A12 an M × p ``scipy.sparse`` border, and
+    A22 a dense p × p corner. It is the arrow of ``ArrowSystem`` for a border too wide to
+    store densely: there, the general kernel forms the dense M × p block A11^{-1} A12
+    and the product A12^T (A11^{-1} A12), at 2 M p^2 flops; here the border stays
+    sparse, and the Schur complement
+       S = A22 - A12^T A11^{-1} A12
+    is formed in closed form when A11 is diagonal or diagonal plus a low-rank term:
+       diagonal D:            A12^T A11^{-1} A12 = A12^T D^{-1} A12,
+       D + K diag(d) K^T:     A12^T A11^{-1} A12 = A12^T D^{-1} A12 - W^T C^{-1} W,
+    with W = K^T D^{-1} A12 (r × p) and C = diag(1 / d) + K^T D^{-1} K (r × r). Both
+    cost a sparse product plus O(M r p + r^2 p), with no M × p dense intermediate. Any
+    other A11 falls back to solving it against the border's columns densely. Each solve
+    then costs two A11 solves, two sparse border products and one triangular solve
+    with S, whose Cholesky factor is computed once and cached.
+
+    This is the Hessian shape of a problem whose many "core" variables couple to each
+    other only diagonally (or through a few rows) and to a modest block of p "border"
+    variables only sparsely, while the border block itself is dense; epigraph slacks
+    of penalties on a dense linear map (one slack per row, a few shared budget rows)
+    are the typical case. The cubic cost then falls on p alone.
+
+    The whole matrix is assumed positive definite. The core may be singular on its
+    own (a ``ZeroSystem``, say, for an objective that curves only the border
+    variables) as long as it is never solved alone; ``plus`` fills it in.
+
+    Parameters
+    ----------
+     upper_left : MatrixSystem
+        The block A11, of order M.
+     border : scipy.sparse.spmatrix | scipy.sparse.sparray | npt.NDArray[np.float64]
+        The block A12, of shape (M, p); converted to CSR. The constructor raises
+        ``ValueError`` when it does not have M rows.
+     corner : npt.NDArray[np.float64]
+        The block A22, of shape (p, p). The constructor raises ``ValueError`` when its
+        shape does not match the border.
+
+    """
+
+    def __init__(
+        self,
+        upper_left: MatrixSystem,
+        border: Any,
+        corner: npt.NDArray[np.float64],
+    ) -> None:
+        M = upper_left.dimension
+        border_csr: Any = scipy.sparse.csr_array(border, dtype=np.float64)
+        if border_csr.ndim != 2 or border_csr.shape[0] != M:
+            raise ValueError(
+                f"border must have {M} rows to match the upper-left MatrixSystem."
+            )
+        p = int(border_csr.shape[1])
+        corner_arr = np.asarray(corner, dtype=np.float64)
+        if corner_arr.shape != (p, p):
+            raise ValueError(
+                f"corner must be ({p}, {p}) to match the border's {p} column(s)."
+            )
+        self._upper_left = upper_left
+        self._border: Any = border_csr
+        self._corner = corner_arr
+        self._p = p
+        # Lazily-cached Cholesky factor of the Schur complement, reused across the
+        # solves of one Newton step. Safe because the blocks are immutable.
+        self._schur_factor: tuple[npt.NDArray[np.float64], bool] | None = None
+
+    @property
+    def dimension(self) -> int:
+        """Return the order of the matrix.
+
+        Returns
+        -------
+         n : int
+            M + p.
+
+        """
+        return self._upper_left.dimension + self._p
+
+    @property
+    def upper_left(self) -> MatrixSystem:
+        """Return the block A11.
+
+        Returns
+        -------
+         upper_left : MatrixSystem
+            The block A11, of order M.
+
+        """
+        return self._upper_left
+
+    @property
+    def border(self) -> Any:
+        """Return the sparse border block A12.
+
+        Returns
+        -------
+         border : scipy.sparse.csr_array
+            The block A12, of shape (M, p).
+
+        """
+        return self._border
+
+    @property
+    def corner(self) -> npt.NDArray[np.float64]:
+        """Return the corner block A22.
+
+        Returns
+        -------
+         corner : npt.NDArray[np.float64]
+            The block A22, of shape (p, p).
+
+        """
+        return self._corner
+
+    def _border_quadratic_form(self) -> npt.NDArray[np.float64]:
+        """Compute A12^T A11^{-1} A12 as a dense p × p matrix.
+
+        Returns
+        -------
+         G : npt.NDArray[np.float64]
+            The symmetric p × p product.
+
+        Raises
+        ------
+         NewtonStepError
+            When a diagonal core has a nonpositive entry, or the low-rank capacitance
+            matrix is singular; propagated from A11's ``solve`` on the fallback path.
+
+        """
+        A12 = self._border
+        core = self._upper_left
+        if isinstance(core, DiagonalSystem):
+            return self._diagonal_quadratic_form(core, A12)
+        if (
+            isinstance(core, LowRankUpdatedSystem)
+            and isinstance(core._base, DiagonalSystem)
+            and np.all(core._base.eta > 0)
+        ):
+            base = core._base
+            kappa = core._kappa
+            d = np.ones(kappa.shape[1]) if core._d is None else core._d
+            gram = self._diagonal_quadratic_form(base, A12)
+            Dinv_kappa = kappa * base.eta_inverse[:, np.newaxis]
+            W = np.asarray(A12.T @ Dinv_kappa).T  # r × p
+            with np.errstate(divide="ignore"):
+                C = np.diag(1.0 / d) + kappa.T @ Dinv_kappa
+            if not np.all(np.isfinite(C)):
+                raise NewtonStepError(_diagnose_nonfinite(C, "capacitance matrix"))
+            try:
+                CinvW = linalg.solve(C, W, assume_a="sym")
+            except np.linalg.LinAlgError:
+                raise NewtonStepError(
+                    "Low-rank capacitance matrix is singular."
+                ) from None
+            result: npt.NDArray[np.float64] = gram - W.T @ CinvW
+            return result
+        # General core: solve it against the border densely, one column block at a
+        # time so the dense intermediate stays M × (block width).
+        G = np.empty((self._p, self._p))
+        width = 256
+        for start in range(0, self._p, width):
+            stop = min(start + width, self._p)
+            Y = core.solve(A12[:, start:stop].toarray())
+            G[:, start:stop] = np.asarray(A12.T @ Y)
+        return G
+
+    @staticmethod
+    def _diagonal_quadratic_form(
+        core: DiagonalSystem, A12: Any
+    ) -> npt.NDArray[np.float64]:
+        """Compute A12^T D^{-1} A12 for a positive diagonal D, keeping A12 sparse.
+
+        Parameters
+        ----------
+         core : DiagonalSystem
+            The diagonal D, of order M.
+         A12 : scipy.sparse.csr_array
+            The border, of shape (M, p).
+
+        Returns
+        -------
+         G : npt.NDArray[np.float64]
+            The p × p product.
+
+        Raises
+        ------
+         NewtonStepError
+            When some diagonal entry is not positive.
+
+        """
+        if not np.all(core.eta > 0):
+            raise NewtonStepError(
+                "SparseArrowSystem core diagonal is not positive definite."
+            )
+        scaled = scipy.sparse.diags_array(core.eta_inverse) @ A12
+        return np.asarray((A12.T @ scaled).toarray())
+
+    def _ensure_schur_factor(self) -> tuple[npt.NDArray[np.float64], bool]:
+        """Factor the Schur complement S = A22 - A12^T A11^{-1} A12, once.
+
+        Returns
+        -------
+         factor : tuple[npt.NDArray[np.float64], bool]
+            The ``cho_factor`` pair for S.
+
+        Raises
+        ------
+         NewtonStepError
+            When S is not positive definite or not finite, so H is not positive
+            definite; propagated from ``_border_quadratic_form``.
+
+        """
+        if self._schur_factor is None:
+            S = self._corner - self._border_quadratic_form()
+            # Remove the rounding skew of the product before Cholesky, as in
+            # ``solve_with_schur``.
+            S = 0.5 * (S + S.T)
+            if not np.all(np.isfinite(S)):
+                raise NewtonStepError(_diagnose_nonfinite(S, "Schur complement"))
+            try:
+                self._schur_factor = linalg.cho_factor(S, lower=True)
+            except np.linalg.LinAlgError:
+                raise NewtonStepError("H is not positive definite") from None
+        return self._schur_factor
+
+    def solve(self, b: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Solve H x = b through the cached Schur complement on the border.
+
+        With b = (b1, b2) split at M,
+           x2 = S^{-1} (b2 - A12^T A11^{-1} b1),   x1 = A11^{-1} (b1 - A12 x2).
+
+        Parameters
+        ----------
+         b : npt.NDArray[np.float64]
+            Right-hand side, a vector of length M + p or a matrix with M + p rows.
+
+        Returns
+        -------
+         x : npt.NDArray[np.float64]
+            The solution, of the same shape as ``b``.
+
+        Raises
+        ------
+         NewtonStepError
+            When H is not positive definite; propagated from the core's ``solve``.
+         ValueError
+            When ``b`` does not have M + p rows.
+
+        """
+        M = self._upper_left.dimension
+        if b.shape[0] != M + self._p:
+            raise ValueError(
+                f"Dimension mismatch: {b.shape[0]=:}; expected {M + self._p}."
+            )
+        factor = self._ensure_schur_factor()
+        b1, b2 = b[:M], b[M:]
+        y1 = self._upper_left.solve(b1)
+        x2 = linalg.cho_solve(factor, b2 - np.asarray(self._border.T @ y1))
+        x1 = self._upper_left.solve(b1 - np.asarray(self._border @ x2))
+        result: npt.NDArray[np.float64] = np.concatenate([x1, x2], axis=0)
+        return result
+
+    def multiply(self, y: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Compute H y block by block.
+
+        Parameters
+        ----------
+         y : npt.NDArray[np.float64]
+            A vector of length M + p or a matrix with M + p rows.
+
+        Returns
+        -------
+         Hy : npt.NDArray[np.float64]
+            The product, of the same shape as ``y``.
+
+        """
+        M = self._upper_left.dimension
+        y1, y2 = y[:M], y[M:]
+        top = np.asarray(self._upper_left.multiply(y1)) + np.asarray(self._border @ y2)
+        bottom = np.asarray(self._border.T @ y1) + self._corner @ y2
+        result: npt.NDArray[np.float64] = np.concatenate([top, bottom], axis=0)
+        return result
+
+    def scaled(self, t: float) -> MatrixSystem:
+        """Return t H, scaling the upper-left block, border and corner.
+
+        Parameters
+        ----------
+         t : float
+            Nonnegative scale factor.
+
+        Returns
+        -------
+         system : MatrixSystem
+            A ``SparseArrowSystem`` of the scaled blocks.
+
+        """
+        return SparseArrowSystem(
+            self._upper_left.scaled(t), t * self._border, t * self._corner
+        )
+
+    def is_positive_definite(self) -> bool:
+        """Check positive definiteness through the core and the Schur complement.
+
+        H is positive definite exactly when A11 and S are, so this never densifies H.
+
+        Returns
+        -------
+         is_pd : bool
+            True when A11 is positive definite and S has a Cholesky factor.
+
+        """
+        if not self._upper_left.is_positive_definite():
+            return False
+        try:
+            self._ensure_schur_factor()
+        except NewtonStepError:
+            return False
+        return True
+
+    def _absorb(self, other: MatrixSystem) -> MatrixSystem:
+        """Sum with a system that keeps the sparse arrow pattern on the same split.
+
+        Another ``SparseArrowSystem`` or an ``ArrowSystem`` on the same partition adds
+        block by block (an ``ArrowSystem``'s dense border is added to the sparse one,
+        which stays sparse in type). A ``DiagonalSystem`` folds its first M entries
+        into A11 and its last p into the corner. Anything else raises.
+
+        Parameters
+        ----------
+         other : MatrixSystem
+            The base to absorb.
+
+        Returns
+        -------
+         system : MatrixSystem
+            The ``SparseArrowSystem`` sum.
+
+        Raises
+        ------
+         IncompatibleStructureError
+            When ``other`` has a different partition or an unabsorbable shape; or,
+            propagated from A11's ``plus``, when the cores cannot be summed.
+
+        """
+        M = self._upper_left.dimension
+        p = self._p
+        if isinstance(other, SparseArrowSystem | ArrowSystem):
+            if other.upper_left.dimension != M or other.corner.shape[0] != p:
+                raise IncompatibleStructureError(
+                    "Cannot combine arrow systems with different partitions; the "
+                    "upper-left dimension and border width must match."
+                )
+            other_border: Any = (
+                other.border
+                if isinstance(other, SparseArrowSystem)
+                else scipy.sparse.csr_array(other.border)
+            )
+            return SparseArrowSystem(
+                self._upper_left.plus(other.upper_left),
+                self._border + other_border,
+                self._corner + other.corner,
+            )
+        if isinstance(other, DiagonalSystem):
+            eta = other.eta
+            eta_inverse = other._eta_inverse
+            interior = self._upper_left.plus(
+                DiagonalSystem(eta[:M], eta_inverse=eta_inverse[:M])
+            )
+            return SparseArrowSystem(
+                interior, self._border, self._corner + np.diag(eta[M:])
+            )
+        raise IncompatibleStructureError(
+            f"Cannot combine SparseArrowSystem with {type(other).__name__}; a sparse "
+            "arrow absorbs only an arrow on the same split or a diagonal."
         )
 
 

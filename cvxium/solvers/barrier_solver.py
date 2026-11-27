@@ -63,6 +63,7 @@ from ..solvers.solver import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from ..linalg.systems import MatrixSystem
     from ..problems.objective import ObjectivePoint
     from ..problems.problem import (
         OnInfeasible,
@@ -294,6 +295,10 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         )
         self._problem = problem
         self._searched_recession = False
+        # The last H_ft assembled, keyed on its exact (x, t); see _barrier_hessian.
+        self._hessian_cache: (
+            tuple[npt.NDArray[np.float64], float, MatrixSystem] | None
+        ) = None
         # An `equality` collaborator only makes sense when the Problem actually carries
         # an equality layer; otherwise the equality-aware methods would thread a real A
         # while ``problem.eq`` reads as absent -- a latent inconsistency that would
@@ -901,9 +906,38 @@ class _BarrierAdapter(InteriorPointMethodSolver):
             ``Problem.build_hessian_system`` without forming H_ft.
 
         """
+        return self._barrier_hessian(x, t).multiply(y)
+
+    def _barrier_hessian(self, x: npt.NDArray[np.float64], t: float) -> MatrixSystem:
+        """Assemble H_ft at (x, t), reusing the last assembly at the same point.
+
+        A centering iteration needs H_ft twice at the same iterate: to solve for the
+        Newton step and, in the default Hessian form of the decrement, to multiply
+        Δx^T H_ft Δx. Assembly can cost as much as the solve (forming G^T D G for a
+        many-row layer, say), so the system from the step is kept and handed back when
+        the next request names the same x and t exactly. Systems are immutable, so
+        reuse is safe; any other (x, t) rebuilds and replaces the entry.
+
+        Parameters
+        ----------
+         x : npt.NDArray[np.float64]
+            Point at which the barrier-weighted Hessian is assembled.
+         t : float
+            Current barrier parameter.
+
+        Returns
+        -------
+         system : MatrixSystem
+            The structured H_ft from ``Problem.build_hessian_system``.
+
+        """
+        cached = self._hessian_cache
+        if cached is not None and cached[1] == t and np.array_equal(cached[0], x):
+            return cached[2]
         lmbda = -1.0 / self.constraints(x)
         system = self._problem.build_hessian_system(x, self._point(x), t, lmbda)
-        return system.multiply(y)
+        self._hessian_cache = (np.array(x, dtype=np.float64, copy=True), t, system)
+        return system
 
     def btls_keep_feasible(
         self,
@@ -1089,8 +1123,7 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         The cost is one product A x, O(p M), against the solve's O(p^2 M).
 
         """
-        lmbda = -1.0 / self.constraints(x)
-        system = self._problem.build_hessian_system(x, self._point(x), t, lmbda)
+        system = self._barrier_hessian(x, t)
         if self._equality is None:
             delta_x = system.solve(-self.gradient_barrier(x, t))
             # No equality constraints => empty nu vector.

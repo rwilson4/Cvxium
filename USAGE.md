@@ -245,6 +245,7 @@ layer must declare its curvature even when it is zero.
 | `BlockDiagonalSystem`  | blocks, each any `MatrixSystem`                     | sum of the block costs           |
 | `PermutedSystem`       | another system under a permutation                  | the inner system's cost          |
 | `ArrowSystem`          | a core system plus a dense border of k rows/columns | k + 1 core solves, plus O(k^3)   |
+| `SparseArrowSystem`    | a core system plus a sparse border, dense k × k corner | sparse product, 2 core solves, O(k^3) |
 | `.low_rank_update(κ, d)` | any system plus κ diag(d) κ^T, rank r            | base solves plus O(M r^2 + r^3)  |
 
 A low-rank update is a method, not a constructor: any system can carry

@@ -39,6 +39,7 @@ from ..linalg.systems import (
     SaddleFactory,
     SaddleSystem,
     SchurComplementSaddleFactory,
+    SparseArrowSystem,
     ZeroSystem,
 )
 from ..problems.constraint_layers import (
@@ -2128,3 +2129,180 @@ class ArrowLinearInequalityLayer(LinearInequalityConstraintLayer):
         np.fill_diagonal(corner, np.diagonal(corner_upper))  # undo double-count
         corner[np.diag_indices(K)] += ridge
         return ArrowSystem(core, border=border, corner=corner)
+
+
+class SparseArrowLinearInequalityLayer(LinearInequalityConstraintLayer):
+    """Linear inequalities cl ≤ A w ≤ cu with a sparse-arrow barrier Hessian.
+
+    The columns of A split in two: the first M (``core_dimension``) are the core and the
+    trailing K the border, for n = M + K columns in all. The barrier Hessian
+    A^T diag(d) A, with d the per-row barrier weights, is then
+            _         _
+       H = |  C     B  |
+           |_ B^T   E _|
+    with C = A_c^T diag(d) A_c on the core columns, B = A_c^T diag(d) A_b, and
+    E = A_b^T diag(d) A_b on the border columns. The layer reports it as a
+    ``SparseArrowSystem``:
+    - Core block: a row with at most one core nonzero adds only to the diagonal of C,
+      and a row with two or more is a term of a low-rank update, so
+         C = diag(c) + K diag(d_heavy) K^T,
+      with K the transposed core part of those "heavy" rows. This is exact for any A
+      and cheap when the heavy rows are few.
+    - Border block: B stays sparse (one entry per core nonzero times border nonzero
+      of a row).
+    - Corner block: E is formed densely, K × K.
+    A Newton step then costs a sparse product, a dense K × K Cholesky factorization
+    and O(M) work per solve, so the cubic cost falls on the border alone.
+
+    The typical use is a penalty or dose-limit model over a dense linear map: the
+    border variables are the "physical" decisions x (which every row touches), and
+    each core variable is an epigraph slack t_j entering one row g_j^T x - t_j ≤ h_j,
+    plus a few budget rows over many slacks (the heavy rows). Order the columns so the
+    slacks come first, for example by permuting the problem's variables.
+
+    A core column touched by no light row gets a zero diagonal entry; another layer
+    (bounds, typically) must supply curvature there before the Hessian is solved.
+
+    Parameters
+    ----------
+     A : npt.NDArray[np.float64] | scipy.sparse.spmatrix | scipy.sparse.sparray
+        Constraint matrix, of shape (m, n), dense or sparse; converted to CSR. Its first
+        ``core_dimension`` columns are the core and its trailing K columns the border.
+     cl : npt.NDArray[np.float64] | None
+        Lower bound on each row, as in ``LinearInequalityConstraintLayer``.
+     cu : npt.NDArray[np.float64] | None
+        Upper bound on each row, as in ``LinearInequalityConstraintLayer``.
+     core_dimension : int
+        Order M of the core. Must satisfy 0 < M < n, or the constructor raises
+        ``ValueError``.
+
+    """
+
+    def __init__(
+        self,
+        A: npt.NDArray[np.float64] | scipy.sparse.spmatrix | scipy.sparse.sparray,
+        cl: npt.NDArray[np.float64] | None = None,
+        cu: npt.NDArray[np.float64] | None = None,
+        *,
+        core_dimension: int,
+    ) -> None:
+        A_csr: Any = scipy.sparse.csr_array(A, dtype=np.float64)
+        super().__init__(A_csr, cl=cl, cu=cu)
+        n = self._dimension
+        if not 0 < core_dimension < n:
+            raise ValueError(
+                f"core_dimension must satisfy 0 < M < n; got M={core_dimension}, n={n}."
+            )
+        M = int(core_dimension)
+        self._M: int = M
+        self._m: int = int(A_csr.shape[0])
+        A_core: Any = A_csr[:, :M].tocsr()
+        self._A_border: Any = A_csr[:, M:].tocsc()
+        self._A_core_csc: Any = A_core.tocsc()
+        core_nnz = np.diff(A_core.indptr)
+        self._light_rows: npt.NDArray[np.intp] = np.flatnonzero(core_nnz <= 1)
+        self._heavy_rows: npt.NDArray[np.intp] = np.flatnonzero(core_nnz > 1)
+        # Squared core entries of the light rows: their weighted column sums give the
+        # core diagonal, since such a row has at most one core nonzero.
+        light: Any = A_core[self._light_rows]
+        self._light_squares: Any = light.multiply(light).T.tocsr()  # M × m_light
+        self._heavy_factor: npt.NDArray[np.float64] = np.asarray(
+            A_core[self._heavy_rows].T.toarray(), dtype=np.float64
+        )  # M × r
+
+    @property
+    def core_dimension(self) -> int:
+        """Return the order M of the core block.
+
+        Returns
+        -------
+         M : int
+            The number of leading (core) columns.
+
+        """
+        return self._M
+
+    @property
+    def num_heavy_rows(self) -> int:
+        """Return the number of rows with two or more core nonzeros.
+
+        Returns
+        -------
+         r : int
+            The rank of the core's low-rank update.
+
+        """
+        return int(self._heavy_rows.size)
+
+    def _row_weights(
+        self,
+        w: npt.NDArray[np.float64],
+        lmbda: npt.NDArray[np.float64],
+        shift: float,
+    ) -> npt.NDArray[np.float64]:
+        """Compute the per-row barrier weight, summing a two-sided row's two sides.
+
+        Parameters
+        ----------
+         w : npt.NDArray[np.float64]
+            Current iterate, of length n.
+         lmbda : npt.NDArray[np.float64]
+            Per-constraint weights λ, of length ``num_cu`` + ``num_cl``.
+         shift : float
+            Relaxation applied to the constraint values, as in ``constraints``.
+
+        Returns
+        -------
+         d : npt.NDArray[np.float64]
+            The weight of each row of A, of length m.
+
+        """
+        wgt = -lmbda / self.constraints(w, shift)
+        row_weight = np.zeros(self._m, dtype=np.float64)
+        np.add.at(row_weight, self._cu_idx, wgt[: self.num_cu])
+        np.add.at(row_weight, self._cl_idx, wgt[self.num_cu :])
+        return row_weight
+
+    def hessian_contribution(
+        self,
+        w: npt.NDArray[np.float64],
+        lmbda: npt.NDArray[np.float64] | None = None,
+        shift: float = 0.0,
+    ) -> MatrixSystem:
+        """Assemble A^T diag(-λ / f) A as a ``SparseArrowSystem``.
+
+        Parameters
+        ----------
+         w : npt.NDArray[np.float64]
+            Current iterate, of length n.
+         lmbda : npt.NDArray[np.float64] | None
+            Per-constraint weights λ, in the layer's constraint order. Required; the
+            ``None`` default mirrors ``ConstraintLayer.hessian_contribution``.
+         shift : float
+            Relaxation applied to the constraint values, as in ``constraints``.
+
+        Returns
+        -------
+         system : MatrixSystem
+            A ``SparseArrowSystem`` whose core is a ``DiagonalSystem``, carrying a
+            low-rank update when the layer has heavy rows.
+
+        Raises
+        ------
+         ValueError
+            When ``lmbda`` is ``None``.
+
+        """
+        if lmbda is None:
+            raise ValueError(
+                "hessian_contribution requires per-constraint weights `lmbda`."
+            )
+        d = self._row_weights(w, lmbda, shift)
+        core_diagonal = np.asarray(self._light_squares @ d[self._light_rows])
+        core: MatrixSystem = DiagonalSystem(core_diagonal)
+        if self._heavy_rows.size:
+            core = core.low_rank_update(self._heavy_factor, d[self._heavy_rows])
+        weighted_border: Any = scipy.sparse.diags_array(d) @ self._A_border
+        border = self._A_core_csc.T @ weighted_border
+        corner = np.asarray((self._A_border.T @ weighted_border).toarray())
+        return SparseArrowSystem(core, border, corner)

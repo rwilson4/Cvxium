@@ -56,10 +56,10 @@ How structure is exploited
 --------------------------
 Each component reports its second derivatives as a ``MatrixSystem``, a structured
 matrix that can solve and multiply itself: ``DiagonalSystem``, ``BandedSystem``,
-``DenseSystem``, ``BlockDiagonalSystem``, ``PermutedSystem``, ``ArrowSystem``, any of
-them carrying low-rank updates (``MatrixSystem.low_rank_update``). The objective reports
-∇^2 f0 through ``hessian_contribution``; each layer reports its weighted curvature
-atoms
+``DenseSystem``, ``BlockDiagonalSystem``, ``PermutedSystem``, ``ArrowSystem``,
+``SparseArrowSystem``, any of them carrying low-rank updates
+(``MatrixSystem.low_rank_update``). The objective reports ∇^2 f0 through
+``hessian_contribution``; each layer reports its weighted curvature atoms
    ∑ λ_i C_i,   C_i = ∇^2 fi - (1 / fi) ∇fi ∇fi^T,
 through ``hessian_contribution`` and its curvature ∑ λ_i ∇^2 fi alone through
 ``hessian_curvature``. ``Problem.build_hessian_system`` sums the contributions with
@@ -176,6 +176,7 @@ from .linalg.systems import (
     SaddleSystem,
     SchurComplementSaddleFactory,
     SchurComplementSaddleSystem,
+    SparseArrowSystem,
     SparseSaddleFactory,
     SparseSaddleSystem,
     ZeroSystem,
@@ -198,6 +199,7 @@ from .problems.linear_constraints import (
     EqualityConstraintLayer,
     ImbalanceConstraintLayer,
     LinearInequalityConstraintLayer,
+    SparseArrowLinearInequalityLayer,
 )
 from .problems.objective import (
     LiftedObjective,
@@ -410,6 +412,8 @@ __all__ = [
     "SolveStatus",
     "Solver",
     "SolverDiagnostics",
+    "SparseArrowLinearInequalityLayer",
+    "SparseArrowSystem",
     "SparseSaddleFactory",
     "SparseSaddleSystem",
     "SquaredNormConstraintLayer",
