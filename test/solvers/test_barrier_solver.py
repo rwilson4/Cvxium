@@ -3,7 +3,7 @@
 import unittest
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import patch
 
 import numpy as np
@@ -1831,6 +1831,8 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
         assert result.status == 1
         assert "stalled" in result.message
         assert result.nits == 8
+        # Below tolerance_soft: an ordinary stall, which does not end the schedule.
+        assert not result.floor_stall
         # Every iter is in the quadratic phase; BTLS must never be called.
         assert btls_calls == 0
         # Bail returns the best (iter-3) iterate's suboptimality.
@@ -2049,6 +2051,108 @@ class CenteringStepQuadraticPhaseUnitStepTest(unittest.TestCase):
         assert result.nits == 4
         np.testing.assert_allclose(
             min(result.suboptimalities), 1e-6, rtol=1e-6, atol=1e-12
+        )
+
+    @parameterized.expand([("last_step", True), ("earlier_step", False)])
+    def test_a_stall_above_tolerance_soft_is_a_floor_stall(
+        self, _name: str, last_step: bool
+    ) -> None:
+        """Issue #59: a decrement flat above ``tolerance_soft`` stops, flagged.
+
+        At t = 1e10 on an objective of 1e4, the rounding of ``t * f0`` held the
+        suboptimality at 3.4e-4 = 0.5 * 0.026^2, inside the quadratic phase but
+        above ``tolerance_soft`` (1e-4), and the loop ground on toward
+        ``max_iterations`` (1000, about an hour there).
+        """
+        problem = CenteringStepQuadraticPhaseUnitStepTest._qp_problem()
+        settings = OptimizationSettings(
+            inner=InnerSettings(
+                tolerance=1e-6, tolerance_soft=1e-4, max_iterations=1000
+            )
+        )
+        adapter = _BarrierAdapter(problem=problem, settings=settings)
+        calls = {"n": 0}
+
+        def fake_newton_step(
+            x: npt.NDArray[np.float64], t: float
+        ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+            return np.zeros_like(x), np.zeros(0)
+
+        def flat_decrement_squared(
+            x: npt.NDArray[np.float64],
+            t: float,
+            delta_x: npt.NDArray[np.float64],
+            nu_hat: npt.NDArray[np.float64] | None = None,
+        ) -> float:
+            calls["n"] += 1
+            return 6.8e-4
+
+        with (
+            patch.object(adapter, "calculate_newton_step", new=fake_newton_step),
+            patch.object(
+                adapter, "newton_decrement_squared", new=flat_decrement_squared
+            ),
+        ):
+            result = adapter.centering_step(x0=np.ones(3), t=1e10, last_step=last_step)
+
+        assert result.status == 1
+        assert result.floor_stall
+        assert "above tolerance_soft" in result.message
+        # The first iterate is the best; stall_patience (5) flat ones follow.
+        assert result.nits == 6
+        assert calls["n"] == 6
+
+    @parameterized.expand([("from_the_last_step", 1), ("three_steps_early", 3)])
+    def test_a_floor_stall_ends_the_schedule_with_the_best_bounds(
+        self, _name: str, steps_from_end: int
+    ) -> None:
+        """End to end: the solve stops at the floor and reports what it certified.
+
+        The decrement is held at the issue's floor from some t onward, as the
+        rounding of ``t * f0`` does at the top of a long schedule. The floored
+        step stops after ``stall_patience`` flat iterations, no larger t is
+        tried, and the result is finalized from the best bounds gathered.
+        """
+        rng = np.random.default_rng(0)
+        n, m = 20, 40
+        A = rng.standard_normal((m, n))
+        x_c = rng.uniform(1.0, 2.0, n)
+        problem = Problem.minimize(
+            QuadraticObjective(
+                c=rng.standard_normal(n),
+                hessian_contribution=DiagonalSystem(np.ones(n)),
+            )
+        ).subject_to(
+            ineq=[
+                BoundsConstraintLayer(lb=0.0, ub=10.0, dimension=n),
+                LinearInequalityConstraintLayer(A, cu=A @ x_c + 1.0),
+            ]
+        )
+        trace = ListTrace()
+        reference = problem.solve(
+            solver=BarrierSolver(settings=OptimizationSettings(trace=trace)), x0=x_c
+        )
+        schedule = [r["t"] for r in trace.records() if r["event"] == "centering_start"]
+        t_floor = schedule[-steps_from_end]
+        decrement = _BarrierAdapter.newton_decrement_squared
+
+        def floored(
+            self: _BarrierAdapter, x: npt.NDArray[np.float64], t: float, *args: Any
+        ) -> float:
+            value = decrement(self, x, t, *args)
+            return max(value, 6.8e-4) if t >= 0.999 * t_floor else value
+
+        with patch.object(_BarrierAdapter, "newton_decrement_squared", floored):
+            result = problem.solve(solver=BarrierSolver(), x0=x_c)
+
+        self.assertIn(
+            result.status, (SolveStatus.OPTIMAL, SolveStatus.ACCEPTABLE), result.message
+        )
+        nits = result.diagnostics.inner_nits  # type: ignore[union-attr]
+        self.assertEqual(len(nits), len(schedule) - steps_from_end + 1)
+        self.assertLessEqual(nits[-1], 20)
+        self.assertAlmostEqual(
+            result.objective_value, reference.objective_value, delta=1e-4
         )
 
 
