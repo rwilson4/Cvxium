@@ -80,6 +80,23 @@ class CentralPathDualsTest(unittest.TestCase):
         lmbda = PrimalDualSolver._central_path_duals(problem, np.array([-0.2]))
         np.testing.assert_array_equal(lmbda, np.ones(1))
 
+    def test_opposed_bounds_do_not_read_as_a_weak_unit_start(self) -> None:
+        # At the center of a box each variable's two bound gradients, -e_i and +e_i,
+        # cancel, so G^T 1 = 0 although the bounds are as strong as ever. The
+        # random-sign probe sees through that and keeps λ = 1.
+        n = 6
+        problem = Problem(
+            obj=QuadraticObjective(
+                c=np.ones(n), hessian_contribution=DiagonalSystem(np.ones(n))
+            ),
+            ineq=[BoundsConstraintLayer(lb=-1.0, ub=1.0, dimension=n)],
+        )
+        x = np.zeros(n)
+        gtl = _PrimalDualKernel.g_transpose_times(problem, x, np.ones(2 * n))
+        self.assertEqual(float(np.linalg.norm(gtl)), 0.0)
+        lmbda = PrimalDualSolver._central_path_duals(problem, x)
+        np.testing.assert_array_equal(lmbda, np.ones(2 * n))
+
     def test_matches_magnitudes_on_the_centering_direction(self) -> None:
         # At c x 1e6 the unit start exerts a millionth of the objective's force.
         problem, x0 = _equality_lp(1e6)

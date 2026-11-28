@@ -1887,8 +1887,11 @@ class PrimalDualSolver(Solver):
     ) -> npt.NDArray[np.float64]:
         """Choose starting duals: λ = 1, rescaled when that is the wrong scale.
 
-        The unit start λ = 1 is kept unless its constraint force ‖G^T 1‖ differs from
-        the objective's ‖∇f0‖ by more than a factor ``_DUAL_SCALE_RANGE``. Then λ = 1
+        The unit start λ = 1 is kept unless its constraint force differs from the
+        objective's ‖∇f0‖ by more than a factor ``_DUAL_SCALE_RANGE``. The force is
+        max(‖G^T 1‖, ‖G^T z‖) for a fixed random-sign vector z: ‖G^T 1‖ alone
+        vanishes wherever constraints oppose each other (a box center, where each
+        variable's two bounds cancel), and E ‖G^T z‖^2 = ∑ ‖∇f_i‖^2 cannot. Then λ = 1
         is the wrong scale outright (on an objective scaled by 1e3 the method spent
         most of its iterations escaping it, and at 1e6 it failed), and the start moves
         to the barrier's centering direction λ̂ = -1 / f, with G^T λ̂ = ∇φ, at the scale
@@ -1923,8 +1926,19 @@ class PrimalDualSolver(Solver):
         f = _PrimalDualKernel.concat_constraints(problem, x)
         ones = np.ones(f.size)
         norm_f0 = float(np.linalg.norm(none_throws(problem.obj).gradient(x)))
-        norm_ones = float(
-            np.linalg.norm(_PrimalDualKernel.g_transpose_times(problem, x, ones))
+        # The force of the unit start, measured so that opposed constraints do not
+        # cancel: with lower and upper bounds on a variable, ∇f = -e_i and +e_i, so
+        # G^T 1 vanishes at a box center although every bound is as strong as ever.
+        # A fixed random-sign probe z has E ‖G^T z‖^2 = ∑ ‖∇f_i‖^2, which no sign
+        # pattern cancels; the larger of the two is the force.
+        signs = np.random.default_rng(0).choice((-1.0, 1.0), size=f.size)
+        norm_ones = max(
+            float(
+                np.linalg.norm(_PrimalDualKernel.g_transpose_times(problem, x, ones))
+            ),
+            float(
+                np.linalg.norm(_PrimalDualKernel.g_transpose_times(problem, x, signs))
+            ),
         )
         well_scaled = (
             norm_f0 / _DUAL_SCALE_RANGE <= norm_ones <= norm_f0 * _DUAL_SCALE_RANGE
