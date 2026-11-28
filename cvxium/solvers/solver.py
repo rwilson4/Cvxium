@@ -107,6 +107,40 @@ def _follows_flat_ray(error: BaseException) -> bool:
     return False
 
 
+def _numerical_breakdown(
+    error: InteriorPointMethodError,
+) -> NewtonStepError | BacktrackingLineSearchError | None:
+    """The numerical breakdown that caused a barrier failure, if one did.
+
+    The barrier engine wraps a breakdown in its centering step as
+    ``InteriorPointMethodError`` from ``CenteringStepError`` from the breakdown
+    itself. Walks the cause chain for a ``NewtonStepError`` or a
+    ``BacktrackingLineSearchError``, stopping at a ``RecessionDirectionError``: a
+    recession ray is a finding about the region, not a breakdown, and a flat one is
+    what ``Solver._solve_phase1_from`` boxes.
+
+    Parameters
+    ----------
+     error : InteriorPointMethodError
+        The failure to inspect.
+
+    Returns
+    -------
+     breakdown : NewtonStepError | BacktrackingLineSearchError | None
+        The breakdown in the cause chain, or ``None`` when there is none or a
+        recession ray comes first.
+
+    """
+    cause: BaseException | None = error.__cause__
+    while cause is not None:
+        if isinstance(cause, RecessionDirectionError):
+            return None
+        if isinstance(cause, NewtonStepError | BacktrackingLineSearchError):
+            return cause
+        cause = cause.__cause__
+    return None
+
+
 class Solver(ABC):
     """Abstract algorithm that solves a ``Problem``.
 
@@ -659,7 +693,8 @@ class Solver(ABC):
         ------
          ProblemMarginallyFeasibleError
             When the Phase I solve breaks down numerically (``NewtonStepError`` or
-            ``BacktrackingLineSearchError``) under ``on_infeasible="raise"``, or when
+            ``BacktrackingLineSearchError``, bare or as the cause of the barrier's
+            ``InteriorPointMethodError``) under ``on_infeasible="raise"``, or when
             the recovered point is not strictly feasible but the Phase I dual value is
             not positive (as for a feasible set with empty interior).
          NewtonStepError
@@ -668,6 +703,10 @@ class Solver(ABC):
          BacktrackingLineSearchError
             Propagated unchanged from the Phase I solve under
             ``on_infeasible="continue"``.
+         InteriorPointMethodError
+            Propagated unchanged from the Phase I solve when it was not caused by a
+            breakdown (a recession ray, say, which ``_solve_phase1_from`` handles), or
+            under ``on_infeasible="continue"``.
          ProblemCertifiablyInfeasibleError
             When the recovered point is not strictly feasible for ``problem`` and the
             Phase I dual value is positive; also propagated unchanged when the inner
@@ -689,10 +728,17 @@ class Solver(ABC):
         claim a certificate: the marginal variant says the problem may be infeasible
         without proving it.
 
-        The ``SolveResult`` that exception carries exists to satisfy its contract and
-        holds the Phase I seed, not a computed point, since the numerical exceptions
-        carry no iterate to attach. Its ``solution`` is not a minimum-violation answer,
-        and it has no ``objective``.
+        The primal-dual solver raises the breakdown bare. The barrier engine wraps it
+        as ``InteriorPointMethodError`` from ``CenteringStepError`` from the breakdown,
+        so a barrier failure is converted when its cause chain reaches a breakdown
+        before any recession ray (``_numerical_breakdown``; issue #72). A flat ray
+        must reach ``_solve_phase1_from``, which retries it inside a box.
+
+        The ``SolveResult`` that exception carries exists to satisfy its contract. For
+        a bare breakdown it holds the Phase I seed, not a computed point, since the
+        numerical exceptions carry no iterate to attach; for a barrier failure, the
+        last Phase I iterate. Either way its ``solution`` is not a minimum-violation
+        answer, and it has no ``objective``.
 
         That is also why the conversion does not apply under
         ``on_infeasible="continue"``: there the caller has asked for a best-effort point
@@ -736,7 +782,18 @@ class Solver(ABC):
             )
         try:
             result = self.solve(transformed, x0_phase1, on_infeasible=on_infeasible)
-        except (NewtonStepError, BacktrackingLineSearchError) as e:
+        except (
+            NewtonStepError,
+            BacktrackingLineSearchError,
+            InteriorPointMethodError,
+        ) as e:
+            breakdown = (
+                _numerical_breakdown(e)
+                if isinstance(e, InteriorPointMethodError)
+                else e
+            )
+            if breakdown is None:
+                raise
             if on_infeasible != "raise":
                 # The caller asked to continue to a best-effort point, and Phase
                 # I has none to give: these exceptions carry only a message, no
@@ -748,18 +805,34 @@ class Solver(ABC):
                 # point nobody computed.
                 raise
 
+            last = (
+                np.asarray(e.last_iterate)
+                if isinstance(e, InteriorPointMethodError)
+                else None
+            )
+            if last is not None and (
+                last.size != np.asarray(x0_phase1).size or not np.all(np.isfinite(last))
+            ):
+                last = None
             raise ProblemMarginallyFeasibleError(
                 message=(
                     "Phase I could not find a feasible point: the solve broke down "
-                    f"numerically ({type(e).__name__}: {e}). The problem may be "
-                    "infeasible, or feasible by too thin a margin to locate."
+                    f"numerically ({type(breakdown).__name__}: {breakdown}). The "
+                    "problem may be infeasible, or feasible by too thin a margin to "
+                    "locate."
                 ),
                 result=SolveResult(
-                    solution=np.asarray(x0_phase1)[: problem.dimension],
+                    solution=(np.asarray(x0_phase1) if last is None else last)[
+                        : problem.dimension
+                    ],
                     status=SolveStatus.INFEASIBLE,
                     message=(
                         "Phase I broke down numerically; this result carries the "
-                        "Phase I seed, not a computed point."
+                        + (
+                            "Phase I seed, not a computed point."
+                            if last is None
+                            else "last Phase I iterate, not a minimum-violation point."
+                        )
                     ),
                     solver=type(self).__name__,
                     n_iterations=0,
