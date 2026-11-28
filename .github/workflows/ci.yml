@@ -11,7 +11,20 @@ env:
 
 jobs:
   test:
+    # Two jobs in parallel: the fast tests with the checks, and the tests marked
+    # slow (the documentation examples and the process-pool frontier sweeps).
+    name: test (${{ matrix.suite }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: fast
+            marker: not slow
+            checks: true
+          - suite: slow
+            marker: slow
+            checks: false
 
     steps:
     - uses: actions/checkout@v4
@@ -30,13 +43,16 @@ jobs:
       run: uv sync
 
     - name: Check code formatting with Black
+      if: matrix.checks
       run: uv run python -m black --check cvxium/ test/
 
     - name: Lint with Ruff
+      if: matrix.checks
       run: uv run python -m ruff check cvxium test
 
     - name: Type check with mypy
+      if: matrix.checks
       run: uv run python -m mypy
 
     - name: Run tests with pytest
-      run: uv run python -m pytest --verbose
+      run: uv run python -m pytest --verbose -m "${{ matrix.marker }}"

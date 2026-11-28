@@ -31,6 +31,7 @@ cp scripts/pre-commit .git/hooks/pre-commit
 ```bash
 uv sync                                   # create .venv with dev dependencies
 uv run python -m pytest                   # all tests
+uv run python -m pytest -m "not slow"     # skip the slow tests (about 4x faster)
 uv run python -m pytest test/solvers/test_newton_solver.py::NewtonSolverTest
 uv run python -m black cvxium/ test/      # format
 uv run python -m ruff check cvxium test   # lint
@@ -39,7 +40,11 @@ uv build --wheel
 ```
 
 Tests are `unittest.TestCase` classes (parameterized with `parameterized`) run under
-pytest; parameterized cases get `_0`, `_1`, ... suffixes. Every test directory has an
+pytest; parameterized cases get `_0`, `_1`, ... suffixes. Mark a test (or a whole class)
+that takes about a second or more with `@pytest.mark.slow`: CI runs `-m "not slow"`
+together with the checks, and `-m slow` in a second, parallel job. The slow set today is
+the USAGE.md, linear-programs and banded-QP guide runs and the process-pool frontier
+sweeps; check with `--durations=20` when adding expensive tests. Every test directory has an
 `__init__.py`, so module names are `test.solvers.test_hsd_solver` and so on; the perf
 baseline is keyed on those names.
 
@@ -78,7 +83,10 @@ materially, up *or* down, against `test/perf_baseline.json`. `test/conftest.py` 
 by setting `CVXIUM_PERF_BASELINE` before cvxium is imported; set the variable to an empty
 string to disable it. If a change intentionally alters iteration counts, regenerate with
 `CVXIUM_PERF_BASELINE_WRITE=1 uv run python -m pytest` and explain why in the commit
-message. Counts below 8 iterations are not guarded, and known-bimodal tests are listed
+message. Regenerate over the whole suite, not `-m "not slow"`, and prefer writing a
+fresh snapshot (`CVXIUM_PERF_BASELINE_OUT=<new file>`, then copy it over the
+baseline): a write merges into the file it targets, so it keeps entries for tests that
+no longer exist. Counts below 8 iterations are not guarded, and known-bimodal tests are listed
 under the baseline's `__ignore__` key.
 
 ## Architecture
