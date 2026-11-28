@@ -551,9 +551,10 @@ class Solver(ABC):
 
         Attaches a zero feasibility threshold to the Phase I objective (so the solve
         stops at the first strictly feasible iterate), solves through ``self``, drops
-        any augmenting slack from the solution, and raises
-        ``ProblemCertifiablyInfeasibleError`` when the recovered point is not strictly
-        feasible for the original problem.
+        any augmenting slack from the solution, and raises an infeasibility error when
+        the recovered point is not strictly feasible for the original problem: the
+        certified variant when the Phase I dual value is positive, the marginal one
+        otherwise.
 
         Parameters
         ----------
@@ -579,7 +580,9 @@ class Solver(ABC):
         ------
          ProblemMarginallyFeasibleError
             When the Phase I solve breaks down numerically (``NewtonStepError`` or
-            ``BacktrackingLineSearchError``) under ``on_infeasible="raise"``.
+            ``BacktrackingLineSearchError``) under ``on_infeasible="raise"``, or when
+            the recovered point is not strictly feasible but the Phase I dual value is
+            not positive (as for a feasible set with empty interior).
          NewtonStepError
             Propagated unchanged from the Phase I solve under
             ``on_infeasible="continue"``.
@@ -587,8 +590,9 @@ class Solver(ABC):
             Propagated unchanged from the Phase I solve under
             ``on_infeasible="continue"``.
          ProblemCertifiablyInfeasibleError
-            When the recovered point is not strictly feasible for ``problem``; also
-            propagated unchanged when the inner solve raises it.
+            When the recovered point is not strictly feasible for ``problem`` and the
+            Phase I dual value is positive; also propagated unchanged when the inner
+            solve raises it.
          ValueError
             Propagated unchanged from the inner solve, for a problem the solver cannot
             represent.
@@ -696,11 +700,27 @@ class Solver(ABC):
             # none_throws so a violated invariant fails loudly at the source
             # rather than embedding nan in the infeasibility message.
             dual_value = none_throws(none_throws(result.objective).dual_value)
-            raise ProblemCertifiablyInfeasibleError(
+            # Only a strictly positive dual value bounds the minimal slack away
+            # from zero and so proves infeasibility. Otherwise the slack's optimum
+            # may be zero: a feasible set with empty interior (an equality written
+            # as two opposed inequalities, issue #57) ends exactly here, with the
+            # slack a hair above zero and the dual a hair below. That is the
+            # barrier engine's marginal verdict too.
+            if dual_value > 0.0:
+                raise ProblemCertifiablyInfeasibleError(
+                    message=(
+                        "Phase I converged but the recovered point is not strictly "
+                        "feasible for the original problem; the problem is "
+                        f"infeasible (Phase I dual value: {dual_value:.3e} > 0)."
+                    ),
+                    result=result,
+                )
+            raise ProblemMarginallyFeasibleError(
                 message=(
                     "Phase I converged but the recovered point is not strictly "
-                    "feasible for the original problem; the problem is infeasible."
-                    f" (Phase I dual value: {dual_value:.3e})."
+                    "feasible for the original problem. The dual value "
+                    f"{dual_value:.3e} does not certify infeasibility: the problem "
+                    "may be infeasible, or feasible with an empty interior."
                 ),
                 result=result,
             )
