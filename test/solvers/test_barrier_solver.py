@@ -45,6 +45,7 @@ from cvxium.problems.quadratic_constraints import (
     SquaredNormConstraintLayer,
 )
 from cvxium.problems.result import (
+    ObjectiveOutcome,
     SolveResult,
     SolveStatus,
 )
@@ -56,6 +57,7 @@ from cvxium.solvers.barrier_solver import (
 )
 from cvxium.solvers.optimization import (
     ProblemCertifiablyInfeasibleError,
+    ProblemMarginallyFeasibleError,
     _CenteringOutcome,
 )
 from cvxium.solvers.phase1 import LiftedConstraintLayer
@@ -3648,6 +3650,27 @@ def _infeasible_verdict() -> ProblemCertifiablyInfeasibleError:
     )
 
 
+def _marginal_verdict(
+    solution: npt.NDArray[np.float64], computed: bool = True
+) -> ProblemMarginallyFeasibleError:
+    """A marginal boxed verdict at ``solution``; ``computed=False`` mimics a breakdown."""
+    return ProblemMarginallyFeasibleError(
+        message="slack minimum about zero inside the box",
+        result=SolveResult(
+            solution=solution,
+            status=SolveStatus.INFEASIBLE,
+            message="",
+            solver="",
+            n_iterations=8 if computed else 0,
+            objective=(
+                ObjectiveOutcome(value=1e-8, suboptimality=1e-6, dual_value=-1e-7)
+                if computed
+                else None
+            ),
+        ),
+    )
+
+
 class FlatPhase1BoxTest(unittest.TestCase):
     """A barrier Phase I with a flat recession ray is retried inside a box (#49).
 
@@ -3739,10 +3762,80 @@ class FlatPhase1BoxTest(unittest.TestCase):
         self.assertIsInstance(result, SolveResult)
         self.assertEqual(radii, [None, 10.0, 1e3, 1e5])
 
-        flat = _flat_ray_failure()
-        result, radii = self._run([flat, *[_infeasible_verdict() for _ in range(3)]])
-        self.assertIs(result, flat)
-        self.assertEqual(len(radii), 4)
+    def test_boxed_certificates_end_marginal_not_as_the_flat_ray(self) -> None:
+        """Every box infeasible: no point was found, but nothing is certified."""
+        verdicts = [_infeasible_verdict() for _ in range(3)]
+        result, radii = self._run([_flat_ray_failure(), *verdicts])
+        self.assertIsInstance(result, ProblemMarginallyFeasibleError)
+        self.assertNotIsInstance(result, ProblemCertifiablyInfeasibleError)
+        assert isinstance(result, ProblemMarginallyFeasibleError)
+        self.assertIs(result.__cause__, verdicts[-1])
+        self.assertEqual(radii, [None, 10.0, 1e3, 1e5])
+
+    def test_a_marginal_verdict_inside_the_box_is_final(self) -> None:
+        """Issue #58: a wider box would repeat the same solve, so it is not tried."""
+        verdict = _marginal_verdict(np.array([0.0, 1.0 + 5.0]))
+        result, radii = self._run([_flat_ray_failure(), verdict, "found"])
+        self.assertIs(result, verdict)
+        self.assertEqual(radii, [None, 10.0])
+
+    @parameterized.expand(
+        [
+            ("at_the_box_face", np.array([0.0, 1.0 + 9.95]), True),
+            ("from_a_breakdown", np.array([0.0, 1.0]), False),
+        ]
+    )
+    def test_a_marginal_verdict_the_box_may_explain_grows_it(
+        self, _name: str, solution: npt.NDArray[np.float64], computed: bool
+    ) -> None:
+        result, radii = self._run(
+            [_flat_ray_failure(), _marginal_verdict(solution, computed), "found"]
+        )
+        self.assertIsInstance(result, SolveResult)
+        self.assertEqual(radii, [None, 10.0, 1e3])
+
+    def test_empty_interior_beside_a_flat_ray_is_one_boxed_solve(self) -> None:
+        """End to end, issue #58's shape: twin rows, plus variables bounded below only.
+
+        Rows 0 and 1 write g'x = 1 as two opposed inequalities, so the feasible set
+        has no interior; the last three variables appear in no row, which gives the
+        Phase I region a flat ray. The box retry once ran the identical Phase I
+        three times and then raised the flat-ray failure.
+        """
+        n, k = 5, 3
+        rng = np.random.default_rng(0)
+        g = rng.uniform(0.5, 1.5, n)
+        A = np.hstack(
+            [np.vstack([g, -g, rng.standard_normal((3, n))]), np.zeros((5, k))]
+        )
+        problem = Problem.minimize(
+            QuadraticObjective(
+                c=-np.ones(n + k), hessian_contribution=DiagonalSystem(np.ones(n + k))
+            )
+        ).subject_to(
+            ineq=[
+                BoundsConstraintLayer(lb=0.0, dimension=n + k),
+                LinearInequalityConstraintLayer(
+                    A, cu=np.r_[1.0, -1.0, 10.0, 10.0, 10.0]
+                ),
+            ]
+        )
+        radii: list[float | None] = []
+        make_phase1 = Problem.make_phase1
+
+        def recording(
+            self: Problem, x0: npt.NDArray[np.float64], radius: float | None = None
+        ) -> tuple[Problem, npt.NDArray[np.float64]]:
+            radii.append(radius)
+            return make_phase1(self, x0, radius=radius)
+
+        with (
+            patch.object(Problem, "make_phase1", recording),
+            self.assertRaises(ProblemMarginallyFeasibleError) as ctx,
+        ):
+            problem.solve(solver=BarrierSolver())
+        self.assertNotIsInstance(ctx.exception, ProblemCertifiablyInfeasibleError)
+        self.assertEqual(len(radii), 2)
 
     def test_other_failures_are_not_retried(self) -> None:
         unboundedness = _flat_ray_failure()

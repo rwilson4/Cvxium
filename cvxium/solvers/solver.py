@@ -71,7 +71,15 @@ _PHASE1_BOX_GROWTH: float = 100.0
 """Factor by which the Phase I box widens after an infeasible boxed solve."""
 
 _PHASE1_BOX_ATTEMPTS: int = 3
-"""Boxed Phase I solves tried before the flat-ray failure is raised."""
+"""Boxed Phase I solves tried before giving up on the flat-ray retry."""
+
+_PHASE1_BOX_INTERIOR: float = 0.9
+"""Fraction of the box half-width within which a boxed Phase I point is interior.
+
+A boxed Phase I verdict whose point lies within this fraction of R of the box
+center, in every coordinate, did not come from the box, so it stands for the
+original problem (see ``Solver._solve_phase1_from``).
+"""
 
 
 def _follows_flat_ray(error: BaseException) -> bool:
@@ -462,12 +470,28 @@ class Solver(ABC):
         strictly feasible for the original problem whether or not it is in the box.
 
         The box can make a feasible problem look infeasible when R is too small, so
-        an infeasibility verdict from a boxed solve is no verdict on the original:
-        R grows by ``_PHASE1_BOX_GROWTH`` and Phase I runs again, up to
-        ``_PHASE1_BOX_ATTEMPTS`` boxed solves in all. If none finds a point, the
-        original failure is raised. R starts at ``_PHASE1_BOX_SCALE`` times
-        max(1, ‖seed‖∞), well clear of the seed's own scale. Phase I problems
-        without a flat ray never see the box, so they are solved exactly as before.
+        a certificate of infeasibility from a boxed solve is no verdict on the
+        original: R grows by ``_PHASE1_BOX_GROWTH`` and Phase I runs again, up to
+        ``_PHASE1_BOX_ATTEMPTS`` boxed solves in all. R starts at
+        ``_PHASE1_BOX_SCALE`` times max(1, ‖seed‖∞), well clear of the seed's own
+        scale. Phase I problems without a flat ray never see the box, so they are
+        solved exactly as before.
+
+        A marginal verdict (the slack's minimum over the box is about zero) whose
+        point lies well inside the box, within ``_PHASE1_BOX_INTERIOR`` R of its
+        center in every coordinate, is raised at once. The box only ever raises the
+        minimum slack, so the original problem's minimum is about zero or less, and
+        the box did not hold the point back; a wider box would repeat the same solve
+        (issue #58: an equality written as two opposed inequalities, beside variables
+        bounded only below, ran the identical Phase I four times). A marginal verdict
+        from a numerical breakdown carries no computed point and grows the box like
+        a certificate.
+
+        When every boxed solve ends with an infeasibility verdict, a
+        ``ProblemMarginallyFeasibleError`` chained from the last one is raised: no
+        feasible point was found within the largest box, but a box's certificate
+        does not prove the original problem infeasible. When a boxed solve fails
+        some other way, the original flat-ray failure is raised.
 
         Parameters
         ----------
@@ -486,11 +510,15 @@ class Solver(ABC):
         Raises
         ------
          InteriorPointMethodError
-            When Phase I fails other than along a flat ray, or along one and no
-            boxed solve finds a feasible point.
+            When Phase I fails other than along a flat ray, or along one and a boxed
+            solve fails other than with an infeasibility verdict.
          ProblemInfeasibleError
-            Propagated from the unboxed solve. (A boxed solve's verdict is not
-            propagated, since the box may be what made it infeasible.)
+            Propagated from the unboxed solve.
+         ProblemMarginallyFeasibleError
+            Propagated from a boxed solve whose point lies well inside the box, or
+            raised when every boxed solve ends with an infeasibility verdict. (A
+            boxed certificate is not propagated, since the box may be what made the
+            problem infeasible.)
 
         """
         phase1_problem, x0_phase1 = problem.make_phase1(seed)
@@ -503,15 +531,66 @@ class Solver(ABC):
                 raise
             failure = e
         radius = _PHASE1_BOX_SCALE * max(1.0, float(np.max(np.abs(seed), initial=0.0)))
+        verdict: (
+            ProblemCertifiablyInfeasibleError | ProblemMarginallyFeasibleError | None
+        ) = None
         for _ in range(_PHASE1_BOX_ATTEMPTS):
             phase1_problem, x0_phase1 = problem.make_phase1(seed, radius=radius)
+            # ``make_phase1`` centers the box on the (projected) seed it returns.
+            center = np.asarray(x0_phase1)[: problem.dimension]
             try:
                 return self._solve_phase1(
                     problem, phase1_problem, x0_phase1, on_infeasible=on_infeasible
                 )
+            except ProblemMarginallyFeasibleError as e:
+                if self._inside_box(e.result, center, radius):
+                    raise
+                verdict = e
+            except ProblemCertifiablyInfeasibleError as e:
+                verdict = e
             except ProblemInfeasibleError:
-                radius *= _PHASE1_BOX_GROWTH
-        raise failure
+                pass
+            radius *= _PHASE1_BOX_GROWTH
+        if verdict is None:
+            raise failure
+        raise ProblemMarginallyFeasibleError(
+            message=(
+                "Phase I could not find a feasible point. Its region has a flat "
+                "recession direction, and inside the box |w - seed| <= "
+                f"{radius / _PHASE1_BOX_GROWTH:.3g} it found none ({verdict}). A "
+                "boxed verdict does not prove the problem infeasible."
+            ),
+            result=verdict.result,
+        ) from verdict
+
+    @staticmethod
+    def _inside_box(
+        result: SolveResult, center: npt.NDArray[np.float64], radius: float
+    ) -> bool:
+        """Whether a boxed Phase I result is a computed point well inside its box.
+
+        Parameters
+        ----------
+         result : SolveResult
+            The result a boxed Phase I verdict carries.
+         center : npt.NDArray[np.float64]
+            The box center, of the original dimension.
+         radius : float
+            The box half-width R.
+
+        Returns
+        -------
+         inside : bool
+            True when ``result`` holds a computed point (it has an objective; the
+            results of a numerical breakdown hold the untouched seed and none) within
+            ``_PHASE1_BOX_INTERIOR`` R of ``center`` in every coordinate.
+
+        """
+        if result.objective is None:
+            return False
+        x = np.asarray(result.solution)[: center.size]
+        offset = float(np.max(np.abs(x - center), initial=0.0))
+        return offset <= _PHASE1_BOX_INTERIOR * radius
 
     @staticmethod
     def _phase1_start_is_accepted(
