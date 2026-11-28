@@ -167,10 +167,12 @@ class Trace:
     def on_early_stop(self, outer_nit: int) -> None:
         """Report that a solve is stopping before its outer loop runs to completion.
 
-        Emitted in three situations: a barrier Phase I solve finds a strictly feasible
-        point; a primal-dual solver minimizing an objective with a feasibility threshold
-        sees the value cross it; or a primal-dual solver's stall detector stops and
-        returns the best iterate seen. Distinct from ``on_converged``.
+        Emitted in four situations: a barrier Phase I solve finds a strictly feasible
+        point; a barrier centering step stalls at the floating-point floor above
+        ``inner.tolerance_soft``, so a larger t cannot help; a primal-dual solver
+        minimizing an objective with a feasibility threshold sees the value cross it;
+        or a primal-dual solver's stall detector stops and returns the best iterate
+        seen. Distinct from ``on_converged``.
 
         Parameters
         ----------

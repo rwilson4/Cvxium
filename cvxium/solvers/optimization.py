@@ -435,6 +435,11 @@ class _CenteringOutcome:
      quadratic_from : int | None
         The index into ``btls_steps`` at which the quadratic phase began, or ``None``
         (the default) if it never did.
+     floor_stall : bool
+        Whether the step stopped because Newton's method stalled at the
+        floating-point floor with its best suboptimality still at or above
+        ``inner.tolerance_soft``. A larger t raises that floor, so the outer loop
+        stops there. False by default.
 
     """
 
@@ -454,6 +459,7 @@ class _CenteringOutcome:
     # is incidental.
     btls_steps: list[float] = field(default_factory=list)
     quadratic_from: int | None = None
+    floor_stall: bool = False
 
 
 class ProblemCertifiablyInfeasibleError(ProblemInfeasibleError):
@@ -1151,6 +1157,15 @@ class BaseInteriorPointMethodSolver(Optimizer):
                         infeasibility_certified = True
                 else:
                     self.check_for_infeasibility(ipm_result)
+
+            # A centering step that stalled at the floating-point floor above
+            # ``inner.tolerance_soft`` (issue #59) ends the schedule: the floor is
+            # the rounding of ``t * f0``, so a larger t only raises it. Its bounds
+            # are already in the incumbent; the finalization after the loop reports the best
+            # certified gap, or raises with it attached.
+            if result.floor_stall:
+                self.settings.trace.on_early_stop(nit + 1)
+                break
 
             t *= self.settings.outer.barrier_multiplier
 
@@ -2085,11 +2100,18 @@ class BaseInteriorPointMethodSolver(Optimizer):
             # ``tolerance_soft`` -- is an acceptable final answer, far better
             # than burning the full ``max_iterations`` budget bouncing at the
             # FP floor (the highest-``t`` step is the most prone to it).
+            # A stall whose best is still at or above ``tolerance_soft`` is the
+            # same floor, only higher (issue #59): far from the optimum |f0| is
+            # large, the rounding of ``t * f0`` swamps the improvements, and the
+            # decrement cannot fall further. Running on to ``max_iterations``
+            # cannot help, so bail to the best iterate here too, flagged as a
+            # ``floor_stall`` for the outer loop. Its bounds remain sound: the dual
+            # is the mini-Newton evaluator's certified bound, not the surrogate.
             if (
                 in_quadratic_phase
                 and iters_since_improvement >= self.settings.inner.stall_patience
-                and best_suboptimality < self.settings.inner.tolerance_soft
             ):
+                floor_stall = best_suboptimality >= self.settings.inner.tolerance_soft
                 # In the quadratic phase the best-tracking branch above has
                 # fired at least once (the first iterate beats ``inf``), so
                 # both are non-None here; assert to satisfy mypy and pin the
@@ -2119,8 +2141,15 @@ class BaseInteriorPointMethodSolver(Optimizer):
                     message=(
                         "Newton's method stalled at the floating-point floor "
                         "in the quadratic phase; returning best iterate "
-                        f"(suboptimality={best_suboptimality:.3e})."
+                        f"(suboptimality={best_suboptimality:.3e}"
+                        + (
+                            f", above tolerance_soft="
+                            f"{self.settings.inner.tolerance_soft:.0e})."
+                            if floor_stall
+                            else ")."
+                        )
                     ),
+                    floor_stall=floor_stall,
                 )
 
             # Update. In the quadratic phase, Boyd and Vandenberghe 9.5.3
