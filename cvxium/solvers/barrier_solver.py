@@ -30,6 +30,7 @@ from ..exceptions import (
     ProblemInfeasibleError,
     SevereCurvatureError,
 )
+from ..linalg.systems import DiagonalSystem
 from ..problems.constraint_layers import (
     DirectConstraintLayer,
 )
@@ -76,6 +77,10 @@ if TYPE_CHECKING:
 # Vandenberghe, 2004, Eq 9.50). Outside it we cannot certify a lower bound, so
 # ``evaluate_dual`` returns -inf rather than a possibly-invalid bound.
 _DUAL_REGION_DECREMENT_SQ_MAX: float = 0.68**2
+
+# Damping of the retry after a singular Newton system, relative to the curvature
+# r^T H r / r^T r along the right-hand side r (see ``_BarrierAdapter.newton_step``).
+_SINGULAR_DAMPING: float = 1e-8
 
 
 def _gradient_balance_t0(
@@ -1091,7 +1096,8 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         ------
          NewtonStepError
             Propagated from the structured solve when the assembled Hessian (or KKT
-            system) is not positive definite, is singular, or yields a non-finite step.
+            system) is not positive definite, is singular, or yields a non-finite step,
+            and the damped retry (see Notes) fails too.
 
         Notes
         -----
@@ -1122,16 +1128,77 @@ class _BarrierAdapter(InteriorPointMethodSolver):
         feasible iterate the residual is at rounding level, so the step is unchanged.
         The cost is one product A x, O(p M), against the solve's O(p^2 M).
 
+        When the solve raises ``NewtonStepError``, it is retried once with H + δ I,
+        where δ is ``_SINGULAR_DAMPING`` times the curvature r^T H r / r^T r along the
+        right-hand side r = -∇ft. The case this is for is a lineality space (issue
+        #71): free variables the constraints do not pin down, as with fewer linear
+        rows than unknowns and no bounds, leave H singular along directions where ft
+        is constant. The system is then consistent, since r is orthogonal to null(H),
+        and the damped step is the minimum-norm Newton step to a relative error of
+        δ / λ_min(H on its range); along null(H) only rounding in r is amplified, by
+        about 1 / δ. When r has a real component along null(H), ft decreases
+        linearly along a ray with no curvature, and the damped step follows it, where
+        the centering step's ray watch reports it. A retry that fails too raises the
+        original error.
+
         """
         system = self._barrier_hessian(x, t)
+        rhs = -self.gradient_barrier(x, t)
+        try:
+            return self._solve_newton_system(system, rhs, x)
+        except NewtonStepError as e:
+            denominator = float(np.dot(rhs, rhs))
+            curvature = (
+                float(np.dot(rhs, system.multiply(rhs))) / denominator
+                if denominator > 0.0
+                else 0.0
+            )
+            if not (np.isfinite(curvature) and curvature > 0.0):
+                raise
+            damping = DiagonalSystem(
+                np.full(system.dimension, _SINGULAR_DAMPING * curvature)
+            )
+            try:
+                return self._solve_newton_system(system.plus(damping), rhs, x)
+            except NewtonStepError:
+                raise e from None
+
+    def _solve_newton_system(
+        self,
+        system: MatrixSystem,
+        rhs: npt.NDArray[np.float64],
+        x: npt.NDArray[np.float64],
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Solve the Newton system for a given Hessian, as ``newton_step`` describes.
+
+        Parameters
+        ----------
+         system : MatrixSystem
+            The weighted Hessian H_ft, possibly damped.
+         rhs : npt.NDArray[np.float64]
+            The right-hand side -∇ft.
+         x : npt.NDArray[np.float64]
+            Current iterate, for the equality residual b - A x.
+
+        Returns
+        -------
+         delta_x : npt.NDArray[np.float64]
+            The primal Newton step.
+         nu : npt.NDArray[np.float64]
+            Lagrange multipliers for the equality constraints (empty when there are
+            none).
+
+        Raises
+        ------
+         NewtonStepError
+            Propagated from the structured solve.
+
+        """
         if self._equality is None:
-            delta_x = system.solve(-self.gradient_barrier(x, t))
             # No equality constraints => empty nu vector.
-            return delta_x, np.zeros(0)
+            return system.solve(rhs), np.zeros(0)
         assert self._problem.eq is not None
-        return self._problem.eq.saddle_system(system).solve(
-            -self.gradient_barrier(x, t), self.b - self.A @ x
-        )
+        return self._problem.eq.saddle_system(system).solve(rhs, self.b - self.A @ x)
 
     def evaluate_dual(
         self,
