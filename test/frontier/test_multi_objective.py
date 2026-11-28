@@ -8,6 +8,7 @@ from unittest import mock
 
 import numpy as np
 import numpy.typing as npt
+import pytest
 
 from cvxium import (
     Duals,
@@ -947,6 +948,7 @@ class SingleThreadBlasTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow  # each test starts a process pool, about a second
 class ParallelTraceTest(unittest.TestCase):
     """Tests that trace(n_jobs != 1) matches the sequential sweep."""
 
@@ -1120,6 +1122,7 @@ class PointObjectivesHookTest(unittest.TestCase):
                 corner.objectives, solver.evaluate_objectives(corner.solution)
             )
 
+    @pytest.mark.slow  # starts a process pool
     def test_an_override_reaches_the_parallel_sweep(self) -> None:
         solver = _BoundRecordingBall(np.array([3.0, 0.0]))
         results = solver.trace(num_points=4, n_jobs=2)

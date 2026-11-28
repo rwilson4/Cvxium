@@ -1,3 +1,5 @@
 __pycache__
 # Sphinx build output
 docs/_build/
+# Lock file the perf guard creates while regenerating its baseline
+test/perf_baseline.json.lock

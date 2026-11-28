@@ -1119,7 +1119,15 @@ class SolveResult:
      certificate : InfeasibilityCertificate | None
         Certificate of infeasibility or unboundedness, when one was found.
      phase1 : SolveResult | None
-        Result of the Phase I feasibility solve, when one ran.
+        Result of the Phase I feasibility solve that found the starting point, when
+        one ran; ``None`` when the start was already strictly feasible or was found
+        without a solve (an equality projection, a layer's closed-form interior
+        point). Phase I cascades over the inequality layers, the last layer's Phase
+        I starting from a point the earlier layers' Phase I found, and the results
+        nest the same way: ``result.phase1.phase1`` is the Phase I that seeded
+        ``result.phase1``, one level per layer that needed one. A level that needed
+        no solve of its own, because the earlier layers' point already satisfied it,
+        is a FEASIBLE result with no objective whose ``phase1`` carries on the chain.
 
     """
 

@@ -17,6 +17,7 @@ from cvxium.diagnostics.trace import ListTrace
 from cvxium.exceptions import (
     CenteringStepError,
     InteriorPointMethodError,
+    NewtonStepError,
     RecessionDirectionError,
 )
 from cvxium.linalg.systems import (
@@ -3074,12 +3075,15 @@ class TestEvaluateDualDecrementReuseAndRegionGuard(unittest.TestCase):
         self.assertIsNone(x_min)
         self.assertIsNone(delta2)
 
-    def test_region_guard_returns_minus_inf_when_out_of_region(self) -> None:
-        r"""When the mini-Newton lands out of region, ``evaluate_dual`` returns -inf.
+    def test_region_guard_falls_back_to_the_wolfe_correction(self) -> None:
+        r"""Out of region, ``evaluate_dual`` certifies through the Wolfe correction.
 
         Forces the out-of-region branch by having ``_minimize_lagrangian`` return a
-        ``delta^2`` above ``0.68^2``. The guard must return ``-inf`` (a conservative
-        deferral) rather than the possibly-invalid ``L(x_min) - delta^2``.
+        ``delta^2`` above ``0.68^2``. The guard must not return the possibly-invalid
+        ``L(x_min) - delta^2``. It falls back to correcting (x, λ) to stationarity,
+        which for a QP with affine constraints certifies g(λ', ν') exactly at the
+        corrected multipliers: a finite lower bound on p*, which is 0 here
+        (c = 0, Q positive semidefinite, x >= 0).
         """
         rng = np.random.default_rng(3301)
         M = 4
@@ -3092,8 +3096,40 @@ class TestEvaluateDualDecrementReuseAndRegionGuard(unittest.TestCase):
         lmbda = rng.uniform(0.1, 1.5, size=M)
         x_star = np.ones(M)
 
-        out_of_region = (x_star, _DUAL_REGION_DECREMENT_SQ_MAX + 1.0)
+        delta2 = _DUAL_REGION_DECREMENT_SQ_MAX + 1.0
+        out_of_region = (x_star, delta2)
         with patch.object(adapter, "_minimize_lagrangian", return_value=out_of_region):
+            dual = adapter.evaluate_dual(lmbda=lmbda, nu=np.zeros(0), x_star=x_star)
+
+        invalid = adapter._evaluate_lagrangian(x_star, lmbda) - delta2
+        self.assertTrue(np.isfinite(dual))
+        self.assertNotAlmostEqual(dual, invalid)
+        self.assertLessEqual(dual, 1e-12)  # weak duality against p* = 0
+
+    def test_region_guard_returns_minus_inf_when_nothing_certifies(self) -> None:
+        r"""Out of region with no certifiable correction, ``evaluate_dual`` is -inf.
+
+        A correction system that cannot be solved leaves nothing certified, so the
+        guard's conservative deferral still applies.
+        """
+        rng = np.random.default_rng(3302)
+        M = 4
+        Q = _make_psd_matrix(rng, M)
+        problem = Problem(
+            obj=QuadraticObjective(c=np.zeros(M), hessian_contribution=DenseSystem(Q)),
+            ineq=[BoundsConstraintLayer(lb=0.0, dimension=M)],
+        )
+        adapter = _BarrierAdapter(problem=problem, settings=OptimizationSettings())
+        lmbda = rng.uniform(0.1, 1.5, size=M)
+        x_star = np.ones(M)
+
+        out_of_region = (x_star, _DUAL_REGION_DECREMENT_SQ_MAX + 1.0)
+        with (
+            patch.object(adapter, "_minimize_lagrangian", return_value=out_of_region),
+            patch.object(
+                Problem, "build_hessian_system", side_effect=NewtonStepError("singular")
+            ),
+        ):
             dual = adapter.evaluate_dual(lmbda=lmbda, nu=np.zeros(0), x_star=x_star)
 
         assert dual == float("-inf")

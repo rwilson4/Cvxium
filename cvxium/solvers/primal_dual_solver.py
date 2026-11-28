@@ -17,9 +17,8 @@ primal-dual method reuses the structured assembly the barrier method uses.
 ``PrimalDualSolver.solve`` dispatches on ``problem.eq``:
 - No equality constraints: a Mehrotra predictor-corrector step per iteration
   (``_run``).
-- Equality constraints: an infeasible-start damped Newton step with a residual line
-  search (``_run_equality``), which drives A x - b to zero along with the other
-  residuals.
+- Equality constraints: the infeasible-start form of the same Mehrotra step
+  (``_run_equality``), which drives A x - b to zero along with the other residuals.
 Both paths need a strictly inequality-feasible start. When ``x0`` is omitted or
 infeasible, ``Solver._solve_feasibility`` builds one through ``Problem.make_phase1``,
 cascading through this same solver. Both paths fall back to adaptive Levenberg-Marquardt
@@ -103,6 +102,14 @@ if TYPE_CHECKING:
 # no-equality solver takes a Mehrotra predictor-corrector step on this
 # (optionally damped) factorization, the equality solver a single damped Newton
 # step with a residual line search.
+
+
+# The unit dual start is rescaled when its constraint force ‖G^T 1‖ and the
+# objective's ‖∇f0‖ differ by more than this factor either way (see
+# ``PrimalDualSolver._central_path_duals``). A heuristic threshold: a ratio of 0.04
+# (a one-dimensional test problem whose unit start is fine) must not trigger it, and
+# 1e-3 (an LP with its objective scaled by 1e3) must.
+_DUAL_SCALE_RANGE: float = 100.0
 
 
 class _StallWatch:
@@ -828,14 +835,19 @@ class PrimalDualSolver(Solver):
                 lifted,
                 solver="primal_dual",
                 diagnostics=PrimalDualDiagnostics(),
+                phase1=result.phase1,  # keep the earlier layers' cascade
             )
 
-        x = self._solve_feasibility(replace(problem, obj=None), x0).solution
-        # Dispatch on equality presence: the two algorithms are distinct (MPC vs
-        # damped-Newton + residual line search) and each is preserved verbatim.
-        if problem.eq is None:
-            return self._run(problem, np.asarray(x))
-        return self._run_equality(problem, np.asarray(x))
+        feasibility = self._solve_feasibility(replace(problem, obj=None), x0)
+        x = np.asarray(feasibility.solution)
+        # Dispatch on equality presence: the no-equality Mehrotra step, or its
+        # infeasible-start form that also drives A x - b to zero.
+        result = (
+            self._run(problem, x)
+            if problem.eq is None
+            else self._run_equality(problem, x)
+        )
+        return replace(result, phase1=self._phase1_part(feasibility))
 
     def _run(
         self,
@@ -844,7 +856,10 @@ class PrimalDualSolver(Solver):
     ) -> SolveResult:
         """Run the Mehrotra predictor-corrector iteration (no equality constraints).
 
-        Starts from λ = 1 and zero damping. Each iteration evaluates the surrogate gap
+        Starts from zero damping and λ on the central path's direction at the
+        objective's scale when λ = 1 is the wrong scale (``_central_path_duals``;
+        λ = 1 in Phase I). Each iteration
+        evaluates the surrogate gap
         and the dual residual,
            η = -f^T λ,   r_dual = ∇f0(x) + G^T λ,
         sets t = μ m / η, and takes one damped Mehrotra predictor-corrector step
@@ -913,7 +928,13 @@ class PrimalDualSolver(Solver):
         lm = settings.primal_dual.damping
 
         x = x0.copy()
-        lmbda = np.ones(m)
+        # Start the duals at the objective's scale; in Phase I, whose objective is the
+        # unit-scaled slack, λ = 1 already is (see ``_run_equality``).
+        lmbda = (
+            np.ones(m)
+            if none_throws(problem.obj).feasibility_threshold is not None
+            else self._central_path_duals(problem, x)
+        )
         # Levenberg damping, carried across iterations; 0 = exact Newton step.
         damping = 0.0
 
@@ -1334,6 +1355,15 @@ class PrimalDualSolver(Solver):
         for the predictor and corrector solves of one Mehrotra iteration (one
         factorization, two solves).
 
+        Each solve takes one step of iterative refinement, Δx += H^{-1} (b - H Δx),
+        reusing the factorization at the cost of one multiply and one more solve. Late
+        in a solve the duals span many orders of magnitude, and when ∇^2 f0 is singular
+        (a QP whose Q leaves some variables uncurved) the only curvature along its
+        nullspace comes from the smallest of them, so H is nearly singular there. An
+        unrefined step then carries enough error that the dual residual, which an
+        exact step can only shrink, grows from one iteration to the next and the
+        solve stalls short of its tolerance.
+
         Parameters
         ----------
          problem : Problem
@@ -1368,7 +1398,12 @@ class PrimalDualSolver(Solver):
         # Levenberg-Marquardt: add ``damping * I`` to the modified Hessian.
         if damping > 0.0:
             system = system.plus(DiagonalSystem(np.full(x.shape[0], damping)))
-        return system.solve
+
+        def refined_solve(rhs: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+            step = system.solve(rhs)
+            return step + system.solve(rhs - system.multiply(step))
+
+        return refined_solve
 
     @staticmethod
     def _direction_from_rcent(
@@ -1830,10 +1865,10 @@ class PrimalDualSolver(Solver):
     # ------------------------------------------------------------------
     # Equality path: infeasible-start PD for Problems carrying ``A w = b``.
     #
-    # A distinct algorithm from the no-equality MPC path above: it carries the
-    # infeasible-start primal residual ``r_pri = A x - b`` and takes a single
-    # damped Newton step with a residual line search, routing the saddle solve
-    # through ``problem.eq.saddle_system(system).solve(g_x, g_nu)`` (non-zero
+    # The infeasible-start counterpart of the no-equality MPC path above: it
+    # carries the primal residual ``r_pri = A x - b`` and takes a Mehrotra
+    # predictor-corrector step, routing the saddle solve through
+    # ``problem.eq.saddle_system(system).solve_refined(g_x, g_nu)`` (non-zero
     # lower RHS). ``solve`` dispatches here when ``problem.eq is not None``.
     # The KKT Newton system after Schur elimination of ``Delta lambda`` is
     #
@@ -1846,6 +1881,79 @@ class PrimalDualSolver(Solver):
     # ``saddle_system`` seam (the saddle's ``b_bottom``).
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _central_path_duals(
+        problem: Problem, x: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Choose starting duals: λ = 1, rescaled when that is the wrong scale.
+
+        The unit start λ = 1 is kept unless its constraint force differs from the
+        objective's ‖∇f0‖ by more than a factor ``_DUAL_SCALE_RANGE``. The force is
+        max(‖G^T 1‖, ‖G^T z‖) for a fixed random-sign vector z: ‖G^T 1‖ alone
+        vanishes wherever constraints oppose each other (a box center, where each
+        variable's two bounds cancel), and E ‖G^T z‖^2 = ∑ ‖∇f_i‖^2 cannot. Then λ = 1
+        is the wrong scale outright (on an objective scaled by 1e3 the method spent
+        most of its iterations escaping it, and at 1e6 it failed), and the start moves
+        to the barrier's centering direction λ̂ = -1 / f, with G^T λ̂ = ∇φ, at the scale
+        that matches magnitudes,
+           λ = (‖∇f0‖ / ‖∇φ‖) λ̂,   so that ‖G^T λ‖ = ‖∇f0‖.
+        Its products λ_i (-f_i) are all equal: the start is perfectly centered.
+
+        Two alternatives were tried and rejected:
+        - Rescaling whenever it helps, not only at a wrong scale: matching magnitudes
+          where ∇φ points along ∇f0 doubles the dual residual, and on a
+          one-dimensional curved test problem (ratio 0.04, inside the range) that
+          drove λ to zero before stationarity and stalled the solve.
+        - The least-squares scale κ* = -⟨∇f0, ∇φ⟩ / ‖∇φ‖^2, which minimizes the
+          starting dual residual: it is the magnitude scale times the cosine between
+          -∇f0 and ∇φ, and that cosine can be tiny (1e-5 on RadOptLIB rt-qp-0062),
+          where it collapses λ and the complementarity with it and the solve
+          stalls, while reducing the residual only by a factor sqrt(1 - cos^2).
+
+        Parameters
+        ----------
+         problem : Problem
+            The problem, with an objective.
+         x : npt.NDArray[np.float64]
+            Strictly inequality-feasible start, of length M.
+
+        Returns
+        -------
+         lmbda : npt.NDArray[np.float64]
+            Positive starting duals, of length m.
+
+        """
+        f = _PrimalDualKernel.concat_constraints(problem, x)
+        ones = np.ones(f.size)
+        norm_f0 = float(np.linalg.norm(none_throws(problem.obj).gradient(x)))
+        # The force of the unit start, measured so that opposed constraints do not
+        # cancel: with lower and upper bounds on a variable, ∇f = -e_i and +e_i, so
+        # G^T 1 vanishes at a box center although every bound is as strong as ever.
+        # A fixed random-sign probe z has E ‖G^T z‖^2 = ∑ ‖∇f_i‖^2, which no sign
+        # pattern cancels; the larger of the two is the force.
+        signs = np.random.default_rng(0).choice((-1.0, 1.0), size=f.size)
+        norm_ones = max(
+            float(
+                np.linalg.norm(_PrimalDualKernel.g_transpose_times(problem, x, ones))
+            ),
+            float(
+                np.linalg.norm(_PrimalDualKernel.g_transpose_times(problem, x, signs))
+            ),
+        )
+        well_scaled = (
+            norm_f0 / _DUAL_SCALE_RANGE <= norm_ones <= norm_f0 * _DUAL_SCALE_RANGE
+        )
+        if well_scaled or not (norm_f0 > 0.0 and math.isfinite(norm_f0)):
+            return ones
+        direction = -1.0 / f
+        norm_phi = float(
+            np.linalg.norm(_PrimalDualKernel.g_transpose_times(problem, x, direction))
+        )
+        if not (norm_phi > 0.0 and math.isfinite(norm_phi)):
+            return ones
+        lmbda: npt.NDArray[np.float64] = (norm_f0 / norm_phi) * direction
+        return lmbda
+
     def _run_equality(
         self,
         problem: Problem,
@@ -1853,10 +1961,14 @@ class PrimalDualSolver(Solver):
     ) -> SolveResult:
         """Run the infeasible-start primal-dual iteration for a problem with equality.
 
-        Starts from λ = 1, ν = 0 and zero damping, and at each iteration evaluates
+        Starts from ν = 0, zero damping, and λ = 1, moved to the central path's
+        direction at the objective's scale when λ = 1 is the wrong scale
+        (``_central_path_duals``; λ = 1 in Phase I), and at each
+        iteration evaluates
            r_dual = ∇f0(x) + G^T λ + A^T ν,   r_pri = A x - b,   η = -f^T λ,
-        sets t = μ m / η, and takes one damped Newton step with a residual line search
-        (``_solve_damped_step_equality``). After eliminating Δλ, the Newton system is
+        sets t = μ m / η, and takes one Mehrotra predictor-corrector step
+        (``_solve_damped_step_equality``). After eliminating Δλ, each of its two solves
+        is
             _           _  _    _     _                            _
            |  H_pd  A^T  ||  Δx  |   |  -r_dual - G^T (r_cent / f)  |
            |_  A     0  _||_ Δν _| = |_          -r_pri            _|
@@ -1925,7 +2037,15 @@ class PrimalDualSolver(Solver):
         lm = settings.primal_dual.damping
 
         x = x0.copy()
-        lmbda = np.ones(m)
+        # Start the duals at the objective's scale, except in Phase I: its objective is
+        # the slack, unit-scaled by construction, where λ = 1 already matches it and a
+        # gradient-balanced t (huge, against a unit ∇f0) would make every weight
+        # λ / -f, and so an LP's H_pd, vanish.
+        lmbda = (
+            np.ones(m)
+            if none_throws(problem.obj).feasibility_threshold is not None
+            else self._central_path_duals(problem, x)
+        )
         # Levenberg damping, carried across iterations; 0 = exact Newton step.
         damping = 0.0
 
@@ -2204,6 +2324,155 @@ class PrimalDualSolver(Solver):
             dual_residual_norms=dual_residual_norms,
         )
 
+    @staticmethod
+    def _build_pd_solve_equality(
+        problem: Problem,
+        x: npt.NDArray[np.float64],
+        lmbda: npt.NDArray[np.float64],
+        f: npt.NDArray[np.float64],
+        damping: float,
+    ) -> Callable[
+        [npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]],
+        tuple[
+            npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]
+        ],
+    ]:
+        """Factor the equality-path KKT system into a refined solve closure.
+
+        The closure solves the full (unreduced) primal-dual system
+           H Δx + G^T Δλ + A^T Δν = e_dual,
+           -λ ∘ (G Δx) - f ∘ Δλ = e_cent,
+           A Δx = e_pri,
+        with H = ∇^2 f0 + ∑ λ_i ∇^2 f_i (+ damping I), by eliminating
+           Δλ = -(e_cent + λ ∘ (G Δx)) / f
+        into the saddle system
+            _           _  _    _     _                        _
+           |  H_pd  A^T  ||  Δx  |   |  e_dual + G^T (e_cent / f)  |
+           |_  A     0  _||_ Δν _| = |_          e_pri            _|,
+        H_pd = H + G^T diag(λ / -f) G, solved through the equality layer's
+        ``saddle_system`` (refined, since it grows ill-conditioned near the optimum,
+        issue #22).
+
+        Each solve then takes one step of iterative refinement on the full system, kept
+        only when it reduces the full residual (it can fail to on a badly scaled
+        system, where the unrefined step is the better one). The
+        elimination divides by f, which is tiny on near-active rows late in a solve, so
+        a reduced-system error that is negligible in Δx is amplified in Δλ and from
+        there into the dual residual G^T Δλ. Refining the reduced system alone does not
+        see that error; refining the full system does. Without it, a Mehrotra step,
+        which has no merit line search to reject a bad direction, can push the dual
+        residual up by orders of magnitude in one step near the optimum. The predictor
+        and corrector share the factorization.
+
+        Parameters
+        ----------
+         problem : Problem
+            The problem, with an objective and equality constraints.
+         x : npt.NDArray[np.float64]
+            Primal iterate, of length M.
+         lmbda : npt.NDArray[np.float64]
+            Inequality duals λ, of length m.
+         f : npt.NDArray[np.float64]
+            Constraint values at ``x``, of length m.
+         damping : float
+            Levenberg damping added to H; 0 for none.
+
+        Returns
+        -------
+         solve : Callable
+            Maps (e_dual, e_cent, e_pri) to (Δx, Δλ, Δν).
+
+        Raises
+        ------
+         NewtonStepError
+            Propagated from ``_PrimalDualKernel.validate_pd_iterate``.
+
+        """
+        _PrimalDualKernel.validate_pd_iterate(lmbda, f)
+        eq = none_throws(problem.eq)
+        # H_pd = nabla^2 f0 + sum_i lambda_i C_i at the dual weights (scale = 1);
+        # see the no-equality _build_pd_solve.
+        system = problem.build_hessian_system(
+            x, none_throws(problem.obj).at(x), 1.0, lmbda
+        )
+        if damping > 0.0:
+            system = system.plus(DiagonalSystem(np.full(x.shape[0], damping)))
+        saddle = eq.saddle_system(system)
+        A = eq.A
+
+        def reduced(
+            e_dual: npt.NDArray[np.float64],
+            e_cent: npt.NDArray[np.float64],
+            e_pri: npt.NDArray[np.float64],
+        ) -> tuple[
+            npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]
+        ]:
+            g_x = e_dual + _PrimalDualKernel.g_transpose_times(problem, x, e_cent / f)
+            delta_x, delta_nu = saddle.solve_refined(g_x, e_pri)
+            g_dx = _PrimalDualKernel.g_times(problem, x, delta_x)
+            delta_lmbda = -(e_cent + lmbda * g_dx) / f
+            return delta_x, delta_lmbda, delta_nu
+
+        def residual(
+            e_dual: npt.NDArray[np.float64],
+            e_cent: npt.NDArray[np.float64],
+            e_pri: npt.NDArray[np.float64],
+            delta_x: npt.NDArray[np.float64],
+            delta_lmbda: npt.NDArray[np.float64],
+            delta_nu: npt.NDArray[np.float64],
+        ) -> tuple[
+            npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]
+        ]:
+            g_dx = _PrimalDualKernel.g_times(problem, x, delta_x)
+            # ``system`` is the reduced H_pd, so H Δx = H_pd Δx + G^T (λ ∘ G Δx / f).
+            h_dx = system.multiply(delta_x) + _PrimalDualKernel.g_transpose_times(
+                problem, x, lmbda * g_dx / f
+            )
+            res_dual = e_dual - (
+                h_dx
+                + _PrimalDualKernel.g_transpose_times(problem, x, delta_lmbda)
+                + A.T @ delta_nu
+            )
+            res_cent = e_cent - (-lmbda * g_dx - f * delta_lmbda)
+            res_pri = e_pri - A @ delta_x
+            return res_dual, res_cent, res_pri
+
+        def size(parts: tuple[npt.NDArray[np.float64], ...]) -> float:
+            # A plain float sum: overflow should read as inf, not raise.
+            total = sum(float(np.dot(v, v)) for v in parts)
+            return math.sqrt(total) if math.isfinite(total) else math.inf
+
+        def solve(
+            e_dual: npt.NDArray[np.float64],
+            e_cent: npt.NDArray[np.float64],
+            e_pri: npt.NDArray[np.float64],
+        ) -> tuple[
+            npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]
+        ]:
+            step = reduced(e_dual, e_cent, e_pri)
+            with np.errstate(all="ignore"):
+                res = residual(e_dual, e_cent, e_pri, *step)
+                res_size = size(res)
+                if not math.isfinite(res_size) or res_size == 0.0:
+                    return step
+                try:
+                    correction = reduced(*res)
+                except (NewtonStepError, ValueError, np.linalg.LinAlgError):
+                    return step
+                refined = (
+                    step[0] + correction[0],
+                    step[1] + correction[1],
+                    step[2] + correction[2],
+                )
+                # Keep the refinement only when it actually improves the full
+                # residual; on a badly scaled system the correction can be worse
+                # (or non-finite), and the unrefined step is then the better one.
+                if size(residual(e_dual, e_cent, e_pri, *refined)) < res_size:
+                    return refined
+            return step
+
+        return solve
+
     def _compute_pd_step_equality(
         self,
         problem: Problem,
@@ -2224,9 +2493,10 @@ class PrimalDualSolver(Solver):
         Solves
            (H_pd + damping I) Δx + A^T Δν = -r_dual - G^T (r_cent / f),
            A Δx = -r_pri
-        through the equality layer's ``saddle_system``, which handles the nonzero lower
-        right-hand side that arises while A x ≠ b, then recovers
-           Δλ = (r_cent - λ ∘ (G Δx)) / f.
+        and recovers
+           Δλ = (r_cent - λ ∘ (G Δx)) / f,
+        through ``_build_pd_solve_equality`` (one factorization, refined on the full
+        system).
 
         Parameters
         ----------
@@ -2241,7 +2511,7 @@ class PrimalDualSolver(Solver):
          r_dual : npt.NDArray[np.float64]
             Dual residual, including A^T ν, of length M.
          r_cent : npt.NDArray[np.float64]
-            Centering residual -λ ∘ f - 1 / t, of length m.
+            Centering residual, of length m.
          r_pri : npt.NDArray[np.float64]
             Primal residual A x - b, of length p.
          damping : float
@@ -2260,37 +2530,11 @@ class PrimalDualSolver(Solver):
         Raises
         ------
          NewtonStepError
-            Propagated from ``_PrimalDualKernel.validate_pd_iterate``.
+            Propagated from ``_build_pd_solve_equality``.
 
         """
-        _PrimalDualKernel.validate_pd_iterate(lmbda, f)
-        assert problem.eq is not None
-        # H_pd = nabla^2 f0 + sum_i lambda_i C_i at the dual weights (scale = 1);
-        # see the no-equality _compute_pd_step for the Schur derivation.
-        system = problem.build_hessian_system(
-            x, none_throws(problem.obj).at(x), 1.0, lmbda
-        )
-        # Levenberg-Marquardt: add ``damping * I`` to the modified Hessian.
-        if damping > 0.0:
-            system = system.plus(DiagonalSystem(np.full(x.shape[0], damping)))
-
-        rhs_g_term = _PrimalDualKernel.g_transpose_times(problem, x, r_cent / f)
-        g_x = -r_dual - rhs_g_term
-        g_nu = -r_pri
-
-        # The equality layer mints the saddle system from the structured Hessian;
-        # the non-zero lower RHS ``g_nu`` is passed as the saddle's ``b_bottom``.
-        # Refined, because this system grows ill-conditioned near the optimum (a
-        # linear objective contributes no curvature to H): once the solve's error
-        # exceeds the residual the step is meant to remove, the line search
-        # collapses and the method stalls short of the optimum (issue #22).
-        saddle = problem.eq.saddle_system(system)
-        delta_x, delta_nu = saddle.solve_refined(g_x, g_nu)
-
-        # Recover Δλ.
-        g_delta_x = _PrimalDualKernel.g_times(problem, x, delta_x)
-        delta_lmbda = (r_cent - lmbda * g_delta_x) / f
-        return delta_x, delta_lmbda, delta_nu
+        solve = self._build_pd_solve_equality(problem, x, lmbda, f, damping)
+        return solve(-r_dual, -r_cent, -r_pri)
 
     def _backtracking_step_equality(
         self,
@@ -2436,13 +2680,19 @@ class PrimalDualSolver(Solver):
             -------
              r_norm : float
                 The residual norm ‖(r_dual, r_cent, r_pri)‖ at the trial point, at the
-                fixed barrier parameter.
+                fixed barrier parameter; inf when the trial point is not strictly
+                feasible.
 
             """
             x_trial = x + s_trial * delta_x
             lmbda_trial = lmbda + s_trial * delta_lmbda
             nu_trial = nu + s_trial * delta_nu
             f_trial = _PrimalDualKernel.concat_constraints(problem, x_trial)
+            # Stage 2 found a strictly feasible step, and by convexity so is every
+            # shorter one -- but not in floating point, at an iterate within rounding
+            # of a bound (x_j ~ 1e-16 against x_j >= 0). Reject such a trial here.
+            if not np.all(f_trial < 0):
+                return math.inf
             r_dual_trial = (
                 none_throws(problem.obj).gradient(x_trial)
                 + _PrimalDualKernel.gradient_residual(problem, x_trial, lmbda_trial)
@@ -2467,6 +2717,13 @@ class PrimalDualSolver(Solver):
             if merit.evaluate(x, s) <= merit.accept_threshold(s):
                 return s
             s *= beta
+        if not np.all(
+            _PrimalDualKernel.concat_constraints(problem, x + s * delta_x) < 0
+        ):
+            raise NewtonStepError(
+                f"BTLS could not maintain primal feasibility at s={s:.3e}; the "
+                "residual search shrank the step onto a bound within rounding."
+            )
         return s
 
     def _residual_norm_equality(
@@ -2546,15 +2803,33 @@ class PrimalDualSolver(Solver):
         float,
         float,
     ]:
-        """Take one equality-path step with adaptive Levenberg damping.
+        """Take one equality-path Mehrotra predictor-corrector step, with damping.
 
-        Solves for the step at the incoming ``damping`` (``_compute_pd_step_equality``)
-        and line-searches it (``_backtracking_step_equality``). When the line search
-        cannot keep the iterate strictly feasible, it grows the damping (from zero, to
-        ‖rhs‖ / x_scale with rhs = -r_dual - G^T (r_cent / f); otherwise by ``lm.grow``)
-        and retries, up to ``lm.max_attempts`` times. After a damped success, the
-        predicted-versus-actual residual-reduction ratio sets the relaxed damping for
-        the next iteration, as in ``_mpc_solve_step``.
+        The infeasible-start counterpart of ``_mpc_solve_step``. With slacks s = -f and
+        μ = η / m, on one factorization (``_build_pd_solve_equality``):
+        1. The affine predictor solves with zero complementarity target,
+           r_cent = -λ ∘ f, and the full primal residual -r_pri.
+        2. The fraction-to-boundary steps α_pri on s and α_dual on λ give
+              μ_aff = (s + α_pri Δs_aff)^T (λ + α_dual Δλ_aff) / m,
+           and σ = (μ_aff / μ)^3, clipped to [0, 1].
+        3. The corrector solves with
+              r_cent = -λ ∘ f - σ μ + Δλ_aff ∘ Δs_aff.
+        The step is the Mehrotra fraction-to-boundary step of ``_feasible_step``. The
+        primal residual A x - b then shrinks by exactly 1 - step, as in any
+        infeasible-start method. One safeguard remains: when the step would raise the
+        surrogate gap η, or no feasible step exists, the iteration falls back to the
+        centering step at t with the residual line search of
+        ``_backtracking_step_equality`` (Boyd and Vandenberghe, 2004, section 11.7.3),
+        the method this one replaced. That method alone took about three times as many
+        iterations (103 against 26 on RadOptLIB rt-qp-0062, and 20 against 7 on the
+        test suite's equality problems).
+
+        When neither step is feasible, or the factorization fails (a numerically
+        singular H), the damping grows (from zero to ‖rhs‖ / x_scale,
+        rhs = -r_dual - G^T (r_cent / f); otherwise by ``lm.grow``) and the step is
+        re-solved, up to ``lm.max_attempts`` times. After a damped step, the gain ratio
+           ρ = (‖r_t‖ - ‖r_t(trial)‖) / (‖r_t‖ - ‖r_t(model)‖),
+        with r_t = (r_dual, r_cent, r_pri) at the fixed t, sets the next damping.
 
         Parameters
         ----------
@@ -2571,7 +2846,8 @@ class PrimalDualSolver(Solver):
          r_dual : npt.NDArray[np.float64]
             Dual residual, of length M.
          r_cent : npt.NDArray[np.float64]
-            Centering residual -λ ∘ f - 1 / t, of length m.
+            Standard centering residual -λ ∘ f - 1 / t, of length m; used for the
+            ratio test and the damping initialization.
          r_pri : npt.NDArray[np.float64]
             Primal residual A x - b, of length p.
          a_eq : npt.NDArray[np.float64]
@@ -2581,13 +2857,11 @@ class PrimalDualSolver(Solver):
          eta : float
             Surrogate duality gap.
          t : float
-            Barrier parameter.
-         alpha : float
-            Sufficient-decrease coefficient of the line search.
+            Barrier parameter of the ratio test.
          beta : float
-            Shrink factor of the line search.
+            Shrink factor of the feasibility search.
          min_step : float
-            Step below which the line search stops shrinking.
+            Depth bound of the feasibility search.
          tau_min : float
             Floor τ_min of the Mehrotra boundary factor.
          damping : float
@@ -2612,51 +2886,109 @@ class PrimalDualSolver(Solver):
         ------
          NewtonStepError
             When no feasible step is found after ``lm.max_attempts`` attempts; also
-            propagated from ``_compute_pd_step_equality``.
+            propagated from ``_build_pd_solve_equality``.
+
+        References
+        ----------
+        Mehrotra, Sanjay, On the Implementation of a Primal-Dual Interior Point Method,
+        SIAM Journal on Optimization 2, 1992.
 
         """
-        rhs = -r_dual - _PrimalDualKernel.g_transpose_times(problem, x, r_cent / f)
-        rhs_norm = float(np.linalg.norm(rhs))
+        gamma = mehrotra_boundary_factor(eta, lmbda.size, tau_min)
         x_scale = max(1.0, float(np.linalg.norm(x)))
-        r_norm0 = float(
-            np.sqrt(
+        r_norm0 = math.sqrt(
+            float(
                 np.dot(r_dual, r_dual) + np.dot(r_cent, r_cent) + np.dot(r_pri, r_pri)
             )
         )
+        m = max(lmbda.size, 1)
+        s = -f
+        mu = eta / m
 
-        for _ in range(lm.max_attempts):
-            delta_x, delta_lmbda, delta_nu = self._compute_pd_step_equality(
-                problem, x, lmbda, f, r_dual, r_cent, r_pri, damping=damping
-            )
+        def grown(current: float) -> float:
+            if current > 0.0:
+                return current * lm.grow
+            rhs = -r_dual - _PrimalDualKernel.g_transpose_times(problem, x, r_cent / f)
+            return float(np.linalg.norm(rhs)) / x_scale
+
+        _PrimalDualKernel.validate_pd_iterate(lmbda, f)
+        for _attempt in range(lm.max_attempts):
             try:
-                step = self._backtracking_step_equality(
-                    problem,
-                    x,
-                    lmbda,
-                    nu,
-                    f,
-                    delta_x,
-                    delta_lmbda,
-                    delta_nu,
-                    r_dual,
-                    r_cent,
-                    r_pri,
-                    a_eq,
-                    b_eq,
-                    eta=eta,
-                    t=t,
-                    alpha=alpha,
-                    beta=beta,
-                    min_step=min_step,
-                    tau_min=tau_min,
-                )
+                solve = self._build_pd_solve_equality(problem, x, lmbda, f, damping)
+                dx_aff, dlam_aff, _ = solve(-r_dual, lmbda * f, -r_pri)
             except NewtonStepError:
-                damping = rhs_norm / x_scale if damping <= 0.0 else damping * lm.grow
+                # A numerically singular H (an LP far from the central path, where
+                # every weight λ / -f is small) is what the damping is for.
+                damping = grown(damping)
                 continue
-
+            ds_aff = -_PrimalDualKernel.g_times(problem, x, dx_aff)
+            a_pri = fraction_to_boundary(s, ds_aff)
+            a_dual = fraction_to_boundary(lmbda, dlam_aff)
+            mu_aff = float(np.dot(s + a_pri * ds_aff, lmbda + a_dual * dlam_aff)) / m
+            sigma = min(max((mu_aff / mu) ** 3 if mu > 0.0 else 0.0, 0.0), 1.0)
+            r_cent_cor = -lmbda * f - sigma * mu + dlam_aff * ds_aff
+            delta_x, delta_lmbda, delta_nu = solve(-r_dual, -r_cent_cor, -r_pri)
+            step = self._feasible_step(
+                problem, x, f, delta_x, lmbda, delta_lmbda, gamma, beta, min_step
+            )
+            eta_new = (
+                math.inf
+                if step is None
+                else float(
+                    -np.dot(
+                        _PrimalDualKernel.concat_constraints(
+                            problem, x + step * delta_x
+                        ),
+                        lmbda + step * delta_lmbda,
+                    )
+                )
+            )
+            if step is None or not eta_new <= eta:
+                # Safeguard: a Mehrotra step exists to cut complementarity (its
+                # predicted surrogate gap is about (1 - step (1 - σ)) η), so a trial
+                # gap above η, or no feasible step at all, marks a step gone wrong.
+                # Take the centering step at t instead, with the residual line search
+                # of (Boyd and Vandenberghe, 2004, section 11.7.3). On the c x 1e6
+                # scaled LPs of the test suite this cuts the iterations from 25 / 69 /
+                # 21 to 17 / 20 / 16. It is no substitute for a well-scaled start:
+                # from λ = 1 on those LPs the method still fails, which is why the
+                # duals start at the objective's scale (``_central_path_duals``).
+                # The fixed-t KKT residual is deliberately not the test: the
+                # corrector targets σ μ rather than 1 / t, so a good Mehrotra step
+                # routinely raises it (on RadOptLIB rt-qp-0062 that test rejected
+                # most steps and doubled the iteration count).
+                delta_x, delta_lmbda, delta_nu = solve(-r_dual, -r_cent, -r_pri)
+                r_cent_cor = r_cent
+                try:
+                    step = self._backtracking_step_equality(
+                        problem,
+                        x,
+                        lmbda,
+                        nu,
+                        f,
+                        delta_x,
+                        delta_lmbda,
+                        delta_nu,
+                        r_dual,
+                        r_cent,
+                        r_pri,
+                        a_eq,
+                        b_eq,
+                        eta=eta,
+                        t=t,
+                        alpha=alpha,
+                        beta=beta,
+                        min_step=min_step,
+                        tau_min=tau_min,
+                    )
+                except NewtonStepError:
+                    step = None
+                if step is None:
+                    damping = grown(damping)
+                    continue
+            assert step is not None
             if damping <= 0.0:
                 return delta_x, delta_lmbda, delta_nu, step, 0.0
-
             r_norm_new = self._residual_norm_equality(
                 problem,
                 x + step * delta_x,
@@ -2666,28 +2998,26 @@ class PrimalDualSolver(Solver):
                 b_eq,
                 t,
             )
-            # Gain ratio: actual reduction over the reduction the *damped* linear
-            # model predicts. The damped step solves (H + δI) Δx + G^T Δλ + A^T Δν =
-            # -r_dual, so its linearized dual residual after a step s is
-            #    (1 - s) r_dual - s δ Δx,
-            # while the centering and primal residuals shrink by (1 - s) exactly.
-            # Dividing by s ‖r‖ instead -- the reduction of the *undamped* step --
-            # makes ρ small whenever δ is large, so the damping never shrinks: in
-            # one observed solve it held at 4.7e4 for 990 iterations, every step
-            # at the line-search floor (issue #23).
+            # Gain ratio against the *damped* linear model (issue #23): the damped
+            # step leaves (1 - s) r_dual - s δ Δx in the dual block, the step's own
+            # centering target in the centering block (r_cent - s r_cent_cor; for the
+            # centering fallback, (1 - s) r_cent), and (1 - s) r_pri in the primal
+            # block.
             r_dual_model = (1.0 - step) * r_dual - (step * damping) * delta_x
-            other_sq = float(np.dot(r_cent, r_cent) + np.dot(r_pri, r_pri))
+            r_cent_model = r_cent - step * r_cent_cor
             r_norm_model = math.sqrt(
-                float(np.dot(r_dual_model, r_dual_model)) + (1.0 - step) ** 2 * other_sq
+                float(
+                    np.dot(r_dual_model, r_dual_model)
+                    + np.dot(r_cent_model, r_cent_model)
+                )
+                + (1.0 - step) ** 2 * float(np.dot(r_pri, r_pri))
             )
             predicted = r_norm0 - r_norm_model
             rho = (r_norm0 - r_norm_new) / predicted if predicted > 0.0 else 0.0
             next_damping = self._relax_damping(damping, rho, x_scale, lm)
             return delta_x, delta_lmbda, delta_nu, step, next_damping
-
         raise NewtonStepError(
-            f"Equality-PD Levenberg damping failed to find a feasible descent "
-            f"step after {lm.max_attempts} attempts (final damping="
-            f"{damping:.3e}); the modified Hessian could not be regularized into "
-            "a usable step."
+            f"MPC (equality) failed to find a feasible step after {lm.max_attempts} "
+            f"attempts (final damping={damping:.3e}); the modified Hessian could not be "
+            "regularized into a usable step."
         )

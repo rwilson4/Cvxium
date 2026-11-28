@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 import matplotlib
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,15 +38,21 @@ class DocumentationExamplesTest(unittest.TestCase):
     def test_readme_examples_run(self) -> None:
         self._run("README.md")
 
+    @pytest.mark.slow
     def test_usage_guide_examples_run(self) -> None:
         self._run("USAGE.md")
 
+    @pytest.mark.slow
     def test_linear_programs_guide_examples_run(self) -> None:
         self._run("docs/user_guides/linear_programs.md")
 
     def test_unbounded_problems_guide_examples_run(self) -> None:
         self._run("docs/user_guides/unbounded_problems.md")
 
+    def test_radiotherapy_qps_guide_examples_run(self) -> None:
+        self._run("docs/user_guides/radiotherapy_qps.md")
+
+    @pytest.mark.slow
     def test_banded_quadratic_programs_guide_examples_run(self) -> None:
         # At the guide's M = 100,000, cvxpy's compilation allocates a dense
         # (M + 1) x (M + 1) array (75 GB), which Linux CI runners refuse.

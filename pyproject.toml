@@ -204,3 +204,8 @@ module = "test.*"
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 check_untyped_defs = false
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: takes about a second or more; CI runs these in a separate job, so `-m \"not slow\"` deselects them locally too",
+]
