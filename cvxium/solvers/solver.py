@@ -71,7 +71,15 @@ _PHASE1_BOX_GROWTH: float = 100.0
 """Factor by which the Phase I box widens after an infeasible boxed solve."""
 
 _PHASE1_BOX_ATTEMPTS: int = 3
-"""Boxed Phase I solves tried before the flat-ray failure is raised."""
+"""Boxed Phase I solves tried before giving up on the flat-ray retry."""
+
+_PHASE1_BOX_INTERIOR: float = 0.9
+"""Fraction of the box half-width within which a boxed Phase I point is interior.
+
+A boxed Phase I verdict whose point lies within this fraction of R of the box
+center, in every coordinate, did not come from the box, so it stands for the
+original problem (see ``Solver._solve_phase1_from``).
+"""
 
 
 def _follows_flat_ray(error: BaseException) -> bool:
@@ -97,6 +105,40 @@ def _follows_flat_ray(error: BaseException) -> bool:
             return not cause.unbounded
         cause = cause.__cause__
     return False
+
+
+def _numerical_breakdown(
+    error: InteriorPointMethodError,
+) -> NewtonStepError | BacktrackingLineSearchError | None:
+    """The numerical breakdown that caused a barrier failure, if one did.
+
+    The barrier engine wraps a breakdown in its centering step as
+    ``InteriorPointMethodError`` from ``CenteringStepError`` from the breakdown
+    itself. Walks the cause chain for a ``NewtonStepError`` or a
+    ``BacktrackingLineSearchError``, stopping at a ``RecessionDirectionError``: a
+    recession ray is a finding about the region, not a breakdown, and a flat one is
+    what ``Solver._solve_phase1_from`` boxes.
+
+    Parameters
+    ----------
+     error : InteriorPointMethodError
+        The failure to inspect.
+
+    Returns
+    -------
+     breakdown : NewtonStepError | BacktrackingLineSearchError | None
+        The breakdown in the cause chain, or ``None`` when there is none or a
+        recession ray comes first.
+
+    """
+    cause: BaseException | None = error.__cause__
+    while cause is not None:
+        if isinstance(cause, RecessionDirectionError):
+            return None
+        if isinstance(cause, NewtonStepError | BacktrackingLineSearchError):
+            return cause
+        cause = cause.__cause__
+    return None
 
 
 class Solver(ABC):
@@ -462,12 +504,28 @@ class Solver(ABC):
         strictly feasible for the original problem whether or not it is in the box.
 
         The box can make a feasible problem look infeasible when R is too small, so
-        an infeasibility verdict from a boxed solve is no verdict on the original:
-        R grows by ``_PHASE1_BOX_GROWTH`` and Phase I runs again, up to
-        ``_PHASE1_BOX_ATTEMPTS`` boxed solves in all. If none finds a point, the
-        original failure is raised. R starts at ``_PHASE1_BOX_SCALE`` times
-        max(1, ‖seed‖∞), well clear of the seed's own scale. Phase I problems
-        without a flat ray never see the box, so they are solved exactly as before.
+        a certificate of infeasibility from a boxed solve is no verdict on the
+        original: R grows by ``_PHASE1_BOX_GROWTH`` and Phase I runs again, up to
+        ``_PHASE1_BOX_ATTEMPTS`` boxed solves in all. R starts at
+        ``_PHASE1_BOX_SCALE`` times max(1, ‖seed‖∞), well clear of the seed's own
+        scale. Phase I problems without a flat ray never see the box, so they are
+        solved exactly as before.
+
+        A marginal verdict (the slack's minimum over the box is about zero) whose
+        point lies well inside the box, within ``_PHASE1_BOX_INTERIOR`` R of its
+        center in every coordinate, is raised at once. The box only ever raises the
+        minimum slack, so the original problem's minimum is about zero or less, and
+        the box did not hold the point back; a wider box would repeat the same solve
+        (issue #58: an equality written as two opposed inequalities, beside variables
+        bounded only below, ran the identical Phase I four times). A marginal verdict
+        from a numerical breakdown carries no computed point and grows the box like
+        a certificate.
+
+        When every boxed solve ends with an infeasibility verdict, a
+        ``ProblemMarginallyFeasibleError`` chained from the last one is raised: no
+        feasible point was found within the largest box, but a box's certificate
+        does not prove the original problem infeasible. When a boxed solve fails
+        some other way, the original flat-ray failure is raised.
 
         Parameters
         ----------
@@ -486,11 +544,15 @@ class Solver(ABC):
         Raises
         ------
          InteriorPointMethodError
-            When Phase I fails other than along a flat ray, or along one and no
-            boxed solve finds a feasible point.
+            When Phase I fails other than along a flat ray, or along one and a boxed
+            solve fails other than with an infeasibility verdict.
          ProblemInfeasibleError
-            Propagated from the unboxed solve. (A boxed solve's verdict is not
-            propagated, since the box may be what made it infeasible.)
+            Propagated from the unboxed solve.
+         ProblemMarginallyFeasibleError
+            Propagated from a boxed solve whose point lies well inside the box, or
+            raised when every boxed solve ends with an infeasibility verdict. (A
+            boxed certificate is not propagated, since the box may be what made the
+            problem infeasible.)
 
         """
         phase1_problem, x0_phase1 = problem.make_phase1(seed)
@@ -503,15 +565,66 @@ class Solver(ABC):
                 raise
             failure = e
         radius = _PHASE1_BOX_SCALE * max(1.0, float(np.max(np.abs(seed), initial=0.0)))
+        verdict: (
+            ProblemCertifiablyInfeasibleError | ProblemMarginallyFeasibleError | None
+        ) = None
         for _ in range(_PHASE1_BOX_ATTEMPTS):
             phase1_problem, x0_phase1 = problem.make_phase1(seed, radius=radius)
+            # ``make_phase1`` centers the box on the (projected) seed it returns.
+            center = np.asarray(x0_phase1)[: problem.dimension]
             try:
                 return self._solve_phase1(
                     problem, phase1_problem, x0_phase1, on_infeasible=on_infeasible
                 )
+            except ProblemMarginallyFeasibleError as e:
+                if self._inside_box(e.result, center, radius):
+                    raise
+                verdict = e
+            except ProblemCertifiablyInfeasibleError as e:
+                verdict = e
             except ProblemInfeasibleError:
-                radius *= _PHASE1_BOX_GROWTH
-        raise failure
+                pass
+            radius *= _PHASE1_BOX_GROWTH
+        if verdict is None:
+            raise failure
+        raise ProblemMarginallyFeasibleError(
+            message=(
+                "Phase I could not find a feasible point. Its region has a flat "
+                "recession direction, and inside the box |w - seed| <= "
+                f"{radius / _PHASE1_BOX_GROWTH:.3g} it found none ({verdict}). A "
+                "boxed verdict does not prove the problem infeasible."
+            ),
+            result=verdict.result,
+        ) from verdict
+
+    @staticmethod
+    def _inside_box(
+        result: SolveResult, center: npt.NDArray[np.float64], radius: float
+    ) -> bool:
+        """Whether a boxed Phase I result is a computed point well inside its box.
+
+        Parameters
+        ----------
+         result : SolveResult
+            The result a boxed Phase I verdict carries.
+         center : npt.NDArray[np.float64]
+            The box center, of the original dimension.
+         radius : float
+            The box half-width R.
+
+        Returns
+        -------
+         inside : bool
+            True when ``result`` holds a computed point (it has an objective; the
+            results of a numerical breakdown hold the untouched seed and none) within
+            ``_PHASE1_BOX_INTERIOR`` R of ``center`` in every coordinate.
+
+        """
+        if result.objective is None:
+            return False
+        x = np.asarray(result.solution)[: center.size]
+        offset = float(np.max(np.abs(x - center), initial=0.0))
+        return offset <= _PHASE1_BOX_INTERIOR * radius
 
     @staticmethod
     def _phase1_start_is_accepted(
@@ -551,9 +664,10 @@ class Solver(ABC):
 
         Attaches a zero feasibility threshold to the Phase I objective (so the solve
         stops at the first strictly feasible iterate), solves through ``self``, drops
-        any augmenting slack from the solution, and raises
-        ``ProblemCertifiablyInfeasibleError`` when the recovered point is not strictly
-        feasible for the original problem.
+        any augmenting slack from the solution, and raises an infeasibility error when
+        the recovered point is not strictly feasible for the original problem: the
+        certified variant when the Phase I dual value is positive, the marginal one
+        otherwise.
 
         Parameters
         ----------
@@ -579,16 +693,24 @@ class Solver(ABC):
         ------
          ProblemMarginallyFeasibleError
             When the Phase I solve breaks down numerically (``NewtonStepError`` or
-            ``BacktrackingLineSearchError``) under ``on_infeasible="raise"``.
+            ``BacktrackingLineSearchError``, bare or as the cause of the barrier's
+            ``InteriorPointMethodError``) under ``on_infeasible="raise"``, or when
+            the recovered point is not strictly feasible but the Phase I dual value is
+            not positive (as for a feasible set with empty interior).
          NewtonStepError
             Propagated unchanged from the Phase I solve under
             ``on_infeasible="continue"``.
          BacktrackingLineSearchError
             Propagated unchanged from the Phase I solve under
             ``on_infeasible="continue"``.
+         InteriorPointMethodError
+            Propagated unchanged from the Phase I solve when it was not caused by a
+            breakdown (a recession ray, say, which ``_solve_phase1_from`` handles), or
+            under ``on_infeasible="continue"``.
          ProblemCertifiablyInfeasibleError
-            When the recovered point is not strictly feasible for ``problem``; also
-            propagated unchanged when the inner solve raises it.
+            When the recovered point is not strictly feasible for ``problem`` and the
+            Phase I dual value is positive; also propagated unchanged when the inner
+            solve raises it.
          ValueError
             Propagated unchanged from the inner solve, for a problem the solver cannot
             represent.
@@ -606,10 +728,17 @@ class Solver(ABC):
         claim a certificate: the marginal variant says the problem may be infeasible
         without proving it.
 
-        The ``SolveResult`` that exception carries exists to satisfy its contract and
-        holds the Phase I seed, not a computed point, since the numerical exceptions
-        carry no iterate to attach. Its ``solution`` is not a minimum-violation answer,
-        and it has no ``objective``.
+        The primal-dual solver raises the breakdown bare. The barrier engine wraps it
+        as ``InteriorPointMethodError`` from ``CenteringStepError`` from the breakdown,
+        so a barrier failure is converted when its cause chain reaches a breakdown
+        before any recession ray (``_numerical_breakdown``; issue #72). A flat ray
+        must reach ``_solve_phase1_from``, which retries it inside a box.
+
+        The ``SolveResult`` that exception carries exists to satisfy its contract. For
+        a bare breakdown it holds the Phase I seed, not a computed point, since the
+        numerical exceptions carry no iterate to attach; for a barrier failure, the
+        last Phase I iterate. Either way its ``solution`` is not a minimum-violation
+        answer, and it has no ``objective``.
 
         That is also why the conversion does not apply under
         ``on_infeasible="continue"``: there the caller has asked for a best-effort point
@@ -653,7 +782,18 @@ class Solver(ABC):
             )
         try:
             result = self.solve(transformed, x0_phase1, on_infeasible=on_infeasible)
-        except (NewtonStepError, BacktrackingLineSearchError) as e:
+        except (
+            NewtonStepError,
+            BacktrackingLineSearchError,
+            InteriorPointMethodError,
+        ) as e:
+            breakdown = (
+                _numerical_breakdown(e)
+                if isinstance(e, InteriorPointMethodError)
+                else e
+            )
+            if breakdown is None:
+                raise
             if on_infeasible != "raise":
                 # The caller asked to continue to a best-effort point, and Phase
                 # I has none to give: these exceptions carry only a message, no
@@ -665,18 +805,34 @@ class Solver(ABC):
                 # point nobody computed.
                 raise
 
+            last = (
+                np.asarray(e.last_iterate)
+                if isinstance(e, InteriorPointMethodError)
+                else None
+            )
+            if last is not None and (
+                last.size != np.asarray(x0_phase1).size or not np.all(np.isfinite(last))
+            ):
+                last = None
             raise ProblemMarginallyFeasibleError(
                 message=(
                     "Phase I could not find a feasible point: the solve broke down "
-                    f"numerically ({type(e).__name__}: {e}). The problem may be "
-                    "infeasible, or feasible by too thin a margin to locate."
+                    f"numerically ({type(breakdown).__name__}: {breakdown}). The "
+                    "problem may be infeasible, or feasible by too thin a margin to "
+                    "locate."
                 ),
                 result=SolveResult(
-                    solution=np.asarray(x0_phase1)[: problem.dimension],
+                    solution=(np.asarray(x0_phase1) if last is None else last)[
+                        : problem.dimension
+                    ],
                     status=SolveStatus.INFEASIBLE,
                     message=(
                         "Phase I broke down numerically; this result carries the "
-                        "Phase I seed, not a computed point."
+                        + (
+                            "Phase I seed, not a computed point."
+                            if last is None
+                            else "last Phase I iterate, not a minimum-violation point."
+                        )
                     ),
                     solver=type(self).__name__,
                     n_iterations=0,
@@ -696,11 +852,27 @@ class Solver(ABC):
             # none_throws so a violated invariant fails loudly at the source
             # rather than embedding nan in the infeasibility message.
             dual_value = none_throws(none_throws(result.objective).dual_value)
-            raise ProblemCertifiablyInfeasibleError(
+            # Only a strictly positive dual value bounds the minimal slack away
+            # from zero and so proves infeasibility. Otherwise the slack's optimum
+            # may be zero: a feasible set with empty interior (an equality written
+            # as two opposed inequalities, issue #57) ends exactly here, with the
+            # slack a hair above zero and the dual a hair below. That is the
+            # barrier engine's marginal verdict too.
+            if dual_value > 0.0:
+                raise ProblemCertifiablyInfeasibleError(
+                    message=(
+                        "Phase I converged but the recovered point is not strictly "
+                        "feasible for the original problem; the problem is "
+                        f"infeasible (Phase I dual value: {dual_value:.3e} > 0)."
+                    ),
+                    result=result,
+                )
+            raise ProblemMarginallyFeasibleError(
                 message=(
                     "Phase I converged but the recovered point is not strictly "
-                    "feasible for the original problem; the problem is infeasible."
-                    f" (Phase I dual value: {dual_value:.3e})."
+                    "feasible for the original problem. The dual value "
+                    f"{dual_value:.3e} does not certify infeasibility: the problem "
+                    "may be infeasible, or feasible with an empty interior."
                 ),
                 result=result,
             )

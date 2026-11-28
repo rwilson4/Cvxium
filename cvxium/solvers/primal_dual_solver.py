@@ -104,6 +104,11 @@ if TYPE_CHECKING:
 # step with a residual line search.
 
 
+# Initial damping after a singular modified Hessian in the no-equality MPC step,
+# relative to the usual initial damping (see ``PrimalDualSolver._mpc_solve_step``).
+_SINGULAR_DAMPING: float = 1e-8
+
+
 # The unit dual start is rescaled when its constraint force ‖G^T 1‖ and the
 # objective's ‖∇f0‖ differ by more than this factor either way (see
 # ``PrimalDualSolver._central_path_duals``). A heuristic threshold: a ratio of 0.04
@@ -1760,6 +1765,8 @@ class PrimalDualSolver(Solver):
         Tries the step at the incoming ``damping`` (0 on a healthy iterate, giving the
         undamped step). When no feasible step exists (``_feasible_step`` returns
         ``None``), it grows the damping and re-solves, up to ``lm.max_attempts`` times.
+        A singular modified Hessian (``NewtonStepError``) also grows the damping, from
+        zero to ``_SINGULAR_DAMPING`` times the usual initial damping.
         After a damped success, the ratio
            ρ = (‖r_t‖ - ‖r_t(trial)‖) / (‖r_t‖ - ‖r_t(model)‖),
         with r_t = (r_dual, r_cent) at the fixed t, decides how far ``_relax_damping``
@@ -1806,17 +1813,36 @@ class PrimalDualSolver(Solver):
         ------
          NewtonStepError
             When no feasible step is found after ``lm.max_attempts`` attempts; also
-            propagated from ``_build_pd_solve``.
+            propagated from ``_build_pd_solve`` when damping cannot be engaged.
 
         """
         gamma = mehrotra_boundary_factor(eta, lmbda.size, tau_min)
         x_scale = max(1.0, float(np.linalg.norm(x)))
         r_norm0 = float(np.sqrt(np.dot(r_dual, r_dual) + np.dot(r_cent, r_cent)))
         for attempt in range(lm.max_attempts):
-            wrapped = self._build_pd_solve(problem, x, lmbda, f, damping)
-            dx, dlam, sigma, r_cent_cor = self._mpc_direction(
-                problem, x, lmbda, f, r_dual, eta, wrapped
-            )
+            try:
+                wrapped = self._build_pd_solve(problem, x, lmbda, f, damping)
+                dx, dlam, sigma, r_cent_cor = self._mpc_direction(
+                    problem, x, lmbda, f, r_dual, eta, wrapped
+                )
+            except NewtonStepError:
+                # A singular modified Hessian, as in the equality path. From zero,
+                # start far below the usual initial damping: the common cause is a
+                # lineality space (issue #71), free variables the constraints do not
+                # pin down, where the system is consistent and a tiny damping
+                # recovers the minimum-norm Newton step. Growth from there follows
+                # the schedule.
+                damping = (
+                    damping * lm.grow
+                    if damping > 0.0
+                    else _SINGULAR_DAMPING
+                    * self._grow_damping(
+                        problem, x, lmbda, f, r_dual, r_cent, 0.0, x_scale, lm
+                    )
+                )
+                if not damping > 0.0:
+                    raise
+                continue
             step = self._feasible_step(
                 problem, x, f, dx, lmbda, dlam, gamma, beta, min_step
             )

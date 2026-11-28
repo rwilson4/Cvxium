@@ -43,6 +43,10 @@ from cvxium.solvers.barrier_solver import (
 from cvxium.solvers.line_search import (
     fraction_to_boundary,
 )
+from cvxium.solvers.optimization import (
+    ProblemCertifiablyInfeasibleError,
+    ProblemMarginallyFeasibleError,
+)
 from cvxium.solvers.primal_dual_solver import (
     PrimalDualSolver,
     _clamp_dual_after_update,
@@ -1962,3 +1966,51 @@ class PrimalDualCertificationTest(unittest.TestCase):
 
         self.assertIs(result.status, SolveStatus.MAX_ITERATIONS, result.message)
         self.assertIn("Optimality was not certified", result.message)
+
+
+class EmptyInteriorPhase1Test(unittest.TestCase):
+    """Phase I on a feasible set with no interior is marginal, not certified.
+
+    Issue #57: an equality g'x = 1 written as two opposed inequalities leaves a
+    nonempty feasible set with no strictly feasible point. Phase I drives the slack
+    to (just above) zero with a dual value (just below) zero, which does not prove
+    infeasibility; the primal-dual solver once certified it anyway.
+    """
+
+    @staticmethod
+    def _problem(gap: float) -> Problem:
+        """Bounds plus g'x <= 1, -g'x <= -1 - gap and three loose rows."""
+        n = 5
+        rng = np.random.default_rng(0)
+        g = rng.uniform(0.5, 1.5, n)
+        A = np.vstack([g, -g, rng.standard_normal((3, n))])
+        h = np.r_[1.0, -1.0 - gap, 10.0, 10.0, 10.0]
+        return Problem.minimize(
+            QuadraticObjective(
+                c=-np.ones(n), hessian_contribution=DiagonalSystem(np.ones(n))
+            )
+        ).subject_to(
+            ineq=[
+                BoundsConstraintLayer(lb=0.0, dimension=n),
+                LinearInequalityConstraintLayer(A, cu=h),
+            ]
+        )
+
+    @parameterized.expand(
+        [("barrier", BarrierSolver), ("primal_dual", PrimalDualSolver)]
+    )
+    def test_empty_interior_is_marginal(
+        self, _name: str, solver: type[BarrierSolver] | type[PrimalDualSolver]
+    ) -> None:
+        with self.assertRaises(ProblemMarginallyFeasibleError) as ctx:
+            self._problem(gap=0.0).solve(solver=solver())
+        self.assertNotIsInstance(ctx.exception, ProblemCertifiablyInfeasibleError)
+
+    @parameterized.expand(
+        [("barrier", BarrierSolver), ("primal_dual", PrimalDualSolver)]
+    )
+    def test_a_thin_gap_is_still_certified(
+        self, _name: str, solver: type[BarrierSolver] | type[PrimalDualSolver]
+    ) -> None:
+        with self.assertRaises(ProblemCertifiablyInfeasibleError):
+            self._problem(gap=1e-5).solve(solver=solver())
